@@ -1,0 +1,6 @@
+This project was independently designed after evaluating the MIT-licensed
+Adancurusul/embedded-debugger-mcp project. No source code from that project is
+included in this initial implementation. Its dual-backend direction, path
+guards, and bounded target access informed the architectural review recorded in
+docs/decisions/0001-cli-first-control-plane.md.
+

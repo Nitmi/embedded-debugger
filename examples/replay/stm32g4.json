@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "probe": {
+    "id": "replay:stlink-v3:0039002A3432510433343034",
+    "vendor_id": 1155,
+    "product_id": 14155,
+    "serial": "0039002A3432510433343034",
+    "product": "ST-LINK/V3",
+    "interface": null,
+    "probe_type": "ST-Link",
+    "accessible": true
+  },
+  "target": {
+    "name": "STM32G431CBTx",
+    "architecture": "armv7em",
+    "core_count": 1
+  },
+  "capabilities": {
+    "flash": true,
+    "verify": true,
+    "halt": true,
+    "run": true,
+    "reset": true,
+    "step": true,
+    "register_read": true,
+    "memory_read": true,
+    "memory_write": false,
+    "hardware_breakpoints": 6,
+    "rtt": true,
+    "trace": false
+  },
+  "initial_core": {
+    "state": "halted",
+    "pc": "0x08001234",
+    "sp": "0x20007F00",
+    "registers": {
+      "lr": "0x08001001",
+      "xpsr": "0x21000000"
+    },
+    "halt_reason": "breakpoint"
+  },
+  "after_reset_core": {
+    "state": "running",
+    "pc": "0x08000100",
+    "sp": "0x20008000",
+    "registers": {
+      "lr": "0xFFFFFFFF",
+      "xpsr": "0x01000000"
+    },
+    "halt_reason": null
+  },
+  "flash": {
+    "base_address": "0x08000000",
+    "expected_firmware_sha256": null,
+    "verify_success": true
+  }
+}
