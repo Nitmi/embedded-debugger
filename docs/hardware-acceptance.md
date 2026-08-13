@@ -79,9 +79,27 @@ Partially run on 2026-08-13 with probe-rs 0.32.0 on Windows:
 - After the reset/resume workflow, `COM16` again emitted seven `Z` bytes in
   three seconds at 115200 baud with DTR and RTS false. No bytes were sent, and
   the observable firmware behavior matched the pre-write baseline.
+- The cross-page case used the device's original 32 bytes at `0x00000FF0`,
+  SHA-256
+  `70954de6e5d07d1ea9da686ccddf5c2da794352d7489b6e6b1bbb74807c7b5f6`.
+  Its exact confirmed plan
+  `e89c3c3fc1fb7726019bfb836eb004a78e48dd953e6c8ca36df7257eb588230b`
+  crossed the `0x00001000` page boundary and affected exactly
+  `0x00000000 + 8192` bytes.
+- The cross-page run programmed and independently verified all 32 image bytes,
+  captured the same post-reset `PC`, `SP`, and `LR`, resumed the target, and
+  published a complete evidence bundle with SHA-256
+  `59ca691efbe6148fe47c4c8f68441f724b9a218c4bb128d0a7ebbaee3ada1b61`.
+- Two independent pre-write reads and the post-write read of both affected
+  pages all produced SHA-256
+  `95c1421ef611f952759935ffbdc474ae42fd8f20e386b453bb51f5d9a5260121`.
+  The prefix outside the image, the 32-byte cross-page image, and the suffix
+  outside the image each matched byte for byte. Code Flash, UICR, and the
+  seven-`Z` serial runtime baseline also remained unchanged.
 
 The nRF single-page guarded write, read-back verification, post-reset snapshot,
 page preservation, evidence inspection, backup comparison, and observable
-runtime checks passed. The first 4096-byte Flash page was physically erased and
-reprogrammed, but its final byte content is identical to the write-before
-baseline. The cross-sector and unplugged-probe cases remain pending.
+runtime checks passed. The cross-page case also passed across two adjacent
+4096-byte pages. The affected pages were physically erased and reprogrammed,
+but their final byte content is identical to the write-before baselines. Only
+the unplugged-probe case remains pending from this checklist.
