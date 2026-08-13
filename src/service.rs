@@ -15,8 +15,9 @@ use crate::{
     backend::DebugBackend,
     error::{DebugError, ErrorCode, Result},
     model::{
-        Address, ArtifactReference, EvidenceBundle, FirmwareInfo, FlashExecution, FlashPlan,
-        FlashPolicy, FlashRange, OperationRecord, PlannedAction, ProbeInfo, ProbeTestReport,
+        Address, ArtifactReference, DebugControlEffects, EvidenceBundle, FirmwareInfo,
+        FlashExecution, FlashPlan, FlashPolicy, FlashRange, OperationRecord, PlannedAction,
+        ProbeInfo, ProbeTestReport, SnapshotCaptureReport, validate_core_inventory,
     },
 };
 
@@ -80,7 +81,91 @@ impl<B: DebugBackend> DebugService<B> {
         Ok(ProbeTestReport {
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
+            effects: debug_control_effects(&self.backend, false),
             operations,
+            complete: true,
+        })
+    }
+
+    pub fn capture_snapshot(
+        &mut self,
+        probe_id: &str,
+        target: &str,
+    ) -> Result<SnapshotCaptureReport> {
+        let target_info = self.backend.target().clone();
+        if !self.backend.matches_target(target) {
+            return Err(DebugError::unavailable(
+                ErrorCode::TargetUnavailable,
+                "requested target is not available from the selected backend",
+                json!({"requested": target, "available": target_info.name}),
+            ));
+        }
+        let capabilities = self.backend.capabilities();
+        let required_capabilities = [
+            ("halt", capabilities.halt),
+            ("run", capabilities.run),
+            ("register_read", capabilities.register_read),
+        ];
+        if let Some((capability, _)) = required_capabilities
+            .iter()
+            .find(|(_, available)| !available)
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "selected backend cannot capture a state-preserving core snapshot",
+                6,
+                json!({"backend": self.backend.name(), "capability": capability}),
+            ));
+        }
+
+        let probe = select_probe(&self.backend.list_probes()?, Some(probe_id))?;
+        let session = self.backend.attach(&probe.id, &target_info.name)?;
+        let capture_result = self.backend.capture_live_snapshot(&session);
+        let captured_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let disconnect_result = self.backend.disconnect(&session);
+        let cores = match (capture_result, disconnect_result) {
+            (Err(error), Err(cleanup_error)) => {
+                return Err(with_cleanup_failure(error, cleanup_error));
+            }
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+            (Ok(cores), Ok(())) => cores,
+        };
+        if !cores.iter().any(|core| core.available) {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "no target core was enabled for snapshot capture",
+                6,
+                json!({"target": target_info.name, "cores": cores}),
+            ));
+        }
+        if let Err(problem) = validate_core_inventory(&target_info, &cores) {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned an invalid core snapshot inventory",
+                6,
+                json!({
+                    "problem": problem,
+                    "cores": cores,
+                }),
+            ));
+        }
+
+        Ok(SnapshotCaptureReport {
+            capture_id: format!("cap_{}", Uuid::new_v4().simple()),
+            captured_at,
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            session,
+            effects: debug_control_effects(&self.backend, true),
+            cores,
+            operations: vec![
+                operation(1, "session.attach"),
+                operation(2, "target.capture_original_core_states"),
+                operation(3, "target.halt_running_cores"),
+                operation(4, "snapshot.capture_all_cores"),
+                operation(5, "target.restore_original_core_states"),
+                operation(6, "session.disconnect"),
+            ],
             complete: true,
         })
     }
@@ -318,6 +403,21 @@ impl<B: DebugBackend> DebugService<B> {
                 })
             }
         }
+    }
+}
+
+fn debug_control_effects<B: DebugBackend>(
+    backend: &B,
+    core_execution_state_restoration_verified: bool,
+) -> DebugControlEffects {
+    let volatile_target_state_notes = backend.volatile_target_state_notes();
+    DebugControlEffects {
+        reset_requested: false,
+        flash_operation_requested: false,
+        arbitrary_memory_write_requested: false,
+        core_execution_state_restoration_verified,
+        backend_may_modify_volatile_target_state: !volatile_target_state_notes.is_empty(),
+        volatile_target_state_notes,
     }
 }
 
@@ -640,6 +740,60 @@ mod tests {
         assert!(first.complete);
         assert!(second.complete);
         assert_eq!(first.operations[1].operation, "session.disconnect");
+    }
+
+    #[test]
+    fn live_snapshot_restores_state_and_can_be_repeated() {
+        let mut replay = fixture();
+        replay.initial_core.captured_state = crate::model::CoreState::Running;
+        replay.initial_core.state = crate::model::CoreState::Running;
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let first = service.capture_snapshot(&probe_id, &target).unwrap();
+        let second = service.capture_snapshot(&probe_id, &target).unwrap();
+
+        assert!(first.complete);
+        assert!(second.complete);
+        assert_eq!(first.cores.len(), 1);
+        assert_eq!(first.cores[0].index, 0);
+        assert_eq!(first.cores[0].name, "core0");
+        assert_eq!(
+            first.cores[0].original_state,
+            Some(crate::model::CoreState::Running)
+        );
+        assert_eq!(
+            first.cores[0].snapshot.as_ref().unwrap().captured_state,
+            crate::model::CoreState::Halted
+        );
+        assert_eq!(
+            first.cores[0].snapshot.as_ref().unwrap().halt_reason,
+            Some("request".to_string())
+        );
+        assert_eq!(
+            first.cores[0].snapshot.as_ref().unwrap().state,
+            crate::model::CoreState::Running
+        );
+        assert_eq!(
+            first.operations.last().unwrap().operation,
+            "session.disconnect"
+        );
+    }
+
+    #[test]
+    fn live_snapshot_requires_state_restoration_capabilities() {
+        let replay = fixture();
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut without_run = replay;
+        without_run.capabilities.run = false;
+        let mut service = DebugService::new(ReplayBackend::new(without_run));
+
+        let error = service.capture_snapshot(&probe_id, &target).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(error.details["capability"], "run");
     }
 
     #[test]

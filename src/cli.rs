@@ -119,7 +119,17 @@ pub enum ReplayCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum SnapshotCommand {
+    Capture(SnapshotSelection),
     Inspect { evidence: PathBuf },
+}
+
+#[derive(Debug, Args)]
+pub struct SnapshotSelection {
+    #[arg(long, help = "exact probe selector from probes list")]
+    pub probe: String,
+
+    #[arg(long, help = "exact target name")]
+    pub target: String,
 }
 
 #[derive(Debug)]
@@ -160,7 +170,12 @@ impl Cli {
                 command: FlashCommand::Execute(_),
             } => "flash.execute",
             Command::Replay { .. } => "replay.validate",
-            Command::Snapshot { .. } => "snapshot.inspect",
+            Command::Snapshot {
+                command: SnapshotCommand::Capture(_),
+            } => "snapshot.capture",
+            Command::Snapshot {
+                command: SnapshotCommand::Inspect { .. },
+            } => "snapshot.inspect",
         }
     }
 }
@@ -192,6 +207,9 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                 ),
             ))
         }
+        Command::Snapshot {
+            command: SnapshotCommand::Capture(selection),
+        } => capture_snapshot(cli, selection),
         Command::Probes {
             command: ProbeCommand::List,
         } => list_probes(cli),
@@ -363,15 +381,80 @@ fn test_probe(cli: &Cli, selection: &ProbeTestSelection) -> Result<CommandResult
         BackendArg::Openocd => return Err(unsupported_openocd("probe_connection_test")),
     };
     let human = format!(
-        "Connected and disconnected {} on {}\nTarget: {} ({} core(s), {})\nRisk: {}",
+        "Connected and disconnected {} on {}\nTarget: {} ({} core(s), {})\nRisk: {}\nEffects: {}",
         report.session.probe.id,
         report.session.backend,
         report.session.target.name,
         report.session.target.core_count,
         report.session.target.architecture,
-        report.risk
+        report.risk,
+        describe_debug_control_effects(&report.effects)
     );
     Ok(CommandResult::serializable("probes.test", &report, human))
+}
+
+fn capture_snapshot(cli: &Cli, selection: &SnapshotSelection) -> Result<CommandResult> {
+    let report = match cli.backend {
+        BackendArg::Replay => {
+            let mut service =
+                DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
+            service.capture_snapshot(&selection.probe, &selection.target)?
+        }
+        BackendArg::ProbeRs => {
+            let backend = ProbeRsBackend::new(&selection.target)?;
+            let mut service = DebugService::new(backend);
+            service.capture_snapshot(&selection.probe, &selection.target)?
+        }
+        BackendArg::Openocd => return Err(unsupported_openocd("multi_core_snapshot")),
+    };
+    let core_lines = report
+        .cores
+        .iter()
+        .map(|core| match &core.snapshot {
+            Some(snapshot) => format!(
+                "core {} ({}, {}): original={:?}, captured={:?}, restored={:?}, PC={}, SP={}",
+                core.index,
+                core.name,
+                core.architecture,
+                core.original_state
+                    .expect("available cores always contain an original state"),
+                snapshot.captured_state,
+                snapshot.state,
+                snapshot.pc,
+                snapshot.sp
+            ),
+            None => format!(
+                "core {} ({}, {}): unavailable ({})",
+                core.index,
+                core.name,
+                core.architecture,
+                core.unavailable_reason.as_deref().unwrap_or("unknown")
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let available_cores = report.cores.iter().filter(|core| core.available).count();
+    let human = format!(
+        "Observed {} described core(s), {} available on {}\n{}\nRisk: {}\nEffects: {}",
+        report.cores.len(),
+        available_cores,
+        report.session.target.name,
+        core_lines,
+        report.risk,
+        describe_debug_control_effects(&report.effects)
+    );
+    Ok(CommandResult::serializable(
+        "snapshot.capture",
+        &report,
+        human,
+    ))
+}
+
+fn describe_debug_control_effects(effects: &crate::model::DebugControlEffects) -> String {
+    if effects.volatile_target_state_notes.is_empty() {
+        return "no backend-managed volatile target changes declared".to_string();
+    }
+    effects.volatile_target_state_notes.join("; ")
 }
 
 fn replay_fixture_path(cli: &Cli) -> Result<&std::path::Path> {

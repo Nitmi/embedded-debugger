@@ -71,11 +71,69 @@ fn replay_probe_test_reports_a_complete_session_lifecycle() {
     assert_eq!(result["data"]["risk"], "R1_REVERSIBLE_CONTROL");
     assert_eq!(result["data"]["complete"], true);
     assert_eq!(
+        result["data"]["effects"]["flash_operation_requested"],
+        false
+    );
+    assert_eq!(
+        result["data"]["effects"]["backend_may_modify_volatile_target_state"],
+        false
+    );
+    assert_eq!(
+        result["data"]["effects"]["volatile_target_state_notes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
         result["data"]["operations"][0]["operation"],
         "session.attach"
     );
     assert_eq!(
         result["data"]["operations"][1]["operation"],
+        "session.disconnect"
+    );
+}
+
+#[test]
+fn replay_snapshot_capture_reports_named_cores_and_restoration() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "snapshot",
+            "capture",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "snapshot.capture");
+    assert_eq!(result["data"]["risk"], "R1_REVERSIBLE_CONTROL");
+    assert_eq!(result["data"]["complete"], true);
+    assert_eq!(
+        result["data"]["effects"]["core_execution_state_restoration_verified"],
+        true
+    );
+    assert_eq!(result["data"]["cores"].as_array().unwrap().len(), 1);
+    assert_eq!(result["data"]["cores"][0]["index"], 0);
+    assert_eq!(result["data"]["cores"][0]["name"], "core0");
+    assert_eq!(result["data"]["cores"][0]["original_state"], "halted");
+    assert_eq!(
+        result["data"]["cores"][0]["snapshot"]["captured_state"],
+        "halted"
+    );
+    assert_eq!(
+        result["data"]["operations"][5]["operation"],
         "session.disconnect"
     );
 }

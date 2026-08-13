@@ -4,8 +4,8 @@ pub mod replay;
 use crate::{
     error::Result,
     model::{
-        Address, Capabilities, CoreSnapshot, FlashLayout, FlashReport, ProbeInfo, SessionInfo,
-        TargetInfo,
+        Address, Capabilities, CoreObservation, CoreSnapshot, FlashLayout, FlashReport, ProbeInfo,
+        SessionInfo, TargetInfo,
     },
 };
 
@@ -19,6 +19,7 @@ pub trait DebugBackend {
     fn probe_identity_is_stable(&self, _probe: &ProbeInfo) -> bool {
         true
     }
+    fn volatile_target_state_notes(&self) -> Vec<String>;
     fn capabilities(&self) -> &Capabilities;
     fn plan_flash_ranges(
         &self,
@@ -36,5 +37,6 @@ pub trait DebugBackend {
     fn verify(&mut self, session: &SessionInfo, firmware_sha256: &str) -> Result<bool>;
     fn reset(&mut self, session: &SessionInfo) -> Result<()>;
     fn snapshot(&mut self, session: &SessionInfo) -> Result<CoreSnapshot>;
+    fn capture_live_snapshot(&mut self, session: &SessionInfo) -> Result<Vec<CoreObservation>>;
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()>;
 }

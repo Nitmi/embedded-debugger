@@ -9,8 +9,8 @@ use crate::{
     backend::DebugBackend,
     error::{DebugError, ErrorCode, Result},
     model::{
-        Address, Capabilities, CoreSnapshot, FlashLayout, FlashRange, FlashReport, ProbeInfo,
-        SessionInfo, TargetInfo,
+        Address, Capabilities, CoreObservation, CoreSnapshot, FlashLayout, FlashRange, FlashReport,
+        ProbeInfo, SessionInfo, TargetInfo, validate_core_inventory,
     },
 };
 
@@ -37,6 +37,8 @@ pub struct ReplayFixture {
     pub capabilities: Capabilities,
     pub initial_core: CoreSnapshot,
     pub after_reset_core: CoreSnapshot,
+    #[serde(default)]
+    pub live_cores: Vec<CoreObservation>,
     pub flash: ReplayFlashBehavior,
 }
 
@@ -95,6 +97,25 @@ impl ReplayFixture {
                 json!({"expected_firmware_sha256": expected}),
             ));
         }
+        if !self.live_cores.is_empty()
+            && let Err(problem) = validate_core_inventory(&self.target, &self.live_cores)
+        {
+            return Err(DebugError::fixture(
+                "replay live core inventory is invalid",
+                json!({"problem": problem}),
+            ));
+        }
+        if self.live_cores.is_empty()
+            && self.target.core_count > 1
+            && self.capabilities.halt
+            && self.capabilities.run
+            && self.capabilities.register_read
+        {
+            return Err(DebugError::fixture(
+                "multi-core replay snapshot capability requires live_cores evidence",
+                json!({"core_count": self.target.core_count}),
+            ));
+        }
         Ok(())
     }
 }
@@ -144,6 +165,10 @@ impl DebugBackend for ReplayBackend {
 
     fn target(&self) -> &TargetInfo {
         &self.fixture.target
+    }
+
+    fn volatile_target_state_notes(&self) -> Vec<String> {
+        Vec::new()
     }
 
     fn capabilities(&self) -> &Capabilities {
@@ -301,6 +326,46 @@ impl DebugBackend for ReplayBackend {
         } else {
             self.fixture.initial_core.clone()
         })
+    }
+
+    fn capture_live_snapshot(&mut self, session: &SessionInfo) -> Result<Vec<CoreObservation>> {
+        self.ensure_session(session)?;
+        if !self.fixture.capabilities.halt
+            || !self.fixture.capabilities.run
+            || !self.fixture.capabilities.register_read
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "replay fixture cannot capture a state-preserving core snapshot",
+                6,
+                json!({"required": ["halt", "run", "register_read"]}),
+            ));
+        }
+        if !self.fixture.live_cores.is_empty() {
+            return Ok(self.fixture.live_cores.clone());
+        }
+        if self.fixture.target.core_count != 1 {
+            return Err(DebugError::fixture(
+                "multi-core replay snapshots require explicit live_cores evidence",
+                json!({"core_count": self.fixture.target.core_count}),
+            ));
+        }
+        let original_state = self.fixture.initial_core.state;
+        let mut snapshot = self.fixture.initial_core.clone();
+        snapshot.captured_state = crate::model::CoreState::Halted;
+        snapshot.state = original_state;
+        if original_state == crate::model::CoreState::Running {
+            snapshot.halt_reason = Some("request".to_string());
+        }
+        Ok(vec![CoreObservation {
+            index: 0,
+            name: "core0".to_string(),
+            architecture: self.fixture.target.architecture.clone(),
+            available: true,
+            original_state: Some(original_state),
+            snapshot: Some(snapshot),
+            unavailable_reason: None,
+        }])
     }
 
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()> {

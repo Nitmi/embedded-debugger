@@ -142,6 +142,98 @@ pub struct CoreSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreObservation {
+    pub index: u32,
+    pub name: String,
+    pub architecture: String,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_state: Option<CoreState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<CoreSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+pub fn validate_core_inventory(
+    target: &TargetInfo,
+    cores: &[CoreObservation],
+) -> std::result::Result<(), String> {
+    if cores.len() != target.core_count as usize {
+        return Err(format!(
+            "expected {} core entries, received {}",
+            target.core_count,
+            cores.len()
+        ));
+    }
+    let indexes = cores
+        .iter()
+        .map(|core| core.index)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_indexes = (0..target.core_count).collect::<std::collections::BTreeSet<_>>();
+    if indexes != expected_indexes {
+        return Err(format!(
+            "core indexes must be exactly 0..{}, received {indexes:?}",
+            target.core_count
+        ));
+    }
+
+    for core in cores {
+        if core.available {
+            let original = core
+                .original_state
+                .ok_or_else(|| format!("available core {} has no original state", core.index))?;
+            let snapshot = core
+                .snapshot
+                .as_ref()
+                .ok_or_else(|| format!("available core {} has no snapshot", core.index))?;
+            if original == CoreState::Unknown {
+                return Err(format!(
+                    "available core {} has an unknown original state",
+                    core.index
+                ));
+            }
+            if snapshot.captured_state != CoreState::Halted {
+                return Err(format!(
+                    "core {} registers were not captured while halted",
+                    core.index
+                ));
+            }
+            if snapshot.state != original {
+                return Err(format!(
+                    "core {} was restored as {:?}, expected {:?}",
+                    core.index, snapshot.state, original
+                ));
+            }
+            if core.unavailable_reason.is_some() {
+                return Err(format!(
+                    "available core {} has an unavailable reason",
+                    core.index
+                ));
+            }
+        } else {
+            if core.original_state.is_some() || core.snapshot.is_some() {
+                return Err(format!(
+                    "unavailable core {} contains captured state",
+                    core.index
+                ));
+            }
+            if !core
+                .unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+            {
+                return Err(format!("unavailable core {} has no reason", core.index));
+            }
+        }
+    }
+    if !cores.iter().any(|core| core.available) {
+        return Err("no target core is available".to_string());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session_id: String,
     pub backend: String,
@@ -151,9 +243,32 @@ pub struct SessionInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugControlEffects {
+    pub reset_requested: bool,
+    pub flash_operation_requested: bool,
+    pub arbitrary_memory_write_requested: bool,
+    pub core_execution_state_restoration_verified: bool,
+    pub backend_may_modify_volatile_target_state: bool,
+    pub volatile_target_state_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeTestReport {
     pub risk: String,
     pub session: SessionInfo,
+    pub effects: DebugControlEffects,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotCaptureReport {
+    pub capture_id: String,
+    pub captured_at: String,
+    pub risk: String,
+    pub session: SessionInfo,
+    pub effects: DebugControlEffects,
+    pub cores: Vec<CoreObservation>,
     pub operations: Vec<OperationRecord>,
     pub complete: bool,
 }
@@ -294,5 +409,49 @@ mod tests {
     fn address_accepts_integer_fixture_values() {
         let address: Address = serde_json::from_str("536870912").unwrap();
         assert_eq!(address.to_string(), "0x20000000");
+    }
+
+    #[test]
+    fn core_inventory_requires_state_restoration() {
+        let target = TargetInfo {
+            name: "dual".to_string(),
+            architecture: "test".to_string(),
+            core_count: 2,
+        };
+        let mut cores = vec![
+            CoreObservation {
+                index: 0,
+                name: "cpu0".to_string(),
+                architecture: "test".to_string(),
+                available: true,
+                original_state: Some(CoreState::Running),
+                snapshot: Some(CoreSnapshot {
+                    captured_state: CoreState::Halted,
+                    state: CoreState::Running,
+                    pc: Address(1),
+                    sp: Address(2),
+                    registers: BTreeMap::new(),
+                    halt_reason: Some("request".to_string()),
+                }),
+                unavailable_reason: None,
+            },
+            CoreObservation {
+                index: 1,
+                name: "cpu1".to_string(),
+                architecture: "test".to_string(),
+                available: false,
+                original_state: None,
+                snapshot: None,
+                unavailable_reason: Some("disabled".to_string()),
+            },
+        ];
+
+        assert!(validate_core_inventory(&target, &cores).is_ok());
+        cores[0].snapshot.as_mut().unwrap().state = CoreState::Halted;
+        assert!(
+            validate_core_inventory(&target, &cores)
+                .unwrap_err()
+                .contains("restored")
+        );
     }
 }

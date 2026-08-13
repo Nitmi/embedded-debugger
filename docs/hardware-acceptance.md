@@ -41,13 +41,25 @@ Partially run on 2026-08-13 with probe-rs 0.32.0 on Windows:
   required flash, verify, reset, halt/run, register-read, and memory-read
   capabilities.
 - ESP32-S3: native USB-JTAG `303a:1001:E0:72:A1:D4:1F:DC`, detected target
-  `esp32s3`. Product-level `probes test` completed attach and disconnect. Flash
-  and verify are discoverable, while reset/halt/run/register/memory operations
-  remain conservatively unavailable because the current workflow does not yet
-  define a safe multi-core post-flash snapshot.
+  `esp32s3`. Product-level `probes test` completed attach and disconnect.
+  State-preserving `snapshot capture` completed repeatedly: `cpu0` reported
+  `original_state=running`, `captured_state=halted`, `state=running`,
+  `PC=0x420969FE`, `SP=0x3FCDB5D0`, and `LR=0x4203DAF8`; `cpu1` was retained in
+  the inventory as unavailable with `Core 1 is not enabled.` Every run restored
+  core execution state and disconnected. This does not mean all volatile target
+  state was restored: probe-rs clears hardware breakpoints on attach, and its
+  ESP32-S3 sequence disables the super, timer-group 0/1, and RTC watchdogs. The
+  JSON `effects` field reports those R1 side effects. Flash and verify are
+  discoverable, but guarded flash remains blocked because raw-BIN ESP image
+  layout and system-reset/post-flash behavior have not yet passed a safe
+  plan-and-execute acceptance.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.
+- A second read-only ESP `COM3` monitor after live snapshot capture was also
+  silent. It provides no runtime liveness signal, so acceptance relies on the
+  debug interface's explicit original and restored core states rather than
+  treating serial silence as success or failure.
 - nRF Code Flash and UICR were backed up locally. The Code Flash HEX was
   verified against the connected device. Backup SHA-256 values are
   `058569c18e01e307babbf2fdc70d5dced4a4086fa0a5aee400a7839a4a3f9605`

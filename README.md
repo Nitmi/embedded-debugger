@@ -27,8 +27,8 @@ This command is read-only and does not require the standalone `probe-rs` CLI.
 The official probe-rs Espressif plugin is registered in-process, so native ESP
 USB-JTAG probes and Espressif targets are visible to the embedded library too.
 
-Test an exact probe/target connection without erasing, programming, resetting,
-halting, or reading target memory:
+Test an exact probe/target connection without requesting erase, program, reset,
+halt, snapshot, or arbitrary user memory access:
 
 ```console
 cargo run -- --backend probe-rs probes test \
@@ -37,6 +37,24 @@ cargo run -- --backend probe-rs probes test \
 
 The command performs one attach/disconnect lifecycle and reports the target's
 conservative capability matrix as `R1_REVERSIBLE_CONTROL`.
+
+Capture PC, SP, and LR from every enabled core while preserving each core's
+original running or halted state:
+
+```console
+cargo run -- --backend probe-rs snapshot capture \
+  --probe <vid:pid:serial> --target <exact-target> --json
+```
+
+This `R1_REVERSIBLE_CONTROL` command names every described core, explicitly
+reports disabled cores, and returns `original_state`, the halted
+`captured_state`, and the final restored `state`. It preserves the observed
+core execution state and does not request a reset,
+Flash operation, or arbitrary memory write. The structured `effects` field
+still reports backend-managed volatile target changes: probe-rs clears hardware
+breakpoints on attach, and some target debug sequences change control
+registers. On ESP32-S3, the current probe-rs sequence disables multiple
+watchdogs during attach/halt. This is why the command is R1 rather than R0.
 
 ## Build
 
@@ -123,10 +141,12 @@ backup comparison, and serial runtime checks. The same preservation guarantees
 also passed for a 32-byte image crossing two adjacent 4 KiB pages. Physical
 probe removal returns stable unavailable errors without selecting another
 connected probe or creating evidence. ESP32-S3 guarded flash remains
-intentionally blocked because the current post-flash snapshot contract is
-single-core. OpenOCD, ELF/HEX loading, RTT, persistent interactive debug
-sessions, multi-core post-flash snapshots, and non-boot NVM writes are not yet
-exposed. See
+intentionally blocked pending format-aware ESP image planning and a verified
+system-reset/post-flash policy. State-preserving multi-core live snapshots have
+passed on ESP32-S3: the enabled `cpu0` was observed as
+`running -> halted -> running`, while disabled `cpu1` was reported explicitly.
+OpenOCD, ELF/HEX/ESP-IDF loading, RTT, persistent interactive debug sessions,
+multi-core post-flash snapshots, and non-boot NVM writes are not yet exposed. See
 `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 

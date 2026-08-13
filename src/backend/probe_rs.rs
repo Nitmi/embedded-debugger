@@ -17,8 +17,8 @@ use crate::{
     backend::DebugBackend,
     error::{DebugError, ErrorCode, Result},
     model::{
-        Address, Capabilities, CoreSnapshot, CoreState, FlashLayout, FlashRange, FlashReport,
-        ProbeInfo, SessionInfo, TargetInfo,
+        Address, Capabilities, CoreObservation, CoreSnapshot, CoreState, FlashLayout, FlashRange,
+        FlashReport, ProbeInfo, SessionInfo, TargetInfo,
     },
 };
 
@@ -41,6 +41,7 @@ struct NativeSession {
     session: Session,
     programmed: Option<ProgrammedImage>,
     reset_halted: bool,
+    restore_before_disconnect: BTreeMap<usize, CoreState>,
 }
 
 pub struct ProbeRsBackend {
@@ -75,11 +76,11 @@ impl ProbeRsBackend {
         let capabilities = Capabilities {
             flash,
             verify: flash,
-            halt: single_core,
-            run: single_core,
+            halt: true,
+            run: true,
             reset: single_core,
             step: single_core,
-            register_read: single_core,
+            register_read: true,
             memory_read: single_core,
             memory_write: false,
             hardware_breakpoints: 0,
@@ -175,6 +176,21 @@ impl DebugBackend for ProbeRsBackend {
             .serial
             .as_deref()
             .is_some_and(|serial| !serial.is_empty())
+    }
+
+    fn volatile_target_state_notes(&self) -> Vec<String> {
+        let mut notes = vec![
+            "probe-rs session attach clears hardware breakpoints".to_string(),
+            "probe-rs target attach/halt sequences may modify volatile target control state"
+                .to_string(),
+        ];
+        if self.target_info.name.eq_ignore_ascii_case("esp32s3") {
+            notes.push(
+                "probe-rs ESP32-S3 attach/halt sequence disables super, timer-group 0/1, and RTC watchdogs"
+                    .to_string(),
+            );
+        }
+        notes
     }
 
     fn capabilities(&self) -> &Capabilities {
@@ -311,6 +327,7 @@ impl DebugBackend for ProbeRsBackend {
             session: native_session,
             programmed: None,
             reset_halted: false,
+            restore_before_disconnect: BTreeMap::new(),
         });
         Ok(info)
     }
@@ -454,18 +471,261 @@ impl DebugBackend for ProbeRsBackend {
         })
     }
 
+    fn capture_live_snapshot(&mut self, session: &SessionInfo) -> Result<Vec<CoreObservation>> {
+        let core_specs = self
+            .target
+            .cores
+            .iter()
+            .enumerate()
+            .map(|(index, core)| {
+                (
+                    index,
+                    core.name.clone(),
+                    format!("{:?}", core.core_type).to_ascii_lowercase(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let active = self.ensure_session_mut(session)?;
+        if active.reset_halted || !active.restore_before_disconnect.is_empty() {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "cannot start a live snapshot while core restoration is pending",
+                6,
+                json!({"session_id": session.session_id}),
+            ));
+        }
+
+        let mut disabled = BTreeMap::<usize, String>::new();
+        let mut original_states = BTreeMap::<usize, CoreState>::new();
+
+        // Observe every core before changing any core state. On coordinated
+        // multi-core firmware, halting one core can affect how another appears.
+        for (index, _, _) in &core_specs {
+            let state_result = match active.session.core(*index) {
+                Ok(mut core) => core.status(),
+                Err(error @ probe_rs::Error::CoreDisabled(_)) => {
+                    disabled.insert(*index, error.to_string());
+                    continue;
+                }
+                Err(error) => Err(error),
+            };
+            let original_status = match state_result {
+                Ok(state) => state,
+                Err(error) => {
+                    return Err(restore_after_capture_error(
+                        active,
+                        "read original core states for live snapshot",
+                        error,
+                    ));
+                }
+            };
+            let original_state = match live_core_state(*index, original_status) {
+                Ok(state) => state,
+                Err(error) => {
+                    return Err(restore_after_capture_error(
+                        active,
+                        "determine original core state for live snapshot",
+                        error,
+                    ));
+                }
+            };
+            original_states.insert(*index, original_state);
+            active
+                .restore_before_disconnect
+                .insert(*index, original_state);
+        }
+
+        for (index, _, _) in &core_specs {
+            if disabled.contains_key(index)
+                || original_states.get(index) == Some(&CoreState::Halted)
+            {
+                continue;
+            }
+
+            if let Err(error) = active
+                .session
+                .core(*index)
+                .and_then(|mut core| core.halt(CORE_OPERATION_TIMEOUT))
+            {
+                return Err(restore_after_capture_error(
+                    active,
+                    "halt running cores for live snapshot",
+                    error,
+                ));
+            }
+        }
+
+        let captured = (|| -> std::result::Result<Vec<CoreObservation>, probe_rs::Error> {
+            let mut observations = Vec::with_capacity(core_specs.len());
+            for (index, name, architecture) in &core_specs {
+                if let Some(reason) = disabled.get(index) {
+                    observations.push(CoreObservation {
+                        index: *index as u32,
+                        name: name.clone(),
+                        architecture: architecture.clone(),
+                        available: false,
+                        original_state: None,
+                        snapshot: None,
+                        unavailable_reason: Some(reason.clone()),
+                    });
+                    continue;
+                }
+
+                let mut core = active.session.core(*index)?;
+                let captured_status = core.status()?;
+                if live_core_state(*index, captured_status)? != CoreState::Halted {
+                    return Err(probe_rs::Error::GenericCoreError(format!(
+                        "core {index} was not halted when registers were captured"
+                    )));
+                }
+                let pc_id = core.program_counter().id();
+                let sp_id = core.stack_pointer().id();
+                let lr_id = core.return_address().id();
+                let pc = core.read_core_reg::<u64>(pc_id)?;
+                let sp = core.read_core_reg::<u64>(sp_id)?;
+                let lr = core.read_core_reg::<u64>(lr_id)?;
+                observations.push(CoreObservation {
+                    index: *index as u32,
+                    name: name.clone(),
+                    architecture: architecture.clone(),
+                    available: true,
+                    original_state: original_states.get(index).copied(),
+                    snapshot: Some(CoreSnapshot {
+                        captured_state: CoreState::Halted,
+                        state: CoreState::Unknown,
+                        pc: Address(pc),
+                        sp: Address(sp),
+                        registers: BTreeMap::from([("lr".to_string(), Address(lr))]),
+                        halt_reason: halt_reason(captured_status),
+                    }),
+                    unavailable_reason: None,
+                });
+            }
+            Ok(observations)
+        })();
+        let mut observations = match captured {
+            Ok(observations) => observations,
+            Err(error) => {
+                return Err(restore_after_capture_error(
+                    active,
+                    "read all cores for live snapshot",
+                    error,
+                ));
+            }
+        };
+
+        let restored_states = restore_pending_core_states(active)
+            .map_err(|error| map_core_error("restore core states after live snapshot", error))?;
+        for observation in observations.iter_mut().filter(|core| core.available) {
+            observation
+                .snapshot
+                .as_mut()
+                .expect("available cores always contain a snapshot")
+                .state = restored_states
+                .get(&(observation.index as usize))
+                .copied()
+                .expect("every available core has a restored state");
+        }
+        Ok(observations)
+    }
+
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()> {
         self.ensure_session(session)?;
-        let mut active = self.active.take().expect("active session was validated");
+        let active = self.active.as_mut().expect("active session was validated");
         if active.reset_halted {
             active
                 .session
                 .core(0)
                 .and_then(|mut core| core.run())
                 .map_err(|error| map_core_error("resume core before disconnect", error))?;
+            active.reset_halted = false;
         }
+        restore_pending_core_states(active)
+            .map_err(|error| map_core_error("restore core states before disconnect", error))?;
+        self.active.take();
         Ok(())
     }
+}
+
+impl Drop for ProbeRsBackend {
+    fn drop(&mut self) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if active.reset_halted
+            && active
+                .session
+                .core(0)
+                .and_then(|mut core| core.run())
+                .is_ok()
+        {
+            active.reset_halted = false;
+        }
+        let _ = restore_pending_core_states(active);
+    }
+}
+
+fn restore_pending_core_states(
+    active: &mut NativeSession,
+) -> std::result::Result<BTreeMap<usize, CoreState>, probe_rs::Error> {
+    let pending = std::mem::take(&mut active.restore_before_disconnect);
+    let mut restored = BTreeMap::new();
+    let mut failed = BTreeMap::new();
+    let mut first_error = None;
+    for (index, desired_state) in pending {
+        let result = (|| {
+            let mut core = active.session.core(index)?;
+            let current_state = live_core_state(index, core.status()?)?;
+            if current_state != desired_state {
+                match desired_state {
+                    CoreState::Running => core.run()?,
+                    CoreState::Halted => {
+                        core.halt(CORE_OPERATION_TIMEOUT)?;
+                    }
+                    CoreState::Unknown => {
+                        return Err(probe_rs::Error::GenericCoreError(format!(
+                            "cannot restore core {index} to an unknown state"
+                        )));
+                    }
+                }
+            }
+            let final_state = live_core_state(index, core.status()?)?;
+            if final_state != desired_state {
+                return Err(probe_rs::Error::GenericCoreError(format!(
+                    "core {index} restored as {final_state:?}, expected {desired_state:?}"
+                )));
+            }
+            Ok(final_state)
+        })();
+        match result {
+            Ok(final_state) => {
+                restored.insert(index, final_state);
+            }
+            Err(error) => {
+                failed.insert(index, desired_state);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    active.restore_before_disconnect = failed;
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(restored),
+    }
+}
+
+fn restore_after_capture_error(
+    active: &mut NativeSession,
+    operation: &str,
+    error: probe_rs::Error,
+) -> DebugError {
+    let primary = map_core_error(operation, error);
+    // A failed first restoration remains pending. `disconnect` retries it and
+    // reports a cleanup error only if that final attempt also fails.
+    let _ = restore_pending_core_states(active);
+    primary
 }
 
 fn select_flash_algorithm<'a>(
@@ -722,6 +982,22 @@ fn map_core_state(status: CoreStatus) -> CoreState {
     }
 }
 
+fn live_core_state(
+    index: usize,
+    status: CoreStatus,
+) -> std::result::Result<CoreState, probe_rs::Error> {
+    match status {
+        CoreStatus::Running | CoreStatus::Sleeping => Ok(CoreState::Running),
+        CoreStatus::Halted(_) => Ok(CoreState::Halted),
+        CoreStatus::LockedUp => Err(probe_rs::Error::GenericCoreError(format!(
+            "core {index} is locked up"
+        ))),
+        CoreStatus::Unknown => Err(probe_rs::Error::GenericCoreError(format!(
+            "core {index} reported an unknown state"
+        ))),
+    }
+}
+
 fn halt_reason(status: CoreStatus) -> Option<String> {
     let CoreStatus::Halted(reason) = status else {
         return None;
@@ -800,6 +1076,26 @@ mod tests {
 
         assert_eq!(backend.target().name, "esp32s3");
         assert_eq!(backend.target().core_count, 2);
+        assert!(
+            backend
+                .volatile_target_state_notes()
+                .iter()
+                .any(|note| note.contains("watchdogs"))
+        );
+    }
+
+    #[test]
+    fn live_snapshot_rejects_locked_up_and_unknown_states() {
+        assert!(live_core_state(0, CoreStatus::LockedUp).is_err());
+        assert!(live_core_state(1, CoreStatus::Unknown).is_err());
+        assert_eq!(
+            live_core_state(0, CoreStatus::Running).unwrap(),
+            CoreState::Running
+        );
+        assert_eq!(
+            live_core_state(0, CoreStatus::Halted(HaltReason::Request)).unwrap(),
+            CoreState::Halted
+        );
     }
 
     #[test]

@@ -18,6 +18,11 @@ All notable changes to this project will be documented in this file.
   native ESP USB-JTAG support.
 - Explicit `probes test` attach/disconnect diagnostics with a structured risk,
   capability matrix, and complete session lifecycle.
+- State-preserving `snapshot capture` for all described target cores, with
+  explicit disabled-core reporting, original/captured/final states, and cleanup
+  on both success and failure.
+- Structured R1 `effects` disclosure for backend-managed volatile target state,
+  including probe-rs hardware-breakpoint clearing and ESP32-S3 watchdog changes.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
   unwritten sector bytes, independent read-back verification, reset-and-halt,
   PC/SP/LR snapshot, resume, and disconnect.
@@ -41,5 +46,7 @@ All notable changes to this project will be documented in this file.
   exact confirmation, read-back, page preservation, post-reset snapshot,
   evidence, backup, and runtime checks. The two-page cross-sector case also
   passed. Physical probe removal consistently returns `PROBE_UNAVAILABLE`
-  without falling back to another connected probe. ESP32-S3 guarded flash
-  awaits a defined multi-core post-flash contract.
+  without falling back to another connected probe. ESP32-S3 live snapshot
+  acceptance passed with enabled `cpu0` restored to running and disabled
+  `cpu1` reported explicitly. ESP32-S3 guarded flash awaits format-aware image
+  planning and a verified system-reset/post-flash policy.

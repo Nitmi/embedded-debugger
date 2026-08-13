@@ -43,10 +43,30 @@ do not require the standalone `probe-rs` CLI to be installed.
 
 `probes test --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` operation. It opens the selected probe, attaches to the
-target, and disconnects without invoking erase, program, reset, halt, snapshot,
-or memory access. A successful result contains the session identity,
-conservative capability matrix, ordered `session.attach` and
-`session.disconnect` records, and `complete=true`.
+target, and disconnects without requesting erase, program, reset, halt,
+snapshot, or arbitrary user memory access. Backend attach sequences may still
+access volatile target control state as disclosed by `effects`. A successful
+result contains the session identity, conservative capability matrix, ordered
+`session.attach` and `session.disconnect` records, and `complete=true`.
+
+`snapshot capture --probe <exact-selector> --target <exact-target>` is an
+`R1_REVERSIBLE_CONTROL` one-shot observation. It attaches to the exact target,
+records the original state of every enabled core, halts cores that were
+running, reads PC/SP/LR, restores only those cores that were originally
+running, and disconnects. Disabled cores remain in the ordered core inventory
+with `available=false` and an `unavailable_reason`; at least one core must be
+available. The response distinguishes `original_state`, `captured_state`, and
+the final restored `state`. It does not request reset, erase, program, arbitrary
+memory write, or a persistent debug session.
+
+R1 debug control is not equivalent to side-effect-free target inspection. Both
+`probes test` and `snapshot capture` return an `effects` object. It records
+whether the command requested reset, Flash, or arbitrary memory writes; whether
+core execution-state restoration was verified; and any known backend-managed
+volatile target changes. probe-rs clears hardware breakpoints during attach and
+may invoke target-specific attach/halt sequences. The ESP32-S3 sequence disables
+several watchdogs. Agents must surface these notes instead of treating R1 as
+R0 read-only behavior.
 
 ## Exit codes
 
@@ -91,6 +111,13 @@ selector alone is not accepted as stable device identity.
 `core.captured_state` is the state while PC/SP/registers were read. `core.state`
 is the state after capture is complete. The guarded flash workflow normally
 reports `captured_state="halted"` and `state="running"`.
+
+For live multi-core observations, each `cores[]` entry also has a stable target
+core `index`, target-defined `name`, `architecture`, and `original_state`.
+Disabled cores omit `original_state` and `snapshot`; they are not silently
+dropped. A complete live capture means state restoration and session disconnect
+both succeeded. Live captures are returned in the result envelope but are not
+yet published as standalone evidence artifacts.
 
 Evidence is reserved before opening hardware and published without overwriting
 an existing path. `complete=true` means program, verify, reset, snapshot,
