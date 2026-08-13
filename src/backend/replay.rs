@@ -225,6 +225,65 @@ impl DebugBackend for ReplayBackend {
         })
     }
 
+    fn plan_segmented_flash_ranges(&self, write_ranges: &[FlashRange]) -> Result<FlashLayout> {
+        if write_ranges.is_empty() {
+            return Err(DebugError::fixture(
+                "replay firmware image does not contain any write ranges",
+                json!({}),
+            ));
+        }
+        let mut sorted = write_ranges.to_vec();
+        sorted.sort_by_key(|range| range.start.0);
+        if sorted[0].start != self.fixture.flash.base_address {
+            return Err(DebugError::fixture(
+                "first segmented write address does not match replay evidence",
+                json!({
+                    "requested": sorted[0].start,
+                    "available": self.fixture.flash.base_address,
+                }),
+            ));
+        }
+
+        let erase_ranges = if self.fixture.flash.erase_ranges.is_empty() {
+            sorted.clone()
+        } else {
+            self.fixture.flash.erase_ranges.clone()
+        };
+        let mut previous_end = None;
+        for range in &sorted {
+            if range.length == 0 {
+                return Err(DebugError::fixture(
+                    "replay firmware image contains an empty write range",
+                    json!({"range": range}),
+                ));
+            }
+            let end = range.start.0.checked_add(range.length).ok_or_else(|| {
+                DebugError::fixture(
+                    "segmented flash range overflows the target address space",
+                    json!({"range": range}),
+                )
+            })?;
+            if previous_end.is_some_and(|previous| range.start.0 < previous) {
+                return Err(DebugError::fixture(
+                    "replay firmware image contains overlapping write ranges",
+                    json!({"ranges": sorted}),
+                ));
+            }
+            if !ranges_cover(&erase_ranges, range)? {
+                return Err(DebugError::fixture(
+                    "replay erase ranges do not contain a segmented write range",
+                    json!({"write_range": range, "erase_ranges": erase_ranges}),
+                ));
+            }
+            previous_end = Some(end);
+        }
+
+        Ok(FlashLayout {
+            write_ranges: sorted,
+            erase_ranges,
+        })
+    }
+
     fn attach(&mut self, probe_id: &str, target: &str) -> Result<SessionInfo> {
         if probe_id != self.fixture.probe.id {
             return Err(DebugError::unavailable(

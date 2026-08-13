@@ -4,8 +4,8 @@ pub mod replay;
 use crate::{
     error::Result,
     model::{
-        Address, Capabilities, CoreObservation, CoreSnapshot, FlashLayout, FlashReport, ProbeInfo,
-        SessionInfo, TargetInfo,
+        Address, Capabilities, CoreObservation, CoreSnapshot, FirmwareImageOptions, FlashLayout,
+        FlashReport, ProbeInfo, SessionInfo, TargetInfo,
     },
 };
 
@@ -26,6 +26,26 @@ pub trait DebugBackend {
         firmware_size: u64,
         requested_base_address: Option<Address>,
     ) -> Result<FlashLayout>;
+    fn validate_firmware_image_options(&self, _options: &FirmwareImageOptions) -> Result<()> {
+        Ok(())
+    }
+    fn plan_segmented_flash_ranges(
+        &self,
+        write_ranges: &[crate::model::FlashRange],
+    ) -> Result<FlashLayout> {
+        let [range] = write_ranges else {
+            return Err(crate::error::DebugError::new(
+                crate::error::ErrorCode::CapabilityUnavailable,
+                "selected backend cannot plan a segmented firmware image",
+                6,
+                serde_json::json!({
+                    "backend": self.name(),
+                    "segment_count": write_ranges.len(),
+                }),
+            ));
+        };
+        self.plan_flash_ranges(range.length, Some(range.start))
+    }
     fn attach(&mut self, probe_id: &str, target: &str) -> Result<SessionInfo>;
     fn program(
         &mut self,

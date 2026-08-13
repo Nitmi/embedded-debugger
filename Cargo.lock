@@ -627,6 +627,7 @@ dependencies = [
  "assert_cmd",
  "chrono",
  "clap",
+ "espflash",
  "hex",
  "probe-rs",
  "probe-rs-espressif",

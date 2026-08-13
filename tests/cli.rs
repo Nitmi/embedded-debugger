@@ -4,6 +4,8 @@ use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::tempdir;
 
+mod support;
+
 fn fixture() -> &'static str {
     "examples/replay/stm32g4.json"
 }
@@ -296,4 +298,193 @@ fn native_unknown_target_is_a_stable_error() {
     let result: Value = serde_json::from_slice(&output).unwrap();
 
     assert_eq!(result["error"]["code"], "TARGET_UNAVAILABLE");
+}
+
+#[test]
+fn idf_plan_exposes_normalized_segments_and_execution_blockers() {
+    let directory = tempdir().unwrap();
+    let firmware = directory.path().join("firmware.elf");
+    let fixture = esp32s3_fixture(directory.path());
+    fs::write(&firmware, support::minimal_esp32s3_idf_elf()).unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture.to_str().unwrap(),
+            "flash",
+            "plan",
+            firmware.to_str().unwrap(),
+            "--format",
+            "idf",
+            "--flash-size",
+            "8MB",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["data"]["firmware"]["format"], "idf");
+    assert_eq!(
+        result["data"]["firmware"]["segments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        result["data"]["firmware"]["segments"][0]["kind"],
+        "bootloader"
+    );
+    assert_eq!(
+        result["data"]["firmware"]["segments"][0]["start"],
+        "0x00000000"
+    );
+    assert_eq!(
+        result["data"]["firmware"]["segments"][1]["kind"],
+        "partition_table"
+    );
+    assert_eq!(
+        result["data"]["firmware"]["segments"][1]["start"],
+        "0x00008000"
+    );
+    assert_eq!(
+        result["data"]["firmware"]["segments"][2]["kind"],
+        "application"
+    );
+    assert_eq!(
+        result["data"]["firmware"]["segments"][2]["start"],
+        "0x00010000"
+    );
+    assert_eq!(result["data"]["ranges"].as_array().unwrap().len(), 3);
+    assert_eq!(result["data"]["execution"]["supported"], false);
+    assert_eq!(
+        result["data"]["execution"]["blockers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        result["data"]["firmware"]["image_options"]["flash_size"],
+        8 * 1024 * 1024
+    );
+}
+
+#[test]
+fn idf_execute_is_blocked_before_hardware_or_evidence() {
+    let directory = tempdir().unwrap();
+    let firmware = directory.path().join("firmware.elf");
+    let evidence = directory.path().join("run.evidence.json");
+    let fixture = esp32s3_fixture(directory.path());
+    fs::write(&firmware, support::minimal_esp32s3_idf_elf()).unwrap();
+
+    let common = [
+        "--fixture",
+        fixture.to_str().unwrap(),
+        "flash",
+        "plan",
+        firmware.to_str().unwrap(),
+        "--format",
+        "idf",
+        "--flash-size",
+        "8MB",
+        "--json",
+    ];
+    let plan_output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args(common)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let confirmation = plan["data"]["confirm_digest"].as_str().unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture.to_str().unwrap(),
+            "flash",
+            "execute",
+            firmware.to_str().unwrap(),
+            "--format",
+            "idf",
+            "--flash-size",
+            "8MB",
+            "--confirm",
+            confirmation,
+            "--evidence",
+            evidence.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(6)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["error"]["code"], "CAPABILITY_UNAVAILABLE");
+    assert_eq!(
+        result["error"]["details"]["probe_enumeration_performed"],
+        true
+    );
+    assert_eq!(result["error"]["details"]["target_session_attached"], false);
+    assert_eq!(
+        result["error"]["details"]["flash_operation_requested"],
+        false
+    );
+    assert_eq!(result["error"]["details"]["reset_requested"], false);
+    assert!(!evidence.exists());
+}
+
+fn esp32s3_fixture(directory: &std::path::Path) -> std::path::PathBuf {
+    let mut value: Value =
+        serde_json::from_slice(&fs::read("examples/replay/stm32g4.json").unwrap()).unwrap();
+    value["target"]["name"] = "esp32s3".into();
+    value["target"]["architecture"] = "xtensa".into();
+    value["target"]["core_count"] = 2.into();
+    value["capabilities"]["reset"] = false.into();
+    value["live_cores"] = serde_json::json!([
+        {
+            "index": 0,
+            "name": "cpu0",
+            "architecture": "xtensa",
+            "available": true,
+            "original_state": "running",
+            "snapshot": {
+                "captured_state": "halted",
+                "state": "running",
+                "pc": "0x42000000",
+                "sp": "0x3fcf0000",
+                "registers": {"lr": "0x42000004"},
+                "halt_reason": "request"
+            },
+            "unavailable_reason": null
+        },
+        {
+            "index": 1,
+            "name": "cpu1",
+            "architecture": "xtensa",
+            "available": false,
+            "original_state": null,
+            "snapshot": null,
+            "unavailable_reason": "core is not enabled"
+        }
+    ]);
+    value["flash"]["base_address"] = "0x00000000".into();
+    value["flash"]["erase_ranges"] = serde_json::json!([{
+        "start": "0x00000000",
+        "length": 131072,
+    }]);
+    let path = directory.join("esp32s3.json");
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    path
 }

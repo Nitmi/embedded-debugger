@@ -12,6 +12,7 @@ use crate::{
     },
     doctor,
     error::{DebugError, Result},
+    firmware::{FirmwareFormat, FirmwareInputOptions, parse_esp_flash_size},
     model::{Address, FlashRange},
     service::{DebugService, inspect_evidence},
 };
@@ -93,11 +94,48 @@ pub struct FlashSelection {
 
     #[arg(
         long,
+        value_enum,
+        help = "firmware semantics; .elf requires an explicit idf selection"
+    )]
+    pub format: Option<FirmwareFormatArg>,
+
+    #[arg(
+        long,
         value_name = "ADDRESS",
         value_parser = parse_address,
         help = "raw BIN load address (required by probe-rs)"
     )]
     pub base_address: Option<Address>,
+
+    #[arg(
+        long,
+        value_name = "SIZE",
+        value_parser = parse_esp_flash_size,
+        help = "physical SPI Flash capacity for ESP-IDF generation, for example 8MB"
+    )]
+    pub flash_size: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "REVISION",
+        help = "ESP chip revision encoded as major * 100 + minor"
+    )]
+    pub chip_revision: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FirmwareFormatArg {
+    Bin,
+    Idf,
+}
+
+impl From<FirmwareFormatArg> for FirmwareFormat {
+    fn from(value: FirmwareFormatArg) -> Self {
+        match value {
+            FirmwareFormatArg::Bin => Self::Bin,
+            FirmwareFormatArg::Idf => Self::EspIdf,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -272,23 +310,23 @@ fn run_flash_plan<B: DebugBackend>(
     service: &DebugService<B>,
     selection: &FlashSelection,
 ) -> Result<CommandResult> {
-    let plan = service.plan_flash(
+    let plan = service.plan_flash_with_options(
         &selection.firmware,
         selection.probe.as_deref(),
         selection.target.as_deref(),
-        selection.base_address,
+        &firmware_options(selection),
     )?;
     let human = format!(
-        "Plan {}\nTarget: {}\nProbe: {}\nFirmware: {} bytes at {} ({})\nErase ranges: {}\nRisk: {}\nConfirm: {}",
+        "Plan {}\nTarget: {}\nProbe: {}\nFirmware: {} source bytes, {} program bytes ({})\nWrite ranges: {}\nErase ranges: {}\nExecutable: {}\nRisk: {}\nConfirm: {}",
         plan.plan_id,
         plan.target.name,
         plan.probe.id,
         plan.firmware.size,
-        plan.firmware
-            .base_address
-            .map_or_else(|| "unknown".to_string(), |address| address.to_string()),
+        plan.firmware.program_size,
         plan.firmware.sha256,
+        describe_ranges(&plan.ranges),
         describe_ranges(&plan.erase_ranges),
+        plan.execution.supported,
         plan.risk,
         plan.confirm_digest
     );
@@ -307,11 +345,11 @@ fn run_flash_execute<B: DebugBackend>(
     service: &mut DebugService<B>,
     arguments: &FlashExecute,
 ) -> Result<CommandResult> {
-    let result = service.execute_flash(
+    let result = service.execute_flash_with_options(
         &arguments.selection.firmware,
         arguments.selection.probe.as_deref(),
         arguments.selection.target.as_deref(),
-        arguments.selection.base_address,
+        &firmware_options(&arguments.selection),
         &arguments.confirm,
         &arguments.evidence,
     )?;
@@ -324,6 +362,15 @@ fn run_flash_execute<B: DebugBackend>(
         result.evidence.path
     );
     Ok(CommandResult::serializable("flash.execute", &result, human))
+}
+
+fn firmware_options(selection: &FlashSelection) -> FirmwareInputOptions {
+    FirmwareInputOptions {
+        format: selection.format.map(Into::into),
+        base_address: selection.base_address,
+        flash_size: selection.flash_size,
+        chip_revision: selection.chip_revision,
+    }
 }
 
 fn list_probes(cli: &Cli) -> Result<CommandResult> {

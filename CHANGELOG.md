@@ -11,6 +11,10 @@ All notable changes to this project will be documented in this file.
 - Backend capability model and deterministic Replay backend.
 - Guarded raw BIN flash planning with digest-bound probe, target, firmware,
   write ranges, sector erase ranges, and execution policy.
+- Plan-only ESP-IDF ELF normalization through pinned espflash 4.5.0, including
+  physical bootloader, partition-table, and application segments; per-segment
+  hashes; explicit flash capacity and chip revision; target flash-window
+  validation; merged sector ranges; and digest-bound execution blockers.
 - Replay execution, verification, reset, snapshot capture, and atomic evidence
   publication.
 - Native probe discovery through probe-rs 0.32.
@@ -36,8 +40,10 @@ All notable changes to this project will be documented in this file.
 ### Known limitations
 
 - OpenOCD and MCP adapters are not implemented.
-- Only raw BIN firmware is accepted. probe-rs requires an explicit base address;
-  Replay uses the fixture address unless the same address is supplied.
+- Raw BIN is the only executable firmware format. probe-rs requires an explicit
+  base address; Replay uses the fixture address unless the same address is
+  supplied. ESP-IDF ELF is plan-only and requires explicit format and flash
+  capacity inputs. General ELF and Intel HEX are not accepted.
 - Native flashing is limited to readable boot NVM on single-core targets. RTT,
   arbitrary memory/register commands, breakpoints, and persistent sessions are
   not implemented.
@@ -48,5 +54,6 @@ All notable changes to this project will be documented in this file.
   passed. Physical probe removal consistently returns `PROBE_UNAVAILABLE`
   without falling back to another connected probe. ESP32-S3 live snapshot
   acceptance passed with enabled `cpu0` restored to running and disabled
-  `cpu1` reported explicitly. ESP32-S3 guarded flash awaits format-aware image
-  planning and a verified system-reset/post-flash policy.
+  `cpu1` reported explicitly. ESP32-S3 guarded flash execution awaits segmented
+  staging and a verified system-reset/post-flash policy; plan generation itself
+  is implemented.

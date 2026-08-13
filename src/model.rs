@@ -281,6 +281,28 @@ pub struct FirmwareInfo {
     pub base_address: Option<Address>,
     pub size: u64,
     pub sha256: String,
+    #[serde(default)]
+    pub program_size: u64,
+    #[serde(default)]
+    pub segments: Vec<FirmwareSegmentInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_options: Option<FirmwareImageOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirmwareSegmentInfo {
+    pub kind: String,
+    pub start: Address,
+    pub length: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirmwareImageOptions {
+    pub generator: String,
+    pub target_chip: String,
+    pub flash_size: u64,
+    pub chip_revision: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,8 +355,32 @@ pub struct FlashPlan {
     pub erase_ranges: Vec<FlashRange>,
     #[serde(default)]
     pub policy: FlashPolicy,
+    #[serde(default)]
+    pub execution: FlashExecutionReadiness,
     pub actions: Vec<PlannedAction>,
     pub confirm_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlashExecutionReadiness {
+    pub supported: bool,
+    #[serde(default)]
+    pub blockers: Vec<FlashExecutionBlocker>,
+}
+
+impl Default for FlashExecutionReadiness {
+    fn default() -> Self {
+        Self {
+            supported: true,
+            blockers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlashExecutionBlocker {
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

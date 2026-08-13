@@ -14,14 +14,14 @@ use crate::{
     SCHEMA_VERSION,
     backend::DebugBackend,
     error::{DebugError, ErrorCode, Result},
+    firmware::{self, FirmwareFormat, FirmwareInputOptions},
     model::{
-        Address, ArtifactReference, DebugControlEffects, EvidenceBundle, FirmwareInfo,
-        FlashExecution, FlashPlan, FlashPolicy, FlashRange, OperationRecord, PlannedAction,
-        ProbeInfo, ProbeTestReport, SnapshotCaptureReport, validate_core_inventory,
+        Address, ArtifactReference, DebugControlEffects, EvidenceBundle, FirmwareImageOptions,
+        FirmwareSegmentInfo, FlashExecution, FlashExecutionBlocker, FlashExecutionReadiness,
+        FlashPlan, FlashPolicy, FlashRange, OperationRecord, PlannedAction, ProbeInfo,
+        ProbeTestReport, SnapshotCaptureReport, validate_core_inventory,
     },
 };
-
-const MAX_FIRMWARE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 struct ConfirmationInput<'a> {
@@ -33,9 +33,13 @@ struct ConfirmationInput<'a> {
     firmware_format: &'a str,
     firmware_sha256: &'a str,
     firmware_size: u64,
+    firmware_program_size: u64,
+    firmware_segments: &'a [FirmwareSegmentInfo],
+    firmware_image_options: &'a Option<FirmwareImageOptions>,
     ranges: &'a [FlashRange],
     erase_ranges: &'a [FlashRange],
     policy: &'a FlashPolicy,
+    execution: &'a FlashExecutionReadiness,
 }
 
 pub struct DebugService<B: DebugBackend> {
@@ -177,6 +181,24 @@ impl<B: DebugBackend> DebugService<B> {
         target: Option<&str>,
         base_address: Option<Address>,
     ) -> Result<FlashPlan> {
+        self.plan_flash_with_options(
+            firmware_path,
+            probe_id,
+            target,
+            &FirmwareInputOptions {
+                base_address,
+                ..FirmwareInputOptions::default()
+            },
+        )
+    }
+
+    pub fn plan_flash_with_options(
+        &self,
+        firmware_path: &Path,
+        probe_id: Option<&str>,
+        target: Option<&str>,
+        firmware_options: &FirmwareInputOptions,
+    ) -> Result<FlashPlan> {
         let target_info = self.backend.target().clone();
         if let Some(requested) = target
             && !self.backend.matches_target(requested)
@@ -187,32 +209,33 @@ impl<B: DebugBackend> DebugService<B> {
                 json!({"requested": requested, "available": target_info.name}),
             ));
         }
-        let capabilities = self.backend.capabilities();
-        let required_capabilities = [
-            ("flash", capabilities.flash),
-            ("verify", capabilities.verify),
-            ("halt", capabilities.halt),
-            ("run", capabilities.run),
-            ("reset", capabilities.reset),
-            ("register_read", capabilities.register_read),
-        ];
-        if let Some((capability, _)) = required_capabilities
-            .iter()
-            .find(|(_, available)| !available)
-        {
-            return Err(DebugError::new(
-                ErrorCode::CapabilityUnavailable,
-                "selected backend cannot complete the guarded flash workflow",
-                6,
-                json!({"backend": self.backend.name(), "capability": capability}),
-            ));
+        let mut firmware = firmware::load(firmware_path, &target_info.name, firmware_options)?;
+        if let Some(image_options) = &firmware.info.image_options {
+            self.backend
+                .validate_firmware_image_options(image_options)?;
         }
-        let (_, mut firmware) = read_firmware(firmware_path)?;
-        let layout = self
-            .backend
-            .plan_flash_ranges(firmware.size, base_address)?;
-        firmware.base_address = layout.write_ranges.first().map(|range| range.start);
-        if firmware.base_address.is_none() {
+        let capabilities = self.backend.capabilities();
+        let execution = execution_readiness(&firmware.info.format, capabilities);
+        if firmware.info.format == FirmwareFormat::Bin.name() {
+            require_guarded_flash_capabilities(self.backend.name(), capabilities)?;
+        } else {
+            require_image_planning_capabilities(self.backend.name(), capabilities)?;
+        }
+
+        let layout = if firmware.info.format == FirmwareFormat::Bin.name() {
+            let layout = self
+                .backend
+                .plan_flash_ranges(firmware.info.size, firmware_options.base_address)?;
+            let start = layout.write_ranges.first().map(|range| range.start);
+            if let Some(start) = start {
+                firmware.bind_raw_segment(start);
+            }
+            layout
+        } else {
+            self.backend
+                .plan_segmented_flash_ranges(&firmware.write_ranges())?
+        };
+        if firmware.info.base_address.is_none() || layout.write_ranges.is_empty() {
             return Err(DebugError::new(
                 ErrorCode::Internal,
                 "backend returned an empty flash write layout",
@@ -239,12 +262,16 @@ impl<B: DebugBackend> DebugService<B> {
             backend: self.backend.name(),
             probe_id: &probe.id,
             target: &target_info.name,
-            firmware_format: &firmware.format,
-            firmware_sha256: &firmware.sha256,
-            firmware_size: firmware.size,
+            firmware_format: &firmware.info.format,
+            firmware_sha256: &firmware.info.sha256,
+            firmware_size: firmware.info.size,
+            firmware_program_size: firmware.info.program_size,
+            firmware_segments: &firmware.info.segments,
+            firmware_image_options: &firmware.info.image_options,
             ranges: &layout.write_ranges,
             erase_ranges: &layout.erase_ranges,
             policy: &policy,
+            execution: &execution,
         };
         let confirm_digest = sha256_bytes(
             &serde_json::to_vec(&confirmation).expect("confirmation input always serializes"),
@@ -255,10 +282,11 @@ impl<B: DebugBackend> DebugService<B> {
             backend: self.backend.name().to_string(),
             probe,
             target: target_info,
-            firmware,
+            firmware: firmware.info,
             ranges: layout.write_ranges,
             erase_ranges: layout.erase_ranges,
             policy,
+            execution,
             actions: vec![
                 PlannedAction {
                     action: "attach_probe".to_string(),
@@ -306,34 +334,75 @@ impl<B: DebugBackend> DebugService<B> {
         confirm_digest: &str,
         evidence_path: &Path,
     ) -> Result<FlashExecution> {
-        let plan = self.plan_flash(firmware_path, probe_id, target, base_address)?;
+        self.execute_flash_with_options(
+            firmware_path,
+            probe_id,
+            target,
+            &FirmwareInputOptions {
+                base_address,
+                ..FirmwareInputOptions::default()
+            },
+            confirm_digest,
+            evidence_path,
+        )
+    }
+
+    pub fn execute_flash_with_options(
+        &mut self,
+        firmware_path: &Path,
+        probe_id: Option<&str>,
+        target: Option<&str>,
+        firmware_options: &FirmwareInputOptions,
+        confirm_digest: &str,
+        evidence_path: &Path,
+    ) -> Result<FlashExecution> {
+        let plan =
+            self.plan_flash_with_options(firmware_path, probe_id, target, firmware_options)?;
         if plan.confirm_digest != confirm_digest {
             return Err(DebugError::confirmation(
                 &plan.confirm_digest,
                 confirm_digest,
             ));
         }
+        if !plan.execution.supported {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "this firmware plan is not executable by the selected backend yet",
+                6,
+                json!({
+                    "plan_id": plan.plan_id,
+                    "format": plan.firmware.format,
+                    "blockers": plan.execution.blockers,
+                    "probe_enumeration_performed": true,
+                    "target_session_attached": false,
+                    "flash_operation_requested": false,
+                    "reset_requested": false,
+                }),
+            ));
+        }
         let mut evidence_reservation = EvidenceReservation::new(evidence_path)?;
 
-        let (firmware_bytes, mut current_firmware) = read_firmware(firmware_path)?;
-        current_firmware.base_address = plan.firmware.base_address;
-        if current_firmware.sha256 != plan.firmware.sha256
-            || current_firmware.size != plan.firmware.size
-        {
+        let mut current = firmware::load(firmware_path, &plan.target.name, firmware_options)?;
+        if current.info.format == FirmwareFormat::Bin.name() {
+            current.bind_raw_segment(plan.ranges[0].start);
+        }
+        if current.info != plan.firmware {
             return Err(DebugError::new(
                 ErrorCode::PlanStale,
                 "firmware changed after the flash plan was created",
                 2,
                 json!({
                     "planned_sha256": plan.firmware.sha256,
-                    "current_sha256": current_firmware.sha256,
+                    "current_sha256": current.info.sha256,
+                    "planned_segments": plan.firmware.segments,
+                    "current_segments": current.info.segments,
                 }),
             ));
         }
 
         let session = self.backend.attach(&plan.probe.id, &plan.target.name)?;
         let result = (|| {
-            let base_address = current_firmware.base_address.ok_or_else(|| {
+            let base_address = current.info.base_address.ok_or_else(|| {
                 DebugError::new(
                     ErrorCode::Internal,
                     "flash plan omitted the raw BIN base address",
@@ -343,15 +412,15 @@ impl<B: DebugBackend> DebugService<B> {
             })?;
             let mut flash = self.backend.program(
                 &session,
-                &firmware_bytes,
+                &current.source_bytes,
                 base_address,
-                &current_firmware.sha256,
+                &current.info.sha256,
             )?;
-            flash.verified = self.backend.verify(&session, &current_firmware.sha256)?;
+            flash.verified = self.backend.verify(&session, &current.info.sha256)?;
             if !flash.verified {
                 return Err(DebugError::verification(
                     "firmware verification failed",
-                    json!({"firmware_sha256": current_firmware.sha256}),
+                    json!({"firmware_sha256": current.info.sha256}),
                 ));
             }
             self.backend.reset(&session)?;
@@ -363,7 +432,7 @@ impl<B: DebugBackend> DebugService<B> {
                 backend: self.backend.name().to_string(),
                 probe: session.probe.clone(),
                 target: session.target.clone(),
-                firmware: current_firmware.clone(),
+                firmware: current.info.clone(),
                 plan_id: Some(plan.plan_id.clone()),
                 confirm_digest: Some(plan.confirm_digest.clone()),
                 ranges: plan.ranges.clone(),
@@ -418,6 +487,70 @@ fn debug_control_effects<B: DebugBackend>(
         core_execution_state_restoration_verified,
         backend_may_modify_volatile_target_state: !volatile_target_state_notes.is_empty(),
         volatile_target_state_notes,
+    }
+}
+
+fn require_guarded_flash_capabilities(
+    backend: &str,
+    capabilities: &crate::model::Capabilities,
+) -> Result<()> {
+    let required = [
+        ("flash", capabilities.flash),
+        ("verify", capabilities.verify),
+        ("halt", capabilities.halt),
+        ("run", capabilities.run),
+        ("reset", capabilities.reset),
+        ("register_read", capabilities.register_read),
+    ];
+    if let Some((capability, _)) = required.iter().find(|(_, available)| !available) {
+        return Err(DebugError::new(
+            ErrorCode::CapabilityUnavailable,
+            "selected backend cannot complete the guarded flash workflow",
+            6,
+            json!({"backend": backend, "capability": capability}),
+        ));
+    }
+    Ok(())
+}
+
+fn require_image_planning_capabilities(
+    backend: &str,
+    capabilities: &crate::model::Capabilities,
+) -> Result<()> {
+    if !capabilities.flash {
+        return Err(DebugError::new(
+            ErrorCode::CapabilityUnavailable,
+            "selected backend cannot plan a physical flash image",
+            6,
+            json!({"backend": backend, "capability": "flash"}),
+        ));
+    }
+    Ok(())
+}
+
+fn execution_readiness(
+    format: &str,
+    capabilities: &crate::model::Capabilities,
+) -> FlashExecutionReadiness {
+    if format != FirmwareFormat::EspIdf.name() {
+        return FlashExecutionReadiness::default();
+    }
+
+    let mut blockers = vec![FlashExecutionBlocker {
+        code: "SEGMENTED_PROGRAMMING_NOT_IMPLEMENTED".to_string(),
+        message: "probe-rs execution does not yet stage the normalized ESP-IDF segments"
+            .to_string(),
+    }];
+    if !capabilities.reset {
+        blockers.push(FlashExecutionBlocker {
+            code: "MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED".to_string(),
+            message: "the selected target lacks the verified reset/snapshot/resume capability set"
+                .to_string(),
+        });
+    }
+    FlashExecutionReadiness {
+        supported: false,
+        blockers,
     }
 }
 
@@ -489,65 +622,6 @@ fn ensure_probe_accessible(probe: ProbeInfo) -> Result<ProbeInfo> {
             8,
             json!({"probe": probe}),
         ))
-    }
-}
-
-fn read_firmware(path: &Path) -> Result<(Vec<u8>, FirmwareInfo)> {
-    let canonical = path
-        .canonicalize()
-        .map_err(|error| DebugError::io("resolve firmware path", path.to_str(), &error))?;
-    let metadata = canonical
-        .metadata()
-        .map_err(|error| DebugError::io("read firmware metadata", canonical.to_str(), &error))?;
-    if !metadata.is_file() {
-        return Err(DebugError::config(
-            "firmware path must identify a regular file",
-            json!({"path": canonical}),
-        ));
-    }
-    if metadata.len() == 0 || metadata.len() > MAX_FIRMWARE_BYTES {
-        return Err(DebugError::config(
-            "firmware size is outside the allowed range",
-            json!({
-                "path": canonical,
-                "size": metadata.len(),
-                "maximum": MAX_FIRMWARE_BYTES,
-            }),
-        ));
-    }
-    let bytes = fs::read(&canonical)
-        .map_err(|error| DebugError::io("read firmware", canonical.to_str(), &error))?;
-    if bytes.is_empty() || bytes.len() as u64 > MAX_FIRMWARE_BYTES {
-        return Err(DebugError::config(
-            "firmware size changed while reading or is outside the allowed range",
-            json!({
-                "path": canonical,
-                "size": bytes.len(),
-                "maximum": MAX_FIRMWARE_BYTES,
-            }),
-        ));
-    }
-    let info = FirmwareInfo {
-        path: canonical.display().to_string(),
-        format: firmware_format(&canonical)?,
-        base_address: None,
-        size: bytes.len() as u64,
-        sha256: sha256_bytes(&bytes),
-    };
-    Ok((bytes, info))
-}
-
-fn firmware_format(path: &Path) -> Result<String> {
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase);
-    match extension.as_deref() {
-        Some("bin") => Ok("bin".to_string()),
-        other => Err(DebugError::config(
-            "this milestone supports raw BIN firmware only",
-            json!({"path": path, "extension": other}),
-        )),
     }
 }
 
@@ -707,6 +781,7 @@ mod tests {
 
     use super::*;
     use crate::backend::replay::{ReplayBackend, ReplayFixture};
+    use crate::model::FirmwareInfo;
 
     fn fixture() -> ReplayFixture {
         serde_json::from_str(include_str!("../examples/replay/stm32g4.json")).unwrap()
@@ -816,6 +891,87 @@ mod tests {
         assert_eq!(first.ranges[0].start, crate::model::Address(0x0800_0000));
         assert_eq!(first.ranges[0].length, 13);
         assert_ne!(first.confirm_digest, second.confirm_digest);
+    }
+
+    #[test]
+    fn idf_flash_size_changes_confirmation_and_execution_stays_blocked() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("demo.elf");
+        fs::write(&firmware, crate::firmware::tests::minimal_esp32s3_idf_elf()).unwrap();
+        let mut replay = fixture();
+        replay.target.name = "esp32s3".to_string();
+        replay.target.architecture = "xtensa".to_string();
+        replay.target.core_count = 2;
+        replay.capabilities.reset = false;
+        replay.flash.base_address = Address(0);
+        replay.flash.erase_ranges = vec![FlashRange {
+            start: Address(0),
+            length: 0x2_0000,
+        }];
+        let service = DebugService::new(ReplayBackend::new(replay));
+        let options = |flash_size| FirmwareInputOptions {
+            format: Some(FirmwareFormat::EspIdf),
+            flash_size: Some(flash_size),
+            ..FirmwareInputOptions::default()
+        };
+
+        let first = service
+            .plan_flash_with_options(&firmware, None, None, &options(4 * 1024 * 1024))
+            .unwrap();
+        let second = service
+            .plan_flash_with_options(&firmware, None, None, &options(8 * 1024 * 1024))
+            .unwrap();
+
+        assert_eq!(first.firmware.segments.len(), 3);
+        assert_eq!(first.ranges.len(), 3);
+        assert!(!first.execution.supported);
+        assert_eq!(first.execution.blockers.len(), 2);
+        assert_ne!(first.confirm_digest, second.confirm_digest);
+    }
+
+    #[test]
+    fn idf_execute_is_rejected_before_evidence_reservation_or_attach() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("demo.elf");
+        let evidence = directory.path().join("run.evidence.json");
+        fs::write(&firmware, crate::firmware::tests::minimal_esp32s3_idf_elf()).unwrap();
+        let mut replay = fixture();
+        replay.target.name = "esp32s3".to_string();
+        replay.target.architecture = "xtensa".to_string();
+        replay.target.core_count = 2;
+        replay.capabilities.reset = false;
+        replay.flash.base_address = Address(0);
+        replay.flash.erase_ranges = vec![FlashRange {
+            start: Address(0),
+            length: 0x2_0000,
+        }];
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+        let options = FirmwareInputOptions {
+            format: Some(FirmwareFormat::EspIdf),
+            flash_size: Some(8 * 1024 * 1024),
+            ..FirmwareInputOptions::default()
+        };
+        let plan = service
+            .plan_flash_with_options(&firmware, None, None, &options)
+            .unwrap();
+
+        let error = service
+            .execute_flash_with_options(
+                &firmware,
+                None,
+                None,
+                &options,
+                &plan.confirm_digest,
+                &evidence,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(error.details["probe_enumeration_performed"], true);
+        assert_eq!(error.details["target_session_attached"], false);
+        assert_eq!(error.details["flash_operation_requested"], false);
+        assert_eq!(error.details["reset_requested"], false);
+        assert!(!evidence.exists());
     }
 
     #[test]
@@ -937,6 +1093,14 @@ mod tests {
                 base_address: Some(fixture.flash.base_address),
                 size: 1,
                 sha256: "00".repeat(32),
+                program_size: 1,
+                segments: vec![FirmwareSegmentInfo {
+                    kind: "application".to_string(),
+                    start: fixture.flash.base_address,
+                    length: 1,
+                    sha256: "00".repeat(32),
+                }],
+                image_options: None,
             },
             plan_id: Some("plan_test".to_string()),
             confirm_digest: Some("11".repeat(32)),

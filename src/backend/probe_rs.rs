@@ -17,8 +17,8 @@ use crate::{
     backend::DebugBackend,
     error::{DebugError, ErrorCode, Result},
     model::{
-        Address, Capabilities, CoreObservation, CoreSnapshot, CoreState, FlashLayout, FlashRange,
-        FlashReport, ProbeInfo, SessionInfo, TargetInfo,
+        Address, Capabilities, CoreObservation, CoreSnapshot, CoreState, FirmwareImageOptions,
+        FlashLayout, FlashRange, FlashReport, ProbeInfo, SessionInfo, TargetInfo,
     },
 };
 
@@ -251,6 +251,103 @@ impl DebugBackend for ProbeRsBackend {
                 length: firmware_size,
             }],
             erase_ranges,
+        })
+    }
+
+    fn validate_firmware_image_options(&self, options: &FirmwareImageOptions) -> Result<()> {
+        let boot_window = self
+            .target
+            .memory_map
+            .iter()
+            .filter_map(|region| region.as_nvm_region())
+            .find(|region| {
+                region.is_readable() && region.is_boot_memory() && region.range.start == 0
+            })
+            .ok_or_else(|| {
+                DebugError::new(
+                    ErrorCode::CapabilityUnavailable,
+                    "target does not describe a readable physical boot flash window",
+                    6,
+                    json!({"target": self.target_info.name}),
+                )
+            })?;
+        let maximum = boot_window.range.end - boot_window.range.start;
+        if options.flash_size > maximum {
+            return Err(DebugError::config(
+                "declared firmware flash size exceeds the target physical boot flash window",
+                json!({
+                    "target": self.target_info.name,
+                    "declared_flash_size": options.flash_size,
+                    "maximum_flash_size": maximum,
+                    "boot_flash_start": Address(boot_window.range.start),
+                    "boot_flash_end": Address(boot_window.range.end),
+                }),
+            ));
+        }
+        Ok(())
+    }
+
+    fn plan_segmented_flash_ranges(&self, write_ranges: &[FlashRange]) -> Result<FlashLayout> {
+        if write_ranges.is_empty() {
+            return Err(DebugError::config(
+                "firmware image must contain at least one flash segment",
+                json!({"target": self.target_info.name}),
+            ));
+        }
+
+        let mut sorted = write_ranges.to_vec();
+        sorted.sort_by_key(|range| range.start.0);
+        let mut erase_ranges = Vec::new();
+        let mut previous_end = None;
+
+        for range in &sorted {
+            if range.length == 0 {
+                return Err(DebugError::config(
+                    "firmware image contains an empty flash segment",
+                    json!({"target": self.target_info.name, "range": range}),
+                ));
+            }
+            let end = range.start.0.checked_add(range.length).ok_or_else(|| {
+                DebugError::config(
+                    "flash write range overflows the target address space",
+                    json!({"target": self.target_info.name, "range": range}),
+                )
+            })?;
+            if previous_end.is_some_and(|previous| range.start.0 < previous) {
+                return Err(DebugError::config(
+                    "firmware image contains overlapping flash segments",
+                    json!({"target": self.target_info.name, "ranges": sorted}),
+                ));
+            }
+
+            let region = self
+                .target
+                .memory_map
+                .iter()
+                .filter_map(|region| region.as_nvm_region())
+                .find(|region| {
+                    region.is_readable()
+                        && region.is_boot_memory()
+                        && region.range.start <= range.start.0
+                        && end <= region.range.end
+                })
+                .ok_or_else(|| {
+                    DebugError::config(
+                        "firmware segment is not fully contained in readable boot flash",
+                        json!({
+                            "target": self.target_info.name,
+                            "range": range,
+                        }),
+                    )
+                })?;
+            let algorithm = select_flash_algorithm(&self.target, region)?;
+            erase_ranges.extend(affected_erase_ranges(algorithm, range.start.0, end)?);
+            previous_end = Some(end);
+        }
+
+        Ok(FlashLayout {
+            write_ranges: sorted,
+            erase_ranges: merge_flash_ranges(erase_ranges)?,
         })
     }
 
@@ -846,6 +943,41 @@ fn affected_erase_ranges(
     Ok(merged)
 }
 
+fn merge_flash_ranges(mut ranges: Vec<FlashRange>) -> Result<Vec<FlashRange>> {
+    ranges.sort_by_key(|range| range.start.0);
+    let mut merged = Vec::<FlashRange>::new();
+    for range in ranges {
+        let end = range.start.0.checked_add(range.length).ok_or_else(|| {
+            DebugError::new(
+                ErrorCode::Internal,
+                "erase range overflows the target address space",
+                10,
+                json!({"range": range}),
+            )
+        })?;
+        if let Some(previous) = merged.last_mut() {
+            let previous_end = previous
+                .start
+                .0
+                .checked_add(previous.length)
+                .ok_or_else(|| {
+                    DebugError::new(
+                        ErrorCode::Internal,
+                        "erase range overflows the target address space",
+                        10,
+                        json!({"range": previous}),
+                    )
+                })?;
+            if range.start.0 <= previous_end {
+                previous.length = previous_end.max(end) - previous.start.0;
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    Ok(merged)
+}
+
 fn invalid_sector_layout(algorithm: &RawFlashAlgorithm, address: u64) -> DebugError {
     DebugError::new(
         ErrorCode::CapabilityUnavailable,
@@ -1058,6 +1190,69 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code, ErrorCode::ConfigInvalid);
+    }
+
+    #[test]
+    fn segmented_plan_sorts_ranges_and_merges_erase_impact() {
+        let backend = ProbeRsBackend::new("esp32s3").unwrap();
+        let layout = backend
+            .plan_segmented_flash_ranges(&[
+                FlashRange {
+                    start: Address(0x1_0000),
+                    length: 0x200,
+                },
+                FlashRange {
+                    start: Address(0),
+                    length: 0x100,
+                },
+                FlashRange {
+                    start: Address(0x8000),
+                    length: 0xC00,
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(layout.write_ranges[0].start, Address(0));
+        assert_eq!(layout.write_ranges[1].start, Address(0x8000));
+        assert_eq!(layout.write_ranges[2].start, Address(0x1_0000));
+        assert_eq!(layout.erase_ranges.len(), 1);
+        assert_eq!(layout.erase_ranges[0].start, Address(0));
+        assert_eq!(layout.erase_ranges[0].length, 0x2_0000);
+    }
+
+    #[test]
+    fn segmented_plan_rejects_overlapping_ranges() {
+        let backend = ProbeRsBackend::new("esp32s3").unwrap();
+        let error = backend
+            .plan_segmented_flash_ranges(&[
+                FlashRange {
+                    start: Address(0x1_0000),
+                    length: 0x200,
+                },
+                FlashRange {
+                    start: Address(0x1_0100),
+                    length: 0x200,
+                },
+            ])
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+    }
+
+    #[test]
+    fn idf_options_reject_capacity_beyond_the_physical_boot_window() {
+        let backend = ProbeRsBackend::new("esp32s3").unwrap();
+        let error = backend
+            .validate_firmware_image_options(&FirmwareImageOptions {
+                generator: "espflash-4.5.0".to_string(),
+                target_chip: "esp32s3".to_string(),
+                flash_size: 128 * 1024 * 1024,
+                chip_revision: 0,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(error.details["maximum_flash_size"], 64 * 1024 * 1024);
     }
 
     #[test]

@@ -50,9 +50,19 @@ Partially run on 2026-08-13 with probe-rs 0.32.0 on Windows:
   state was restored: probe-rs clears hardware breakpoints on attach, and its
   ESP32-S3 sequence disables the super, timer-group 0/1, and RTC watchdogs. The
   JSON `effects` field reports those R1 side effects. Flash and verify are
-  discoverable, but guarded flash remains blocked because raw-BIN ESP image
-  layout and system-reset/post-flash behavior have not yet passed a safe
-  plan-and-execute acceptance.
+  discoverable. ESP-IDF ELF files can now be normalized into bootloader,
+  partition-table, and application ranges with independent hashes and merged
+  physical erase ranges. Plans explicitly report
+  `SEGMENTED_PROGRAMMING_NOT_IMPLEMENTED` and
+  `MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED`, so guarded execution remains
+  blocked before target attach, erase, program, or reset.
+- The ESP32-S3 probe was re-enumerated as accessible after the format-aware
+  changes. No valid ESP-IDF application ELF was present locally, so physical
+  ESP planning and flashing were not attempted. A non-ESP ELF was deliberately
+  supplied as `--format idf` and returned `CONFIG_INVALID` for the missing
+  ESP-IDF application descriptor during image validation, before probe
+  enumeration, target attach, reset, or flash. Synthetic valid ESP32-S3 ELF
+  coverage runs through Replay in the automated suite.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.
