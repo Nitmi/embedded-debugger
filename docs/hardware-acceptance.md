@@ -33,5 +33,35 @@ device support must also complete this checklist on representative hardware.
 
 ## Current result
 
-Not run for this milestone: no debug probe was connected to the development
-machine. This is an explicit release limitation, not an inferred success.
+Partially run on 2026-08-13 with probe-rs 0.32.0 on Windows:
+
+- nRF52840: J-Link `1366:1061:001050282192`, detected target
+  `nRF52840_xxAA`, silicon `NRF52840_xxAA_REV2`. Product-level `probes test`
+  completed attach and disconnect. The single-core guarded workflow reports all
+  required flash, verify, reset, halt/run, register-read, and memory-read
+  capabilities.
+- ESP32-S3: native USB-JTAG `303a:1001:E0:72:A1:D4:1F:DC`, detected target
+  `esp32s3`. Product-level `probes test` completed attach and disconnect. Flash
+  and verify are discoverable, while reset/halt/run/register/memory operations
+  remain conservatively unavailable because the current workflow does not yet
+  define a safe multi-core post-flash snapshot.
+- Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
+  emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
+  were silent. No bytes were transmitted.
+- nRF Code Flash and UICR were backed up locally. The Code Flash HEX was
+  verified against the connected device. Backup SHA-256 values are
+  `058569c18e01e307babbf2fdc70d5dced4a4086fa0a5aee400a7839a4a3f9605`
+  and `f3e0bebcc11fb18e80b3add492052e1d9942b211506eb80a8550c4c1acc3a588`.
+- The planned test image is the device's original first 256 bytes, SHA-256
+  `42e14475dd22fed8c69fbec371efd84b10dcba805d29bc888de082aa6c0f5022`.
+  Its plan writes `0x00000000 + 256`, affects only the first 4096-byte page,
+  and preserves unwritten page bytes. The complete pre-write page SHA-256 is
+  `beace458e24fbf367e831e3ab4a73e45abdbdcaff19df70e6933be00cb6e160d`.
+- Wrong confirmation, RAM address `0x20000000`, and UICR address `0x10001000`
+  were all rejected before a device write. A subsequent independent read
+  matched the original 256-byte hash.
+
+The planned nRF write, read-back verification, post-reset snapshot, page
+preservation comparison, evidence inspection, cross-sector case, and unplugged
+probe case remain pending. No device Flash has been changed by this acceptance
+run yet.

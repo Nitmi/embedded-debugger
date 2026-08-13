@@ -151,6 +151,14 @@ pub struct SessionInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeTestReport {
+    pub risk: String,
+    pub session: SessionInfo,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirmwareInfo {
     pub path: String,
     pub format: String,

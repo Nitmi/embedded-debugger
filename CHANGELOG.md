@@ -14,6 +14,10 @@ All notable changes to this project will be documented in this file.
 - Replay execution, verification, reset, snapshot capture, and atomic evidence
   publication.
 - Native probe discovery through probe-rs 0.32.
+- Official probe-rs Espressif plugin registration for in-process ESP target and
+  native ESP USB-JTAG support.
+- Explicit `probes test` attach/disconnect diagnostics with a structured risk,
+  capability matrix, and complete session lifecycle.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
   unwritten sector bytes, independent read-back verification, reset-and-halt,
   PC/SP/LR snapshot, resume, and disconnect.
@@ -32,5 +36,6 @@ All notable changes to this project will be documented in this file.
 - Native flashing is limited to readable boot NVM on single-core targets. RTT,
   arbitrary memory/register commands, breakpoints, and persistent sessions are
   not implemented.
-- Hardware acceptance is pending because no debug probe was connected during
-  this milestone.
+- Native attach/disconnect is verified on nRF52840/J-Link and ESP32-S3/native
+  USB-JTAG. nRF52840 device-write acceptance is pending exact plan confirmation;
+  ESP32-S3 guarded flash awaits a defined multi-core post-flash contract.

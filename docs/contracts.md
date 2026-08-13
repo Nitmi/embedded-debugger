@@ -41,6 +41,13 @@ JSON stdout.
 optional external executables. Native probe-rs discovery and guarded flashing
 do not require the standalone `probe-rs` CLI to be installed.
 
+`probes test --probe <exact-selector> --target <exact-target>` is an
+`R1_REVERSIBLE_CONTROL` operation. It opens the selected probe, attaches to the
+target, and disconnects without invoking erase, program, reset, halt, snapshot,
+or memory access. A successful result contains the session identity,
+conservative capability matrix, ordered `session.attach` and
+`session.disconnect` records, and `complete=true`.
+
 ## Exit codes
 
 | Code | Meaning |

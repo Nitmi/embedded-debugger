@@ -16,7 +16,7 @@ use crate::{
     error::{DebugError, ErrorCode, Result},
     model::{
         Address, ArtifactReference, EvidenceBundle, FirmwareInfo, FlashExecution, FlashPlan,
-        FlashPolicy, FlashRange, OperationRecord, PlannedAction, ProbeInfo,
+        FlashPolicy, FlashRange, OperationRecord, PlannedAction, ProbeInfo, ProbeTestReport,
     },
 };
 
@@ -48,6 +48,41 @@ impl<B: DebugBackend> DebugService<B> {
 
     pub fn probes(&self) -> Result<Vec<ProbeInfo>> {
         self.backend.list_probes()
+    }
+
+    pub fn test_probe_connection(
+        &mut self,
+        probe_id: &str,
+        target: &str,
+    ) -> Result<ProbeTestReport> {
+        let target_info = self.backend.target().clone();
+        if !self.backend.matches_target(target) {
+            return Err(DebugError::unavailable(
+                ErrorCode::TargetUnavailable,
+                "requested target is not available from the selected backend",
+                json!({"requested": target, "available": target_info.name}),
+            ));
+        }
+        let probe = select_probe(&self.backend.list_probes()?, Some(probe_id))?;
+        let session = self.backend.attach(&probe.id, &target_info.name)?;
+        let mut operations = vec![OperationRecord {
+            sequence: 1,
+            operation: "session.attach".to_string(),
+            ok: true,
+        }];
+        self.backend.disconnect(&session)?;
+        operations.push(OperationRecord {
+            sequence: 2,
+            operation: "session.disconnect".to_string(),
+            ok: true,
+        });
+
+        Ok(ProbeTestReport {
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            session,
+            operations,
+            complete: true,
+        })
     }
 
     pub fn plan_flash(
@@ -590,6 +625,21 @@ mod tests {
         let second_plan = service.plan_flash(&second, None, None, None).unwrap();
 
         assert_ne!(first_plan.confirm_digest, second_plan.confirm_digest);
+    }
+
+    #[test]
+    fn probe_test_disconnects_and_can_be_repeated() {
+        let replay = fixture();
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let first = service.test_probe_connection(&probe_id, &target).unwrap();
+        let second = service.test_probe_connection(&probe_id, &target).unwrap();
+
+        assert!(first.complete);
+        assert!(second.complete);
+        assert_eq!(first.operations[1].operation, "session.disconnect");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Once, time::Duration};
 
 use probe_rs::{
     CoreStatus, HaltReason, Permissions, Session, Target,
@@ -23,6 +23,11 @@ use crate::{
 };
 
 const CORE_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
+static REGISTER_PROBE_RS_PLUGINS: Once = Once::new();
+
+fn register_probe_rs_plugins() {
+    REGISTER_PROBE_RS_PLUGINS.call_once(probe_rs_espressif::register_plugin);
+}
 
 struct ProgrammedImage {
     base_address: Address,
@@ -47,6 +52,7 @@ pub struct ProbeRsBackend {
 
 impl ProbeRsBackend {
     pub fn new(target_name: &str) -> Result<Self> {
+        register_probe_rs_plugins();
         let target = Registry::from_builtin_families()
             .get_target_by_name(target_name)
             .map_err(map_registry_error)?;
@@ -123,6 +129,7 @@ impl ProbeRsBackend {
 
 /// Discover probes through probe-rs without opening or mutating them.
 pub fn list_probes() -> Vec<ProbeInfo> {
+    register_probe_rs_plugins();
     let mut probes = Lister::new()
         .list_all_with_access()
         .into_iter()
@@ -785,6 +792,14 @@ mod tests {
         };
 
         assert_eq!(error.code, ErrorCode::TargetUnavailable);
+    }
+
+    #[test]
+    fn espressif_plugin_registers_targets() {
+        let backend = ProbeRsBackend::new("esp32s3").unwrap();
+
+        assert_eq!(backend.target().name, "esp32s3");
+        assert_eq!(backend.target().core_count, 2);
     }
 
     #[test]

@@ -63,6 +63,16 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum ProbeCommand {
     List,
+    Test(ProbeTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct ProbeTestSelection {
+    #[arg(long, help = "exact probe selector from probes list")]
+    pub probe: String,
+
+    #[arg(long, help = "exact target name")]
+    pub target: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -137,7 +147,12 @@ impl Cli {
     pub fn operation_name(&self) -> &'static str {
         match &self.command {
             Command::Doctor => "doctor",
-            Command::Probes { .. } => "probes.list",
+            Command::Probes {
+                command: ProbeCommand::List,
+            } => "probes.list",
+            Command::Probes {
+                command: ProbeCommand::Test(_),
+            } => "probes.test",
             Command::Flash {
                 command: FlashCommand::Plan(_),
             } => "flash.plan",
@@ -180,6 +195,9 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
         Command::Probes {
             command: ProbeCommand::List,
         } => list_probes(cli),
+        Command::Probes {
+            command: ProbeCommand::Test(selection),
+        } => test_probe(cli, selection),
         Command::Replay {
             command: ReplayCommand::Validate,
         } => {
@@ -328,6 +346,32 @@ fn list_probes(cli: &Cli) -> Result<CommandResult> {
         &json!({"backend": backend, "probes": probes}),
         human,
     ))
+}
+
+fn test_probe(cli: &Cli, selection: &ProbeTestSelection) -> Result<CommandResult> {
+    let report = match cli.backend {
+        BackendArg::Replay => {
+            let mut service =
+                DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
+            service.test_probe_connection(&selection.probe, &selection.target)?
+        }
+        BackendArg::ProbeRs => {
+            let backend = ProbeRsBackend::new(&selection.target)?;
+            let mut service = DebugService::new(backend);
+            service.test_probe_connection(&selection.probe, &selection.target)?
+        }
+        BackendArg::Openocd => return Err(unsupported_openocd("probe_connection_test")),
+    };
+    let human = format!(
+        "Connected and disconnected {} on {}\nTarget: {} ({} core(s), {})\nRisk: {}",
+        report.session.probe.id,
+        report.session.backend,
+        report.session.target.name,
+        report.session.target.core_count,
+        report.session.target.architecture,
+        report.risk
+    );
+    Ok(CommandResult::serializable("probes.test", &report, human))
 }
 
 fn replay_fixture_path(cli: &Cli) -> Result<&std::path::Path> {

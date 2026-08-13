@@ -24,6 +24,19 @@ cargo run -- --backend probe-rs probes list --json
 ```
 
 This command is read-only and does not require the standalone `probe-rs` CLI.
+The official probe-rs Espressif plugin is registered in-process, so native ESP
+USB-JTAG probes and Espressif targets are visible to the embedded library too.
+
+Test an exact probe/target connection without erasing, programming, resetting,
+halting, or reading target memory:
+
+```console
+cargo run -- --backend probe-rs probes test \
+  --probe <vid:pid:serial> --target <exact-target> --json
+```
+
+The command performs one attach/disconnect lifecycle and reports the target's
+conservative capability matrix as `R1_REVERSIBLE_CONTROL`.
 
 ## Build
 
@@ -101,12 +114,15 @@ See [docs/contracts.md](docs/contracts.md) and
 
 ## Current status
 
-Replay and native probe-rs guarded application flashing are implemented. The
-native path compiles and its target/address/sector policies are covered without
-hardware, but real-hardware acceptance is still pending because no debug probe
-was connected during this milestone. OpenOCD, ELF/HEX loading, RTT, persistent
-interactive debug sessions, multi-core post-flash snapshots, and non-boot NVM
-writes are not yet exposed. See `CHANGELOG.md` and
+Replay and native probe-rs guarded application flashing are implemented.
+Native discovery and attach/disconnect have been exercised on an nRF52840 over
+J-Link and an ESP32-S3 over native ESP USB-JTAG. nRF52840 backup, plan, and
+pre-write safety checks are complete; the device-write portion remains pending
+exact plan confirmation. ESP32-S3 guarded flash remains intentionally blocked
+because the current post-flash snapshot contract is single-core. OpenOCD,
+ELF/HEX loading, RTT, persistent interactive debug sessions, multi-core
+post-flash snapshots, and non-boot NVM writes are not yet exposed. See
+`CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 
 ## Acknowledgments

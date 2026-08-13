@@ -46,6 +46,41 @@ fn replay_fixture_lists_one_probe() {
 }
 
 #[test]
+fn replay_probe_test_reports_a_complete_session_lifecycle() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "probes",
+            "test",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "probes.test");
+    assert_eq!(result["data"]["risk"], "R1_REVERSIBLE_CONTROL");
+    assert_eq!(result["data"]["complete"], true);
+    assert_eq!(
+        result["data"]["operations"][0]["operation"],
+        "session.attach"
+    );
+    assert_eq!(
+        result["data"]["operations"][1]["operation"],
+        "session.disconnect"
+    );
+}
+
+#[test]
 fn wrong_confirmation_returns_stable_error() {
     let directory = tempdir().unwrap();
     let evidence = directory.path().join("run.evidence.json");
