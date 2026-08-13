@@ -120,11 +120,13 @@ J-Link and an ESP32-S3 over native ESP USB-JTAG. An nRF52840 single-page guarded
 write has passed exact-digest confirmation, read-back verification, unwritten
 byte preservation, reset/halt/snapshot/resume, complete evidence inspection,
 backup comparison, and serial runtime checks. The same preservation guarantees
-also passed for a 32-byte image crossing two adjacent 4 KiB pages. ESP32-S3
-guarded flash remains intentionally blocked because the current post-flash
-snapshot contract is single-core. OpenOCD, ELF/HEX loading, RTT, persistent
-interactive debug sessions, multi-core post-flash snapshots, and non-boot NVM
-writes are not yet exposed. See
+also passed for a 32-byte image crossing two adjacent 4 KiB pages. Physical
+probe removal returns stable unavailable errors without selecting another
+connected probe or creating evidence. ESP32-S3 guarded flash remains
+intentionally blocked because the current post-flash snapshot contract is
+single-core. OpenOCD, ELF/HEX loading, RTT, persistent interactive debug
+sessions, multi-core post-flash snapshots, and non-boot NVM writes are not yet
+exposed. See
 `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 

@@ -96,10 +96,18 @@ Partially run on 2026-08-13 with probe-rs 0.32.0 on Windows:
   The prefix outside the image, the 32-byte cross-page image, and the suffix
   outside the image each matched byte for byte. Code Flash, UICR, and the
   seven-`Z` serial runtime baseline also remained unchanged.
+- With the nRF/J-Link USB physically unplugged, `baud list`, standalone
+  probe-rs, and the embedded discovery path all showed that serial
+  `001050282192`, `COM15`, and `COM16` had disappeared while the ESP32-S3
+  remained connected. `probes test`, `flash plan`, and `flash execute` against
+  the missing selector each returned exit code 4 and `PROBE_UNAVAILABLE`.
+  No evidence file was created, and a subsequent ESP32-S3 attach/disconnect
+  test succeeded.
 
 The nRF single-page guarded write, read-back verification, post-reset snapshot,
 page preservation, evidence inspection, backup comparison, and observable
 runtime checks passed. The cross-page case also passed across two adjacent
 4096-byte pages. The affected pages were physically erased and reprogrammed,
-but their final byte content is identical to the write-before baselines. Only
-the unplugged-probe case remains pending from this checklist.
+but their final byte content is identical to the write-before baselines. The
+physical unplugged-probe case also passed, completing this checklist for the
+nRF52840/J-Link fixture.

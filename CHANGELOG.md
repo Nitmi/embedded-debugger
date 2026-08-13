@@ -40,5 +40,6 @@ All notable changes to this project will be documented in this file.
   USB-JTAG. nRF52840 single-page guarded write acceptance passed, including
   exact confirmation, read-back, page preservation, post-reset snapshot,
   evidence, backup, and runtime checks. The two-page cross-sector case also
-  passed; only the disconnected-probe case remains pending. ESP32-S3 guarded
-  flash awaits a defined multi-core post-flash contract.
+  passed. Physical probe removal consistently returns `PROBE_UNAVAILABLE`
+  without falling back to another connected probe. ESP32-S3 guarded flash
+  awaits a defined multi-core post-flash contract.
