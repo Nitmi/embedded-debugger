@@ -4,7 +4,8 @@ pub mod replay;
 use crate::{
     error::Result,
     model::{
-        Capabilities, CoreSnapshot, FlashRange, FlashReport, ProbeInfo, SessionInfo, TargetInfo,
+        Address, Capabilities, CoreSnapshot, FlashLayout, FlashReport, ProbeInfo, SessionInfo,
+        TargetInfo,
     },
 };
 
@@ -12,13 +13,24 @@ pub trait DebugBackend {
     fn name(&self) -> &'static str;
     fn list_probes(&self) -> Result<Vec<ProbeInfo>>;
     fn target(&self) -> &TargetInfo;
+    fn matches_target(&self, requested: &str) -> bool {
+        requested.eq_ignore_ascii_case(&self.target().name)
+    }
+    fn probe_identity_is_stable(&self, _probe: &ProbeInfo) -> bool {
+        true
+    }
     fn capabilities(&self) -> &Capabilities;
-    fn plan_flash_ranges(&self, firmware_size: u64) -> Result<Vec<FlashRange>>;
+    fn plan_flash_ranges(
+        &self,
+        firmware_size: u64,
+        requested_base_address: Option<Address>,
+    ) -> Result<FlashLayout>;
     fn attach(&mut self, probe_id: &str, target: &str) -> Result<SessionInfo>;
     fn program(
         &mut self,
         session: &SessionInfo,
         firmware: &[u8],
+        base_address: Address,
         firmware_sha256: &str,
     ) -> Result<FlashReport>;
     fn verify(&mut self, session: &SessionInfo, firmware_sha256: &str) -> Result<bool>;

@@ -125,8 +125,14 @@ pub enum CoreState {
     Unknown,
 }
 
+fn unknown_core_state() -> CoreState {
+    CoreState::Unknown
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoreSnapshot {
+    #[serde(default = "unknown_core_state")]
+    pub captured_state: CoreState,
     pub state: CoreState,
     pub pc: Address,
     pub sp: Address,
@@ -148,6 +154,8 @@ pub struct SessionInfo {
 pub struct FirmwareInfo {
     pub path: String,
     pub format: String,
+    #[serde(default)]
+    pub base_address: Option<Address>,
     pub size: u64,
     pub sha256: String,
 }
@@ -158,10 +166,35 @@ pub struct FlashRange {
     pub length: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlashLayout {
+    pub write_ranges: Vec<FlashRange>,
+    pub erase_ranges: Vec<FlashRange>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedAction {
     pub action: String,
     pub risk: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlashPolicy {
+    pub erase_mode: String,
+    pub preserve_unwritten_bytes: bool,
+    pub verify: bool,
+    pub post_flash: String,
+}
+
+impl Default for FlashPolicy {
+    fn default() -> Self {
+        Self {
+            erase_mode: "affected_sectors_only".to_string(),
+            preserve_unwritten_bytes: true,
+            verify: true,
+            post_flash: "reset_halt_snapshot_resume".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +206,10 @@ pub struct FlashPlan {
     pub target: TargetInfo,
     pub firmware: FirmwareInfo,
     pub ranges: Vec<FlashRange>,
+    #[serde(default)]
+    pub erase_ranges: Vec<FlashRange>,
+    #[serde(default)]
+    pub policy: FlashPolicy,
     pub actions: Vec<PlannedAction>,
     pub confirm_digest: String,
 }
@@ -200,6 +237,18 @@ pub struct EvidenceBundle {
     pub probe: ProbeInfo,
     pub target: TargetInfo,
     pub firmware: FirmwareInfo,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub confirm_digest: Option<String>,
+    #[serde(default)]
+    pub ranges: Vec<FlashRange>,
+    #[serde(default)]
+    pub erase_ranges: Vec<FlashRange>,
+    #[serde(default)]
+    pub policy: Option<FlashPolicy>,
+    #[serde(default)]
+    pub flash: Option<FlashReport>,
     pub core: CoreSnapshot,
     pub operations: Vec<OperationRecord>,
     pub complete: bool,

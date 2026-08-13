@@ -9,14 +9,16 @@ use crate::{
     backend::DebugBackend,
     error::{DebugError, ErrorCode, Result},
     model::{
-        Address, Capabilities, CoreSnapshot, FlashRange, FlashReport, ProbeInfo, SessionInfo,
-        TargetInfo,
+        Address, Capabilities, CoreSnapshot, FlashLayout, FlashRange, FlashReport, ProbeInfo,
+        SessionInfo, TargetInfo,
     },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayFlashBehavior {
     pub base_address: Address,
+    #[serde(default)]
+    pub erase_ranges: Vec<FlashRange>,
     #[serde(default)]
     pub expected_firmware_sha256: Option<String>,
     #[serde(default = "default_true")]
@@ -42,6 +44,7 @@ impl Default for ReplayFlashBehavior {
     fn default() -> Self {
         Self {
             base_address: Address(0),
+            erase_ranges: Vec::new(),
             expected_firmware_sha256: None,
             verify_success: true,
         }
@@ -147,7 +150,21 @@ impl DebugBackend for ReplayBackend {
         &self.fixture.capabilities
     }
 
-    fn plan_flash_ranges(&self, firmware_size: u64) -> Result<Vec<FlashRange>> {
+    fn plan_flash_ranges(
+        &self,
+        firmware_size: u64,
+        requested_base_address: Option<Address>,
+    ) -> Result<FlashLayout> {
+        let base_address = requested_base_address.unwrap_or(self.fixture.flash.base_address);
+        if base_address != self.fixture.flash.base_address {
+            return Err(DebugError::fixture(
+                "requested base address does not match replay evidence",
+                json!({
+                    "requested": base_address,
+                    "available": self.fixture.flash.base_address,
+                }),
+            ));
+        }
         self.fixture
             .flash
             .base_address
@@ -162,10 +179,25 @@ impl DebugBackend for ReplayBackend {
                     }),
                 )
             })?;
-        Ok(vec![FlashRange {
-            start: self.fixture.flash.base_address,
+        let range = FlashRange {
+            start: base_address,
             length: firmware_size,
-        }])
+        };
+        let erase_ranges = if self.fixture.flash.erase_ranges.is_empty() {
+            vec![range.clone()]
+        } else {
+            self.fixture.flash.erase_ranges.clone()
+        };
+        if !ranges_cover(&erase_ranges, &range)? {
+            return Err(DebugError::fixture(
+                "replay erase ranges do not contain the planned write range",
+                json!({"write_range": range, "erase_ranges": erase_ranges}),
+            ));
+        }
+        Ok(FlashLayout {
+            write_ranges: vec![range.clone()],
+            erase_ranges,
+        })
     }
 
     fn attach(&mut self, probe_id: &str, target: &str) -> Result<SessionInfo> {
@@ -185,6 +217,8 @@ impl DebugBackend for ReplayBackend {
         }
         let session_id = format!("ses_{}", Uuid::new_v4().simple());
         self.active_session_id = Some(session_id.clone());
+        self.programmed_sha256 = None;
+        self.reset_performed = false;
         Ok(SessionInfo {
             session_id,
             backend: self.name().to_string(),
@@ -198,9 +232,21 @@ impl DebugBackend for ReplayBackend {
         &mut self,
         session: &SessionInfo,
         firmware: &[u8],
+        base_address: Address,
         firmware_sha256: &str,
     ) -> Result<FlashReport> {
         self.ensure_session(session)?;
+        if base_address != self.fixture.flash.base_address {
+            return Err(DebugError::new(
+                ErrorCode::PlanStale,
+                "flash address changed after replay planning",
+                2,
+                json!({
+                    "requested": base_address,
+                    "available": self.fixture.flash.base_address,
+                }),
+            ));
+        }
         if !self.fixture.capabilities.flash {
             return Err(DebugError::new(
                 ErrorCode::CapabilityUnavailable,
@@ -260,6 +306,98 @@ impl DebugBackend for ReplayBackend {
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()> {
         self.ensure_session(session)?;
         self.active_session_id = None;
+        self.programmed_sha256 = None;
+        self.reset_performed = false;
         Ok(())
+    }
+}
+
+fn ranges_cover(ranges: &[FlashRange], required: &FlashRange) -> Result<bool> {
+    let required_end = required
+        .start
+        .0
+        .checked_add(required.length)
+        .ok_or_else(|| {
+            DebugError::fixture(
+                "replay write range overflows the address space",
+                json!({"write_range": required}),
+            )
+        })?;
+    let mut spans = ranges
+        .iter()
+        .map(|range| {
+            range
+                .start
+                .0
+                .checked_add(range.length)
+                .map(|end| (range.start.0, end))
+                .ok_or_else(|| {
+                    DebugError::fixture(
+                        "replay erase range overflows the address space",
+                        json!({"erase_range": range}),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    spans.sort_unstable_by_key(|(start, _)| *start);
+
+    let mut cursor = required.start.0;
+    for (start, end) in spans {
+        if end <= cursor {
+            continue;
+        }
+        if start > cursor {
+            return Ok(false);
+        }
+        cursor = cursor.max(end);
+        if cursor >= required_end {
+            return Ok(true);
+        }
+    }
+    Ok(cursor >= required_end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adjacent_erase_ranges_cover_a_cross_sector_write() {
+        let erase_ranges = [
+            FlashRange {
+                start: Address(0x0800_0000),
+                length: 0x800,
+            },
+            FlashRange {
+                start: Address(0x0800_0800),
+                length: 0x800,
+            },
+        ];
+        let write_range = FlashRange {
+            start: Address(0x0800_0700),
+            length: 0x200,
+        };
+
+        assert!(ranges_cover(&erase_ranges, &write_range).unwrap());
+    }
+
+    #[test]
+    fn a_gap_in_erase_ranges_does_not_cover_a_write() {
+        let erase_ranges = [
+            FlashRange {
+                start: Address(0x0800_0000),
+                length: 0x800,
+            },
+            FlashRange {
+                start: Address(0x0800_0900),
+                length: 0x700,
+            },
+        ];
+        let write_range = FlashRange {
+            start: Address(0x0800_0700),
+            length: 0x300,
+        };
+
+        assert!(!ranges_cover(&erase_ranges, &write_range).unwrap());
     }
 }

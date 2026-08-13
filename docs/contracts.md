@@ -38,8 +38,8 @@ Diagnostic logs belong on stderr. A command never mixes a human preamble into
 JSON stdout.
 
 `doctor` reports capabilities compiled into this binary separately from
-optional external executables. In particular, native probe-rs discovery does
-not require the standalone `probe-rs` CLI to be installed.
+optional external executables. Native probe-rs discovery and guarded flashing
+do not require the standalone `probe-rs` CLI to be installed.
 
 ## Exit codes
 
@@ -62,10 +62,36 @@ JavaScript clients. Firmware and artifact content is identified with lowercase
 SHA-256 hex strings. Large binary content will be returned as bounded artifact
 references rather than unbounded inline data.
 
-The initial Replay milestone accepts raw `.bin` firmware. Its fixture must
-declare the base address so a flash plan never presents a fabricated or unknown
-write range. ELF and HEX segment parsing belongs to the native probe-rs
-milestone.
+The current contract accepts raw `.bin` firmware. A probe-rs plan requires an
+explicit `--base-address`; Replay takes its address and erase impact from the
+fixture. A plan exposes:
+
+- `firmware.base_address`: the first byte to program.
+- `ranges`: exact bytes supplied by the image.
+- `erase_ranges`: complete sectors affected by programming.
+- `policy`: erase mode, preservation, verification, and post-flash behavior.
+- `confirm_digest`: SHA-256 over backend, probe, target, firmware, both range
+  sets, and policy.
+
+The probe-rs workflow limits raw BIN data to readable boot NVM. It does not
+grant the probe-rs full-chip erase permission. `preserve_unwritten_bytes=true`
+means bytes in an affected sector but outside `ranges` are read and restored.
+Mutation plans also require a non-empty probe hardware serial number; a VID/PID
+selector alone is not accepted as stable device identity.
+
+## Snapshot and evidence semantics
+
+`core.captured_state` is the state while PC/SP/registers were read. `core.state`
+is the state after capture is complete. The guarded flash workflow normally
+reports `captured_state="halted"` and `state="running"`.
+
+Evidence is reserved before opening hardware and published without overwriting
+an existing path. `complete=true` means program, verify, reset, snapshot,
+resume, and session disconnect all completed. New evidence includes the plan
+identity, confirmation digest, write/erase ranges, policy, flash report, and
+ordered operations.
+
+ELF and HEX segment parsing are not yet part of this contract.
 
 ## Compatibility
 

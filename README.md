@@ -4,26 +4,26 @@
 debugging. It is CLI-first: humans, scripts, CI, Skills, and MCP clients will all
 use the same versioned domain contract.
 
-The current milestone implements the contract and a deterministic Replay
-backend. It proves the complete guarded flow without requiring hardware:
+The current milestone implements the contract, a deterministic Replay backend,
+and a native probe-rs guarded flash workflow:
 
 ```text
 discover -> select exact probe/target -> flash plan -> confirm digest
-         -> simulated program/verify -> reset -> snapshot evidence
+         -> sector erase/program -> read-back verify
+         -> reset-and-halt -> snapshot -> resume -> evidence
 ```
 
-Real probe-rs and OpenOCD backends are the next milestones. Replay is a product
-backend, not a throwaway mock: it will power CI, regression fixtures, issue
-reports, and offline Agent analysis.
+Replay is a product backend, not a throwaway mock: it powers CI, regression
+fixtures, issue reports, and offline Agent analysis. OpenOCD remains a future
+fallback backend.
 
-Native probe discovery is already available through probe-rs:
+Native probe discovery is available through the embedded probe-rs library:
 
 ```console
 cargo run -- --backend probe-rs probes list --json
 ```
 
-This command is read-only. Native attach, flash, and debug operations remain
-disabled until their session lifecycle and hardware acceptance tests land.
+This command is read-only and does not require the standalone `probe-rs` CLI.
 
 ## Build
 
@@ -58,6 +58,35 @@ cargo run -- --fixture examples/replay/stm32g4.json flash execute examples/firmw
 Changing the firmware, target, or probe changes the digest. Execution rejects a
 stale or incorrect confirmation before a backend write is attempted.
 
+## Native probe-rs flash
+
+List probes and create a plan for a raw BIN image:
+
+```console
+cargo run -- --backend probe-rs probes list --json
+cargo run -- --backend probe-rs flash plan firmware.bin \
+  --probe <vid:pid:serial> --target STM32G431CBTx \
+  --base-address 0x08000000 --json
+```
+
+Review the returned `ranges`, `erase_ranges`, `policy`, and exact identities,
+then execute with the same selection and returned digest:
+
+```console
+cargo run -- --backend probe-rs flash execute firmware.bin \
+  --probe <vid:pid:serial> --target STM32G431CBTx \
+  --base-address 0x08000000 --confirm <digest> \
+  --evidence run.evidence.json --json
+```
+
+The native workflow accepts only raw BIN data in readable boot flash. It erases
+only affected sectors, restores bytes outside the image within those sectors,
+does not grant full-chip erase permission, verifies by read-back, captures
+PC/SP/LR while halted after reset, resumes the core, disconnects, and then
+atomically publishes complete evidence. Device-write plans require a probe that
+reports a non-empty hardware serial number, so reconnecting another same-model
+probe cannot silently satisfy an old confirmation digest.
+
 ## Design constraints
 
 - Successes and failures have a stable `schema_version` and `operation_id`.
@@ -65,17 +94,20 @@ stale or incorrect confirmation before a backend write is attempted.
 - Backends advertise capabilities; callers do not infer them from backend names.
 - Evidence is written atomically and referenced by SHA-256.
 - Replay fixtures are validated and cannot silently opt into unsupported behavior.
+- A complete evidence bundle means the debug session was also disconnected.
 
 See [docs/contracts.md](docs/contracts.md) and
 [docs/decisions/0001-cli-first-control-plane.md](docs/decisions/0001-cli-first-control-plane.md).
 
 ## Current status
 
-This repository is at its first development checkpoint. Replay workflows and
-native probe discovery are implemented and tested. Native target mutation is
-intentionally unavailable until probe-rs attach/flash lifecycle handling and a
-real-hardware acceptance fixture are complete. See `CHANGELOG.md` for the exact
-scope and known limitations.
+Replay and native probe-rs guarded application flashing are implemented. The
+native path compiles and its target/address/sector policies are covered without
+hardware, but real-hardware acceptance is still pending because no debug probe
+was connected during this milestone. OpenOCD, ELF/HEX loading, RTT, persistent
+interactive debug sessions, multi-core post-flash snapshots, and non-boot NVM
+writes are not yet exposed. See `CHANGELOG.md` and
+[docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 
 ## Acknowledgments
 

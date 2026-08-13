@@ -30,6 +30,7 @@
     "trace": false
   },
   "initial_core": {
+    "captured_state": "halted",
     "state": "halted",
     "pc": "0x08001234",
     "sp": "0x20007F00",
@@ -40,6 +41,7 @@
     "halt_reason": "breakpoint"
   },
   "after_reset_core": {
+    "captured_state": "halted",
     "state": "running",
     "pc": "0x08000100",
     "sp": "0x20008000",
@@ -51,6 +53,12 @@
   },
   "flash": {
     "base_address": "0x08000000",
+    "erase_ranges": [
+      {
+        "start": "0x08000000",
+        "length": 2048
+      }
+    ],
     "expected_firmware_sha256": null,
     "verify_success": true
   }

@@ -6,11 +6,13 @@ use serde_json::{Value, json};
 
 use crate::{
     backend::{
-        probe_rs,
+        DebugBackend,
+        probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
     },
     doctor,
     error::{DebugError, Result},
+    model::{Address, FlashRange},
     service::{DebugService, inspect_evidence},
 };
 
@@ -78,6 +80,14 @@ pub struct FlashSelection {
 
     #[arg(long)]
     pub target: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        value_parser = parse_address,
+        help = "raw BIN load address (required by probe-rs)"
+    )]
+    pub base_address: Option<Address>,
 }
 
 #[derive(Debug, Args)]
@@ -148,7 +158,7 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                 "doctor",
                 &report,
                 format!(
-                    "Replay backend: ready\nprobe-rs discovery: ready (embedded library)\nprobe-rs CLI: {}\nOpenOCD: {}",
+                    "Replay backend: ready\nprobe-rs guarded flash: ready (embedded library)\nprobe-rs CLI: {}\nOpenOCD: {}",
                     availability(&report, "probe-rs-cli"),
                     availability(&report, "openocd")
                 ),
@@ -193,50 +203,91 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
         }
         Command::Flash {
             command: FlashCommand::Plan(selection),
-        } => {
-            ensure_replay(cli.backend)?;
-            let service = DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
-            let plan = service.plan_flash(
-                &selection.firmware,
-                selection.probe.as_deref(),
-                selection.target.as_deref(),
-            )?;
-            let human = format!(
-                "Plan {}\nTarget: {}\nProbe: {}\nFirmware: {} bytes ({})\nRisk: {}\nConfirm: {}",
-                plan.plan_id,
-                plan.target.name,
-                plan.probe.id,
-                plan.firmware.size,
-                plan.firmware.sha256,
-                plan.risk,
-                plan.confirm_digest
-            );
-            Ok(CommandResult::serializable("flash.plan", &plan, human))
-        }
+        } => match cli.backend {
+            BackendArg::Replay => {
+                let service =
+                    DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
+                run_flash_plan(&service, selection)
+            }
+            BackendArg::ProbeRs => {
+                let backend = ProbeRsBackend::new(required_native_target(selection)?)?;
+                run_flash_plan(&DebugService::new(backend), selection)
+            }
+            BackendArg::Openocd => Err(unsupported_openocd("flash")),
+        },
         Command::Flash {
             command: FlashCommand::Execute(arguments),
-        } => {
-            ensure_replay(cli.backend)?;
-            let mut service =
-                DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
-            let result = service.execute_flash(
-                &arguments.selection.firmware,
-                arguments.selection.probe.as_deref(),
-                arguments.selection.target.as_deref(),
-                &arguments.confirm,
-                &arguments.evidence,
-            )?;
-            let human = format!(
-                "Flashed and verified {} bytes\nTarget: {}\nSnapshot: {:?}, PC={}\nEvidence: {}",
-                result.flash.bytes_programmed,
-                result.session.target.name,
-                result.snapshot.state,
-                result.snapshot.pc,
-                result.evidence.path
-            );
-            Ok(CommandResult::serializable("flash.execute", &result, human))
-        }
+        } => match cli.backend {
+            BackendArg::Replay => {
+                let mut service =
+                    DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
+                run_flash_execute(&mut service, arguments)
+            }
+            BackendArg::ProbeRs => {
+                let backend = ProbeRsBackend::new(required_native_target(&arguments.selection)?)?;
+                run_flash_execute(&mut DebugService::new(backend), arguments)
+            }
+            BackendArg::Openocd => Err(unsupported_openocd("flash")),
+        },
     }
+}
+
+fn run_flash_plan<B: DebugBackend>(
+    service: &DebugService<B>,
+    selection: &FlashSelection,
+) -> Result<CommandResult> {
+    let plan = service.plan_flash(
+        &selection.firmware,
+        selection.probe.as_deref(),
+        selection.target.as_deref(),
+        selection.base_address,
+    )?;
+    let human = format!(
+        "Plan {}\nTarget: {}\nProbe: {}\nFirmware: {} bytes at {} ({})\nErase ranges: {}\nRisk: {}\nConfirm: {}",
+        plan.plan_id,
+        plan.target.name,
+        plan.probe.id,
+        plan.firmware.size,
+        plan.firmware
+            .base_address
+            .map_or_else(|| "unknown".to_string(), |address| address.to_string()),
+        plan.firmware.sha256,
+        describe_ranges(&plan.erase_ranges),
+        plan.risk,
+        plan.confirm_digest
+    );
+    Ok(CommandResult::serializable("flash.plan", &plan, human))
+}
+
+fn describe_ranges(ranges: &[FlashRange]) -> String {
+    ranges
+        .iter()
+        .map(|range| format!("{} + {} bytes", range.start, range.length))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn run_flash_execute<B: DebugBackend>(
+    service: &mut DebugService<B>,
+    arguments: &FlashExecute,
+) -> Result<CommandResult> {
+    let result = service.execute_flash(
+        &arguments.selection.firmware,
+        arguments.selection.probe.as_deref(),
+        arguments.selection.target.as_deref(),
+        arguments.selection.base_address,
+        &arguments.confirm,
+        &arguments.evidence,
+    )?;
+    let human = format!(
+        "Flashed and verified {} bytes\nTarget: {}\nSnapshot: {:?}, PC={}\nEvidence: {}",
+        result.flash.bytes_programmed,
+        result.session.target.name,
+        result.snapshot.state,
+        result.snapshot.pc,
+        result.evidence.path
+    );
+    Ok(CommandResult::serializable("flash.execute", &result, human))
 }
 
 fn list_probes(cli: &Cli) -> Result<CommandResult> {
@@ -247,12 +298,7 @@ fn list_probes(cli: &Cli) -> Result<CommandResult> {
         }
         BackendArg::ProbeRs => ("probe-rs", probe_rs::list_probes()),
         BackendArg::Openocd => {
-            return Err(DebugError::new(
-                crate::error::ErrorCode::CapabilityUnavailable,
-                "OpenOCD discovery is not implemented in this milestone",
-                6,
-                json!({"backend": "openocd", "capability": "probe_discovery"}),
-            ));
+            return Err(unsupported_openocd("probe_discovery"));
         }
     };
     let human = if probes.is_empty() {
@@ -304,6 +350,28 @@ fn ensure_replay(backend: BackendArg) -> Result<()> {
             json!({"backend": format!("{backend:?}").to_ascii_lowercase()}),
         ))
     }
+}
+
+fn required_native_target(selection: &FlashSelection) -> Result<&str> {
+    selection.target.as_deref().ok_or_else(|| {
+        DebugError::config(
+            "the probe-rs backend requires an exact --target name",
+            json!({"backend": "probe-rs"}),
+        )
+    })
+}
+
+fn parse_address(value: &str) -> std::result::Result<Address, String> {
+    Address::parse(value).map_err(|error| error.message)
+}
+
+fn unsupported_openocd(capability: &str) -> DebugError {
+    DebugError::new(
+        crate::error::ErrorCode::CapabilityUnavailable,
+        "OpenOCD backend is not implemented in this milestone",
+        6,
+        json!({"backend": "openocd", "capability": capability}),
+    )
 }
 
 fn availability(report: &doctor::DoctorReport, name: &str) -> &'static str {

@@ -24,6 +24,7 @@ fn doctor_json_uses_versioned_envelope() {
     assert_eq!(result["operation"], "doctor");
     assert_eq!(result["data"]["replay_available"], true);
     assert_eq!(result["data"]["probe_rs_discovery_available"], true);
+    assert_eq!(result["data"]["probe_rs_guarded_flash_available"], true);
     assert_eq!(result["data"]["tools"][0]["name"], "probe-rs-cli");
     assert_eq!(result["data"]["tools"][0]["required"], false);
     assert!(result["operation_id"].as_str().unwrap().starts_with("op_"));
@@ -99,6 +100,14 @@ fn plan_then_execute_completes_replay_journey() {
     let confirmation = plan["data"]["confirm_digest"].as_str().unwrap();
     assert_eq!(plan["data"]["ranges"][0]["start"], "0x08000000");
     assert_eq!(plan["data"]["ranges"][0]["length"], 19);
+    assert_eq!(plan["data"]["firmware"]["base_address"], "0x08000000");
+    assert_eq!(plan["data"]["erase_ranges"][0]["start"], "0x08000000");
+    assert_eq!(plan["data"]["erase_ranges"][0]["length"], 2048);
+    assert_eq!(
+        plan["data"]["policy"]["erase_mode"],
+        "affected_sectors_only"
+    );
+    assert_eq!(plan["data"]["policy"]["preserve_unwritten_bytes"], true);
 
     let execute_output = Command::cargo_bin("embedded-debugger")
         .unwrap()
@@ -121,6 +130,77 @@ fn plan_then_execute_completes_replay_journey() {
         .clone();
     let execute: Value = serde_json::from_slice(&execute_output).unwrap();
     assert_eq!(execute["data"]["flash"]["verified"], true);
+    assert_eq!(execute["data"]["snapshot"]["captured_state"], "halted");
     assert_eq!(execute["data"]["snapshot"]["state"], "running");
     assert!(evidence.exists());
+
+    let evidence_data: Value = serde_json::from_slice(&fs::read(&evidence).unwrap()).unwrap();
+    assert_eq!(evidence_data["plan_id"], plan["data"]["plan_id"]);
+    assert_eq!(
+        evidence_data["confirm_digest"],
+        plan["data"]["confirm_digest"]
+    );
+    assert_eq!(evidence_data["flash"]["verified"], true);
+    assert_eq!(evidence_data["erase_ranges"][0]["length"], 2048);
+    assert_eq!(evidence_data["operations"].as_array().unwrap().len(), 8);
+    assert_eq!(
+        evidence_data["operations"][7]["operation"],
+        "session.disconnect"
+    );
+}
+
+#[test]
+fn native_raw_bin_requires_base_address_before_probe_discovery() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--backend",
+            "probe-rs",
+            "flash",
+            "plan",
+            "examples/firmware/demo.bin",
+            "--target",
+            "STM32G431CBTx",
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--base-address")
+    );
+}
+
+#[test]
+fn native_unknown_target_is_a_stable_error() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--backend",
+            "probe-rs",
+            "flash",
+            "plan",
+            "examples/firmware/demo.bin",
+            "--target",
+            "definitely-not-a-real-target",
+            "--base-address",
+            "0x08000000",
+            "--json",
+        ])
+        .assert()
+        .code(4)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["error"]["code"], "TARGET_UNAVAILABLE");
 }

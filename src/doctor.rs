@@ -18,6 +18,7 @@ pub struct DoctorReport {
     pub package_version: &'static str,
     pub replay_available: bool,
     pub probe_rs_discovery_available: bool,
+    pub probe_rs_guarded_flash_available: bool,
     pub tools: Vec<ToolCheck>,
 }
 
@@ -37,10 +38,11 @@ pub fn inspect() -> DoctorReport {
         ),
     ];
     DoctorReport {
-        status: "replay_and_probe_discovery_ready".to_string(),
+        status: "replay_and_probe_rs_guarded_flash_ready".to_string(),
         package_version: env!("CARGO_PKG_VERSION"),
         replay_available: true,
         probe_rs_discovery_available: true,
+        probe_rs_guarded_flash_available: true,
         tools,
     }
 }
