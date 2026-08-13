@@ -10,15 +10,16 @@ use probe_rs::{
     },
 };
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    backend::DebugBackend,
+    backend::{DebugBackend, firmware_flash_report, validate_firmware_segments},
     error::{DebugError, ErrorCode, Result},
+    firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreObservation, CoreSnapshot, CoreState, FirmwareImageOptions,
-        FlashLayout, FlashRange, FlashReport, ProbeInfo, SessionInfo, TargetInfo,
+        FirmwareSegmentInfo, FlashLayout, FlashRange, FlashReport, ProbeInfo, SessionInfo,
+        TargetInfo,
     },
 };
 
@@ -30,9 +31,8 @@ fn register_probe_rs_plugins() {
 }
 
 struct ProgrammedImage {
-    base_address: Address,
-    bytes: Vec<u8>,
-    sha256: String,
+    segments: Vec<FirmwareSegmentInfo>,
+    firmware_sha256: String,
 }
 
 struct NativeSession {
@@ -75,6 +75,8 @@ impl ProbeRsBackend {
         };
         let capabilities = Capabilities {
             flash,
+            // Advertise only after target-specific segmented execution acceptance.
+            segmented_flash: false,
             verify: flash,
             halt: true,
             run: true,
@@ -432,26 +434,39 @@ impl DebugBackend for ProbeRsBackend {
     fn program(
         &mut self,
         session: &SessionInfo,
-        firmware: &[u8],
-        base_address: Address,
+        segments: &[FirmwareSegment],
         firmware_sha256: &str,
     ) -> Result<FlashReport> {
-        self.plan_flash_ranges(firmware.len() as u64, Some(base_address))?;
-        let actual_sha256 = hex::encode(Sha256::digest(firmware));
-        if actual_sha256 != firmware_sha256 {
+        validate_firmware_segments(segments)?;
+        if segments.len() > 1 && !self.capabilities.segmented_flash {
             return Err(DebugError::new(
-                ErrorCode::PlanStale,
-                "firmware bytes do not match the planned SHA-256",
-                2,
-                json!({"planned": firmware_sha256, "actual": actual_sha256}),
+                ErrorCode::CapabilityUnavailable,
+                "segmented flash execution has not passed target-specific acceptance",
+                6,
+                json!({
+                    "backend": self.name(),
+                    "target": self.target_info.name,
+                    "segment_count": segments.len(),
+                }),
             ));
         }
+        self.plan_segmented_flash_ranges(
+            &segments
+                .iter()
+                .map(|segment| FlashRange {
+                    start: segment.info.start,
+                    length: segment.info.length,
+                })
+                .collect::<Vec<_>>(),
+        )?;
 
         let active = self.ensure_session_mut(session)?;
         let mut loader = active.session.target().flash_loader();
-        loader
-            .add_data(base_address.0, firmware)
-            .map_err(|error| map_flash_error("stage firmware", error))?;
+        for segment in segments {
+            loader
+                .add_data(segment.info.start.0, &segment.data)
+                .map_err(|error| map_flash_error("stage firmware segment", error))?;
+        }
         let mut options = DownloadOptions::default();
         options.keep_unwritten_bytes = true;
         options.do_chip_erase = false;
@@ -462,19 +477,23 @@ impl DebugBackend for ProbeRsBackend {
             .commit(&mut active.session, options)
             .map_err(|error| map_flash_error("program firmware", error))?;
         active.programmed = Some(ProgrammedImage {
-            base_address,
-            bytes: firmware.to_vec(),
-            sha256: firmware_sha256.to_string(),
+            segments: segments
+                .iter()
+                .map(|segment| segment.info.clone())
+                .collect(),
+            firmware_sha256: firmware_sha256.to_string(),
         });
 
-        Ok(FlashReport {
-            bytes_programmed: firmware.len() as u64,
-            firmware_sha256: firmware_sha256.to_string(),
-            verified: false,
-        })
+        firmware_flash_report(segments, firmware_sha256, false)
     }
 
-    fn verify(&mut self, session: &SessionInfo, firmware_sha256: &str) -> Result<bool> {
+    fn verify(
+        &mut self,
+        session: &SessionInfo,
+        segments: &[FirmwareSegment],
+        firmware_sha256: &str,
+    ) -> Result<FlashReport> {
+        validate_firmware_segments(segments)?;
         let active = self.ensure_session_mut(session)?;
         let image = active.programmed.as_ref().ok_or_else(|| {
             DebugError::new(
@@ -484,23 +503,47 @@ impl DebugBackend for ProbeRsBackend {
                 json!({"session_id": session.session_id}),
             )
         })?;
-        if image.sha256 != firmware_sha256 {
+        if image.firmware_sha256 != firmware_sha256 {
             return Err(DebugError::new(
                 ErrorCode::PlanStale,
                 "verification digest differs from the programmed firmware",
                 2,
-                json!({"programmed": image.sha256, "received": firmware_sha256}),
+                json!({
+                    "programmed": image.firmware_sha256,
+                    "received": firmware_sha256,
+                }),
             ));
         }
-        let mut loader = active.session.target().flash_loader();
-        loader
-            .add_data(image.base_address.0, &image.bytes)
-            .map_err(|error| map_flash_error("stage verification", error))?;
-        match loader.verify(&mut active.session, &mut FlashProgress::empty()) {
-            Ok(()) => Ok(true),
-            Err(FlashError::Verify) => Ok(false),
-            Err(error) => Err(map_flash_error("verify firmware", error)),
+        let received_manifest = segments
+            .iter()
+            .map(|segment| &segment.info)
+            .collect::<Vec<_>>();
+        if !image.segments.iter().eq(received_manifest.iter().copied()) {
+            return Err(DebugError::new(
+                ErrorCode::PlanStale,
+                "verification segments differ from the programmed firmware manifest",
+                2,
+                json!({
+                    "programmed_segments": image.segments,
+                    "received_segments": received_manifest,
+                }),
+            ));
         }
+        let mut report = firmware_flash_report(segments, firmware_sha256, false)?;
+        for (segment, segment_report) in segments.iter().zip(&mut report.segments) {
+            let mut loader = active.session.target().flash_loader();
+            loader
+                .add_data(segment.info.start.0, &segment.data)
+                .map_err(|error| map_flash_error("stage segment verification", error))?;
+            segment_report.verified =
+                match loader.verify(&mut active.session, &mut FlashProgress::empty()) {
+                    Ok(()) => true,
+                    Err(FlashError::Verify) => false,
+                    Err(error) => return Err(map_flash_error("verify firmware segment", error)),
+                };
+        }
+        report.verified = report.segments.iter().all(|segment| segment.verified);
+        Ok(report)
     }
 
     fn reset(&mut self, session: &SessionInfo) -> Result<()> {
@@ -1271,6 +1314,7 @@ mod tests {
 
         assert_eq!(backend.target().name, "esp32s3");
         assert_eq!(backend.target().core_count, 2);
+        assert!(!backend.capabilities().segmented_flash);
         assert!(
             backend
                 .volatile_target_state_notes()

@@ -17,6 +17,7 @@
   },
   "capabilities": {
     "flash": true,
+    "segmented_flash": false,
     "verify": true,
     "halt": true,
     "run": true,

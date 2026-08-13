@@ -6,11 +6,12 @@ use uuid::Uuid;
 
 use crate::{
     SCHEMA_VERSION,
-    backend::DebugBackend,
+    backend::{DebugBackend, firmware_flash_report, validate_firmware_segments},
     error::{DebugError, ErrorCode, Result},
+    firmware::FirmwareSegment,
     model::{
-        Address, Capabilities, CoreObservation, CoreSnapshot, FlashLayout, FlashRange, FlashReport,
-        ProbeInfo, SessionInfo, TargetInfo, validate_core_inventory,
+        Address, Capabilities, CoreObservation, CoreSnapshot, FirmwareSegmentInfo, FlashLayout,
+        FlashRange, FlashReport, ProbeInfo, SessionInfo, TargetInfo, validate_core_inventory,
     },
 };
 
@@ -97,6 +98,12 @@ impl ReplayFixture {
                 json!({"expected_firmware_sha256": expected}),
             ));
         }
+        if self.capabilities.segmented_flash && !self.capabilities.flash {
+            return Err(DebugError::fixture(
+                "segmented flash capability requires base flash capability",
+                json!({"capability": "segmented_flash"}),
+            ));
+        }
         if !self.live_cores.is_empty()
             && let Err(problem) = validate_core_inventory(&self.target, &self.live_cores)
         {
@@ -123,7 +130,7 @@ impl ReplayFixture {
 pub struct ReplayBackend {
     fixture: ReplayFixture,
     active_session_id: Option<String>,
-    programmed_sha256: Option<String>,
+    programmed: Option<(String, Vec<FirmwareSegmentInfo>)>,
     reset_performed: bool,
 }
 
@@ -136,7 +143,7 @@ impl ReplayBackend {
         Self {
             fixture,
             active_session_id: None,
-            programmed_sha256: None,
+            programmed: None,
             reset_performed: false,
         }
     }
@@ -301,7 +308,7 @@ impl DebugBackend for ReplayBackend {
         }
         let session_id = format!("ses_{}", Uuid::new_v4().simple());
         self.active_session_id = Some(session_id.clone());
-        self.programmed_sha256 = None;
+        self.programmed = None;
         self.reset_performed = false;
         Ok(SessionInfo {
             session_id,
@@ -315,18 +322,35 @@ impl DebugBackend for ReplayBackend {
     fn program(
         &mut self,
         session: &SessionInfo,
-        firmware: &[u8],
-        base_address: Address,
+        segments: &[FirmwareSegment],
         firmware_sha256: &str,
     ) -> Result<FlashReport> {
         self.ensure_session(session)?;
-        if base_address != self.fixture.flash.base_address {
+        validate_firmware_segments(segments)?;
+        if segments.len() > 1 && !self.fixture.capabilities.segmented_flash {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "replay fixture does not advertise segmented flash capability",
+                6,
+                json!({"capability": "segmented_flash"}),
+            ));
+        }
+        self.plan_segmented_flash_ranges(
+            &segments
+                .iter()
+                .map(|segment| FlashRange {
+                    start: segment.info.start,
+                    length: segment.info.length,
+                })
+                .collect::<Vec<_>>(),
+        )?;
+        if segments[0].info.start != self.fixture.flash.base_address {
             return Err(DebugError::new(
                 ErrorCode::PlanStale,
                 "flash address changed after replay planning",
                 2,
                 json!({
-                    "requested": base_address,
+                    "requested": segments[0].info.start,
                     "available": self.fixture.flash.base_address,
                 }),
             ));
@@ -349,19 +373,62 @@ impl DebugBackend for ReplayBackend {
                 json!({"expected": expected, "received": firmware_sha256}),
             ));
         }
-        self.programmed_sha256 = Some(firmware_sha256.to_string());
-        Ok(FlashReport {
-            bytes_programmed: firmware.len() as u64,
-            firmware_sha256: firmware_sha256.to_string(),
-            verified: false,
-        })
+        self.programmed = Some((
+            firmware_sha256.to_string(),
+            segments
+                .iter()
+                .map(|segment| segment.info.clone())
+                .collect(),
+        ));
+        firmware_flash_report(segments, firmware_sha256, false)
     }
 
-    fn verify(&mut self, session: &SessionInfo, firmware_sha256: &str) -> Result<bool> {
+    fn verify(
+        &mut self,
+        session: &SessionInfo,
+        segments: &[FirmwareSegment],
+        firmware_sha256: &str,
+    ) -> Result<FlashReport> {
         self.ensure_session(session)?;
-        Ok(self.fixture.capabilities.verify
+        validate_firmware_segments(segments)?;
+        let (programmed_sha256, programmed_segments) =
+            self.programmed.as_ref().ok_or_else(|| {
+                DebugError::new(
+                    ErrorCode::ProtocolError,
+                    "cannot verify before firmware has been programmed",
+                    6,
+                    json!({"session_id": session.session_id}),
+                )
+            })?;
+        if programmed_sha256 != firmware_sha256 {
+            return Err(DebugError::new(
+                ErrorCode::PlanStale,
+                "verification digest differs from the programmed firmware",
+                2,
+                json!({
+                    "programmed": programmed_sha256,
+                    "received": firmware_sha256,
+                }),
+            ));
+        }
+        if !programmed_segments
+            .iter()
+            .eq(segments.iter().map(|segment| &segment.info))
+        {
+            return Err(DebugError::new(
+                ErrorCode::PlanStale,
+                "verification segments differ from the programmed firmware manifest",
+                2,
+                json!({
+                    "programmed_segments": programmed_segments,
+                    "received_segments": segments.iter().map(|segment| &segment.info).collect::<Vec<_>>(),
+                }),
+            ));
+        }
+        let verified = self.fixture.capabilities.verify
             && self.fixture.flash.verify_success
-            && self.programmed_sha256.as_deref() == Some(firmware_sha256))
+            && programmed_sha256 == firmware_sha256;
+        firmware_flash_report(segments, firmware_sha256, verified)
     }
 
     fn reset(&mut self, session: &SessionInfo) -> Result<()> {
@@ -430,7 +497,7 @@ impl DebugBackend for ReplayBackend {
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()> {
         self.ensure_session(session)?;
         self.active_session_id = None;
-        self.programmed_sha256 = None;
+        self.programmed = None;
         self.reset_performed = false;
         Ok(())
     }
@@ -483,7 +550,26 @@ fn ranges_cover(ranges: &[FlashRange], required: &FlashRange) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use sha2::{Digest, Sha256};
+
     use super::*;
+    use crate::model::FirmwareSegmentInfo;
+
+    fn fixture() -> ReplayFixture {
+        serde_json::from_str(include_str!("../../examples/replay/stm32g4.json")).unwrap()
+    }
+
+    fn segment(kind: &str, start: u64, data: &[u8]) -> FirmwareSegment {
+        FirmwareSegment {
+            info: FirmwareSegmentInfo {
+                kind: kind.to_string(),
+                start: Address(start),
+                length: data.len() as u64,
+                sha256: hex::encode(Sha256::digest(data)),
+            },
+            data: data.to_vec(),
+        }
+    }
 
     #[test]
     fn adjacent_erase_ranges_cover_a_cross_sector_write() {
@@ -523,5 +609,97 @@ mod tests {
         };
 
         assert!(!ranges_cover(&erase_ranges, &write_range).unwrap());
+    }
+
+    #[test]
+    fn segmented_program_and_verify_report_every_segment() {
+        let mut fixture = fixture();
+        fixture.capabilities.segmented_flash = true;
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let base = fixture.flash.base_address.0;
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+        let segments = [
+            segment("bootloader", base, b"boot"),
+            segment("application", base + 0x400, b"application"),
+        ];
+
+        let staged = backend
+            .program(&session, &segments, &"11".repeat(32))
+            .unwrap();
+        assert_eq!(staged.bytes_programmed, 15);
+        assert_eq!(staged.segments.len(), 2);
+        assert!(!staged.verified);
+        assert!(staged.segments.iter().all(|segment| !segment.verified));
+
+        let verified = backend
+            .verify(&session, &segments, &"11".repeat(32))
+            .unwrap();
+        assert!(verified.verified);
+        assert!(verified.segments.iter().all(|segment| segment.verified));
+    }
+
+    #[test]
+    fn segmented_program_requires_an_explicit_capability() {
+        let mut fixture = fixture();
+        fixture.capabilities.segmented_flash = false;
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let base = fixture.flash.base_address.0;
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+        let segments = [
+            segment("bootloader", base, b"boot"),
+            segment("application", base + 0x400, b"application"),
+        ];
+
+        let error = backend
+            .program(&session, &segments, &"11".repeat(32))
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(error.details["capability"], "segmented_flash");
+    }
+
+    #[test]
+    fn segmented_capability_requires_base_flash_capability() {
+        let mut fixture = fixture();
+        fixture.capabilities.flash = false;
+        fixture.capabilities.segmented_flash = true;
+
+        let error = fixture.validate().unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FixtureInvalid);
+        assert_eq!(error.details["capability"], "segmented_flash");
+    }
+
+    #[test]
+    fn verification_rejects_a_manifest_changed_after_programming() {
+        let mut fixture = fixture();
+        fixture.capabilities.segmented_flash = true;
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let base = fixture.flash.base_address.0;
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+        let segments = [
+            segment("bootloader", base, b"boot"),
+            segment("application", base + 0x400, b"application"),
+        ];
+        backend
+            .program(&session, &segments, &"11".repeat(32))
+            .unwrap();
+        let changed = [
+            segment("bootloader", base, b"boot"),
+            segment("application", base + 0x500, b"application"),
+        ];
+
+        let error = backend
+            .verify(&session, &changed, &"11".repeat(32))
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::PlanStale);
+        assert!(error.message.contains("manifest"));
     }
 }

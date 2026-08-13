@@ -215,7 +215,7 @@ impl<B: DebugBackend> DebugService<B> {
                 .validate_firmware_image_options(image_options)?;
         }
         let capabilities = self.backend.capabilities();
-        let execution = execution_readiness(&firmware.info.format, capabilities);
+        let execution = execution_readiness(&firmware.info.format, &target_info, capabilities);
         if firmware.info.format == FirmwareFormat::Bin.name() {
             require_guarded_flash_capabilities(self.backend.name(), capabilities)?;
         } else {
@@ -228,7 +228,7 @@ impl<B: DebugBackend> DebugService<B> {
                 .plan_flash_ranges(firmware.info.size, firmware_options.base_address)?;
             let start = layout.write_ranges.first().map(|range| range.start);
             if let Some(start) = start {
-                firmware.bind_raw_segment(start);
+                firmware.bind_raw_segment(start)?;
             }
             layout
         } else {
@@ -384,7 +384,7 @@ impl<B: DebugBackend> DebugService<B> {
 
         let mut current = firmware::load(firmware_path, &plan.target.name, firmware_options)?;
         if current.info.format == FirmwareFormat::Bin.name() {
-            current.bind_raw_segment(plan.ranges[0].start);
+            current.bind_raw_segment(plan.ranges[0].start)?;
         }
         if current.info != plan.firmware {
             return Err(DebugError::new(
@@ -402,25 +402,21 @@ impl<B: DebugBackend> DebugService<B> {
 
         let session = self.backend.attach(&plan.probe.id, &plan.target.name)?;
         let result = (|| {
-            let base_address = current.info.base_address.ok_or_else(|| {
-                DebugError::new(
-                    ErrorCode::Internal,
-                    "flash plan omitted the raw BIN base address",
-                    10,
-                    json!({"plan_id": plan.plan_id}),
-                )
-            })?;
-            let mut flash = self.backend.program(
-                &session,
-                &current.source_bytes,
-                base_address,
-                &current.info.sha256,
-            )?;
-            flash.verified = self.backend.verify(&session, &current.info.sha256)?;
+            let staged = self
+                .backend
+                .program(&session, &current.segments, &current.info.sha256)?;
+            validate_flash_report(&staged, &current.info)?;
+            let flash = self
+                .backend
+                .verify(&session, &current.segments, &current.info.sha256)?;
+            validate_flash_report(&flash, &current.info)?;
             if !flash.verified {
                 return Err(DebugError::verification(
                     "firmware verification failed",
-                    json!({"firmware_sha256": current.info.sha256}),
+                    json!({
+                        "firmware_sha256": current.info.sha256,
+                        "segments": flash.segments,
+                    }),
                 ));
             }
             self.backend.reset(&session)?;
@@ -513,6 +509,41 @@ fn require_guarded_flash_capabilities(
     Ok(())
 }
 
+fn validate_flash_report(
+    report: &crate::model::FlashReport,
+    firmware: &crate::model::FirmwareInfo,
+) -> Result<()> {
+    let manifests_match = report.segments.len() == firmware.segments.len()
+        && report
+            .segments
+            .iter()
+            .zip(&firmware.segments)
+            .all(|(actual, planned)| {
+                actual.kind == planned.kind
+                    && actual.start == planned.start
+                    && actual.length == planned.length
+                    && actual.sha256 == planned.sha256
+            });
+    let verification_consistent = !report.segments.is_empty()
+        && report.verified == report.segments.iter().all(|segment| segment.verified);
+    if report.bytes_programmed != firmware.program_size
+        || report.firmware_sha256 != firmware.sha256
+        || !manifests_match
+        || !verification_consistent
+    {
+        return Err(DebugError::new(
+            ErrorCode::ProtocolError,
+            "backend flash report does not match the confirmed firmware manifest",
+            6,
+            json!({
+                "firmware": firmware,
+                "flash_report": report,
+            }),
+        ));
+    }
+    Ok(())
+}
+
 fn require_image_planning_capabilities(
     backend: &str,
     capabilities: &crate::model::Capabilities,
@@ -530,26 +561,42 @@ fn require_image_planning_capabilities(
 
 fn execution_readiness(
     format: &str,
+    target: &crate::model::TargetInfo,
     capabilities: &crate::model::Capabilities,
 ) -> FlashExecutionReadiness {
     if format != FirmwareFormat::EspIdf.name() {
         return FlashExecutionReadiness::default();
     }
 
-    let mut blockers = vec![FlashExecutionBlocker {
-        code: "SEGMENTED_PROGRAMMING_NOT_IMPLEMENTED".to_string(),
-        message: "probe-rs execution does not yet stage the normalized ESP-IDF segments"
-            .to_string(),
-    }];
-    if !capabilities.reset {
+    let mut blockers = Vec::new();
+    if !capabilities.segmented_flash {
         blockers.push(FlashExecutionBlocker {
-            code: "MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED".to_string(),
-            message: "the selected target lacks the verified reset/snapshot/resume capability set"
+            code: "SEGMENTED_FLASH_ACCEPTANCE_REQUIRED".to_string(),
+            message: "the selected backend and target have not passed segmented flash execution acceptance"
                 .to_string(),
         });
     }
+    if target.core_count > 1 {
+        blockers.push(FlashExecutionBlocker {
+            code: "MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED".to_string(),
+            message: "the multi-core target lacks a complete post-flash reset/snapshot/resume evidence policy"
+                .to_string(),
+        });
+    } else if !(capabilities.verify
+        && capabilities.reset
+        && capabilities.halt
+        && capabilities.run
+        && capabilities.register_read)
+    {
+        blockers.push(FlashExecutionBlocker {
+            code: "POST_FLASH_WORKFLOW_UNAVAILABLE".to_string(),
+            message:
+                "the selected target lacks the guarded verify/reset/snapshot/resume capability set"
+                    .to_string(),
+        });
+    }
     FlashExecutionReadiness {
-        supported: false,
+        supported: blockers.is_empty(),
         blockers,
     }
 }
@@ -781,7 +828,7 @@ mod tests {
 
     use super::*;
     use crate::backend::replay::{ReplayBackend, ReplayFixture};
-    use crate::model::FirmwareInfo;
+    use crate::model::{FirmwareInfo, FlashReport, FlashSegmentReport};
 
     fn fixture() -> ReplayFixture {
         serde_json::from_str(include_str!("../examples/replay/stm32g4.json")).unwrap()
@@ -800,6 +847,77 @@ mod tests {
         let second_plan = service.plan_flash(&second, None, None, None).unwrap();
 
         assert_ne!(first_plan.confirm_digest, second_plan.confirm_digest);
+    }
+
+    #[test]
+    fn flash_report_must_match_the_confirmed_segment_manifest() {
+        let firmware = FirmwareInfo {
+            path: "firmware.bin".to_string(),
+            format: "bin".to_string(),
+            base_address: Some(Address(0x0800_0000)),
+            size: 4,
+            sha256: "11".repeat(32),
+            program_size: 4,
+            segments: vec![FirmwareSegmentInfo {
+                kind: "application".to_string(),
+                start: Address(0x0800_0000),
+                length: 4,
+                sha256: "22".repeat(32),
+            }],
+            image_options: None,
+        };
+        let mut report = FlashReport {
+            bytes_programmed: 4,
+            firmware_sha256: firmware.sha256.clone(),
+            segments: vec![FlashSegmentReport {
+                kind: "application".to_string(),
+                start: Address(0x0800_0000),
+                length: 4,
+                sha256: "22".repeat(32),
+                verified: true,
+            }],
+            verified: true,
+        };
+
+        validate_flash_report(&report, &firmware).unwrap();
+        report.segments[0].start = Address(0x0800_0004);
+
+        let error = validate_flash_report(&report, &firmware).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn flash_report_rejects_inconsistent_aggregate_verification() {
+        let firmware = FirmwareInfo {
+            path: "firmware.bin".to_string(),
+            format: "bin".to_string(),
+            base_address: Some(Address(0x0800_0000)),
+            size: 1,
+            sha256: "11".repeat(32),
+            program_size: 1,
+            segments: vec![FirmwareSegmentInfo {
+                kind: "application".to_string(),
+                start: Address(0x0800_0000),
+                length: 1,
+                sha256: "22".repeat(32),
+            }],
+            image_options: None,
+        };
+        let report = FlashReport {
+            bytes_programmed: 1,
+            firmware_sha256: firmware.sha256.clone(),
+            segments: vec![FlashSegmentReport {
+                kind: "application".to_string(),
+                start: Address(0x0800_0000),
+                length: 1,
+                sha256: "22".repeat(32),
+                verified: false,
+            }],
+            verified: true,
+        };
+
+        let error = validate_flash_report(&report, &firmware).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProtocolError);
     }
 
     #[test]
@@ -902,7 +1020,7 @@ mod tests {
         replay.target.name = "esp32s3".to_string();
         replay.target.architecture = "xtensa".to_string();
         replay.target.core_count = 2;
-        replay.capabilities.reset = false;
+        replay.capabilities.reset = true;
         replay.flash.base_address = Address(0);
         replay.flash.erase_ranges = vec![FlashRange {
             start: Address(0),
@@ -926,6 +1044,14 @@ mod tests {
         assert_eq!(first.ranges.len(), 3);
         assert!(!first.execution.supported);
         assert_eq!(first.execution.blockers.len(), 2);
+        assert_eq!(
+            first.execution.blockers[0].code,
+            "SEGMENTED_FLASH_ACCEPTANCE_REQUIRED"
+        );
+        assert_eq!(
+            first.execution.blockers[1].code,
+            "MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED"
+        );
         assert_ne!(first.confirm_digest, second.confirm_digest);
     }
 
@@ -939,7 +1065,7 @@ mod tests {
         replay.target.name = "esp32s3".to_string();
         replay.target.architecture = "xtensa".to_string();
         replay.target.core_count = 2;
-        replay.capabilities.reset = false;
+        replay.capabilities.reset = true;
         replay.flash.base_address = Address(0);
         replay.flash.erase_ranges = vec![FlashRange {
             start: Address(0),
@@ -972,6 +1098,54 @@ mod tests {
         assert_eq!(error.details["flash_operation_requested"], false);
         assert_eq!(error.details["reset_requested"], false);
         assert!(!evidence.exists());
+    }
+
+    #[test]
+    fn idf_segmented_execution_publishes_per_segment_evidence_when_capabilities_are_verified() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("demo.elf");
+        let evidence = directory.path().join("run.evidence.json");
+        fs::write(&firmware, crate::firmware::tests::minimal_esp32c3_idf_elf()).unwrap();
+        let mut replay = fixture();
+        replay.target.name = "esp32c3".to_string();
+        replay.target.architecture = "riscv".to_string();
+        replay.target.core_count = 1;
+        replay.capabilities.segmented_flash = true;
+        replay.flash.base_address = Address(0);
+        replay.flash.erase_ranges = vec![FlashRange {
+            start: Address(0),
+            length: 0x2_0000,
+        }];
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+        let options = FirmwareInputOptions {
+            format: Some(FirmwareFormat::EspIdf),
+            flash_size: Some(8 * 1024 * 1024),
+            ..FirmwareInputOptions::default()
+        };
+        let plan = service
+            .plan_flash_with_options(&firmware, None, None, &options)
+            .unwrap();
+
+        assert!(plan.execution.supported);
+        let result = service
+            .execute_flash_with_options(
+                &firmware,
+                None,
+                None,
+                &options,
+                &plan.confirm_digest,
+                &evidence,
+            )
+            .unwrap();
+
+        assert!(result.flash.verified);
+        assert_eq!(result.flash.segments.len(), 3);
+        assert_eq!(result.flash.bytes_programmed, plan.firmware.program_size);
+        assert!(result.flash.segments.iter().all(|segment| segment.verified));
+        assert!(evidence.exists());
+        let bundle = inspect_evidence(&evidence).unwrap();
+        assert!(bundle.complete);
+        assert_eq!(bundle.flash.as_ref().unwrap(), &result.flash);
     }
 
     #[test]
@@ -1047,6 +1221,8 @@ mod tests {
             .execute_flash(&firmware, None, None, None, &plan.confirm_digest, &evidence)
             .unwrap();
         assert!(result.flash.verified);
+        assert_eq!(result.flash.segments.len(), 1);
+        assert!(result.flash.segments[0].verified);
         assert_eq!(
             result.snapshot.captured_state,
             crate::model::CoreState::Halted
@@ -1113,6 +1289,7 @@ mod tests {
             flash: Some(crate::model::FlashReport {
                 bytes_programmed: 1,
                 firmware_sha256: "00".repeat(32),
+                segments: Vec::new(),
                 verified: true,
             }),
             core: fixture.after_reset_core,

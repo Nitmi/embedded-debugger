@@ -137,12 +137,19 @@ write and erase ranges, exact probe/target identity, and execution readiness.
 The confirmation digest binds all of those fields.
 
 Image normalization uses the pinned espflash 4.5.0 library. The declared flash
-capacity must fit the target package's boot-flash address window. This milestone
-is deliberately plan-only: `execution.supported` is `false`, and an execute
-request with the correct digest returns `CAPABILITY_UNAVAILABLE` after probe
-enumeration but before target attach, evidence reservation, erase, program, or
-reset. Segment staging and a verified ESP multi-core post-flash policy must be
-implemented before this path can write a device.
+capacity must fit the target package's boot-flash address window. The shared
+execution layer can stage all physical segments in one transaction, verify each
+segment independently, and publish per-segment results in evidence. Replay
+exercises that full path with a single-core ESP32-C3 fixture.
+
+Native execution remains target-gated. A probe-rs target must explicitly
+advertise `segmented_flash` only after physical acceptance, and multi-core
+targets also require a complete post-flash reset/snapshot/resume policy. The
+current ESP32-S3 plan therefore reports
+`SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` and
+`MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED`; even the correct digest is rejected
+after probe enumeration but before target attach, evidence reservation, erase,
+program, or reset.
 
 ## Design constraints
 
@@ -166,15 +173,17 @@ byte preservation, reset/halt/snapshot/resume, complete evidence inspection,
 backup comparison, and serial runtime checks. The same preservation guarantees
 also passed for a 32-byte image crossing two adjacent 4 KiB pages. Physical
 probe removal returns stable unavailable errors without selecting another
-connected probe or creating evidence. ESP-IDF ELF normalization now produces
-confirmation-bound physical image plans, while execution remains intentionally
-blocked pending segmented programming and a verified system-reset/post-flash
-policy. State-preserving multi-core live snapshots have passed on ESP32-S3: the
+connected probe or creating evidence. ESP-IDF ELF normalization, segmented
+staging, per-segment verification, and evidence reporting now pass end-to-end
+Replay coverage. Native ESP execution remains intentionally target-gated
+pending physical segmented-flash acceptance and, for ESP32-S3, a verified
+multi-core post-flash policy. State-preserving multi-core live snapshots have
+passed on ESP32-S3: the
 enabled `cpu0` was observed as
 `running -> halted -> running`, while disabled `cpu1` was reported explicitly.
-OpenOCD, general ELF/HEX loading, ESP-IDF execution, RTT, persistent interactive
-debug sessions, multi-core post-flash snapshots, and non-boot NVM writes are not
-yet exposed. See `CHANGELOG.md` and
+OpenOCD, general ELF/HEX loading, physically accepted native ESP-IDF execution,
+RTT, persistent interactive debug sessions, multi-core post-flash snapshots,
+and non-boot NVM writes are not yet exposed. See `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 
 ## Acknowledgments

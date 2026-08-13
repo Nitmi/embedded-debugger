@@ -52,8 +52,10 @@ Partially run on 2026-08-13 with probe-rs 0.32.0 on Windows:
   JSON `effects` field reports those R1 side effects. Flash and verify are
   discoverable. ESP-IDF ELF files can now be normalized into bootloader,
   partition-table, and application ranges with independent hashes and merged
-  physical erase ranges. Plans explicitly report
-  `SEGMENTED_PROGRAMMING_NOT_IMPLEMENTED` and
+  physical erase ranges. Shared segmented staging, independent per-segment
+  verification, report validation, and evidence publication pass the complete
+  workflow on a single-core ESP32-C3 Replay fixture. The physical ESP32-S3 plan
+  explicitly reports `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` and
   `MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED`, so guarded execution remains
   blocked before target attach, erase, program, or reset.
 - The ESP32-S3 probe was re-enumerated as accessible after the format-aware
@@ -62,7 +64,8 @@ Partially run on 2026-08-13 with probe-rs 0.32.0 on Windows:
   supplied as `--format idf` and returned `CONFIG_INVALID` for the missing
   ESP-IDF application descriptor during image validation, before probe
   enumeration, target attach, reset, or flash. Synthetic valid ESP32-S3 ELF
-  coverage runs through Replay in the automated suite.
+  planning and ESP32-C3 segmented execution coverage run through Replay in the
+  automated suite.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.

@@ -51,9 +51,9 @@ pub struct FirmwareSegment {
 
 #[derive(Debug, Clone)]
 pub struct LoadedFirmware {
-    pub source_bytes: Vec<u8>,
     pub info: FirmwareInfo,
     pub segments: Vec<FirmwareSegment>,
+    pending_raw_bytes: Option<Vec<u8>>,
 }
 
 impl LoadedFirmware {
@@ -67,21 +67,34 @@ impl LoadedFirmware {
             .collect()
     }
 
-    pub fn bind_raw_segment(&mut self, start: Address) {
-        debug_assert_eq!(self.info.format, FirmwareFormat::Bin.name());
+    pub fn bind_raw_segment(&mut self, start: Address) -> Result<()> {
+        if self.info.format != FirmwareFormat::Bin.name() {
+            return Err(DebugError::new(
+                ErrorCode::Internal,
+                "only raw BIN firmware can be bound to an explicit address",
+                10,
+                json!({"format": self.info.format}),
+            ));
+        }
+        let data = self.pending_raw_bytes.take().ok_or_else(|| {
+            DebugError::new(
+                ErrorCode::Internal,
+                "raw firmware bytes were already bound to an address",
+                10,
+                json!({"base_address": self.info.base_address}),
+            )
+        })?;
         let info = FirmwareSegmentInfo {
             kind: "application".to_string(),
             start,
-            length: self.source_bytes.len() as u64,
-            sha256: sha256_bytes(&self.source_bytes),
+            length: data.len() as u64,
+            sha256: sha256_bytes(&data),
         };
         self.info.base_address = Some(start);
         self.info.program_size = info.length;
         self.info.segments = vec![info.clone()];
-        self.segments = vec![FirmwareSegment {
-            info,
-            data: self.source_bytes.clone(),
-        }];
+        self.segments = vec![FirmwareSegment { info, data }];
+        Ok(())
     }
 }
 
@@ -131,8 +144,8 @@ pub fn load(
             segments: Vec::new(),
             image_options: None,
         },
-        source_bytes,
         segments: Vec::new(),
+        pending_raw_bytes: Some(source_bytes),
     };
 
     if format == FirmwareFormat::EspIdf {
@@ -216,6 +229,10 @@ fn load_esp_idf(
     target_name: &str,
     options: &FirmwareInputOptions,
 ) -> Result<()> {
+    let source_bytes = loaded
+        .pending_raw_bytes
+        .as_ref()
+        .expect("firmware source is available during image generation");
     let target_chip_name = target_name
         .split_once('-')
         .map_or(target_name, |(name, _)| name)
@@ -238,7 +255,7 @@ fn load_esp_idf(
     let flash_size = esp_flash_size(flash_size_bytes)?;
     let chip_revision = options.chip_revision.unwrap_or_default();
 
-    check_idf_bootloader(&loaded.source_bytes).map_err(|error| {
+    check_idf_bootloader(source_bytes).map_err(|error| {
         DebugError::config(
             "firmware is not a valid ESP-IDF application ELF",
             json!({
@@ -249,7 +266,7 @@ fn load_esp_idf(
         )
     })?;
 
-    let metadata = Metadata::from_bytes(Some(&loaded.source_bytes));
+    let metadata = Metadata::from_bytes(Some(source_bytes));
     if let Some(image_chip) = metadata.chip_name()
         && !image_chip.eq_ignore_ascii_case(&target_chip_name)
     {
@@ -269,7 +286,7 @@ fn load_esp_idf(
         chip,
         chip.default_xtal_frequency(),
     );
-    let image = IdfBootloaderFormat::new(&loaded.source_bytes, &flash_data, None, None, None, None)
+    let image = IdfBootloaderFormat::new(source_bytes, &flash_data, None, None, None, None)
         .map_err(|error| {
             DebugError::config(
                 "failed to generate the ESP-IDF physical flash image",
@@ -339,6 +356,7 @@ fn load_esp_idf(
         chip_revision,
     });
     loaded.segments = segments;
+    loaded.pending_raw_bytes = None;
     Ok(())
 }
 
@@ -473,6 +491,14 @@ pub(crate) mod tests {
     // A minimal ELF32 executable with one allocated ESP32-S3 DROM section.
     // The first 256 bytes form the ESP-IDF app descriptor expected by espflash.
     pub(crate) fn minimal_esp32s3_idf_elf() -> Vec<u8> {
+        minimal_idf_elf(94, 0x4037_0000, 0x3c00_0020)
+    }
+
+    pub(crate) fn minimal_esp32c3_idf_elf() -> Vec<u8> {
+        minimal_idf_elf(243, 0x4038_0000, 0x3c00_0020)
+    }
+
+    fn minimal_idf_elf(machine: u16, entry: u32, app_address: u32) -> Vec<u8> {
         const ELF_HEADER_SIZE: usize = 52;
         const APP_OFFSET: usize = 0x100;
         const NAMES_OFFSET: usize = 0x200;
@@ -484,9 +510,9 @@ pub(crate) mod tests {
         let mut bytes = vec![0_u8; SECTION_HEADERS_OFFSET + SECTION_HEADER_SIZE * SECTION_COUNT];
         bytes[0..16].copy_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         put_u16(&mut bytes, 16, 2);
-        put_u16(&mut bytes, 18, 94);
+        put_u16(&mut bytes, 18, machine);
         put_u32(&mut bytes, 20, 1);
-        put_u32(&mut bytes, 24, 0x4037_0000);
+        put_u32(&mut bytes, 24, entry);
         put_u32(&mut bytes, 32, SECTION_HEADERS_OFFSET as u32);
         put_u16(&mut bytes, 40, ELF_HEADER_SIZE as u16);
         put_u16(&mut bytes, 46, SECTION_HEADER_SIZE as u16);
@@ -500,7 +526,7 @@ pub(crate) mod tests {
         put_u32(&mut bytes, app, 1);
         put_u32(&mut bytes, app + 4, 1);
         put_u32(&mut bytes, app + 8, 2);
-        put_u32(&mut bytes, app + 12, 0x3c00_0020);
+        put_u32(&mut bytes, app + 12, app_address);
         put_u32(&mut bytes, app + 16, APP_OFFSET as u32);
         put_u32(&mut bytes, app + 20, 256);
         put_u32(&mut bytes, app + 32, 4);

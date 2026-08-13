@@ -225,6 +225,14 @@ fn plan_then_execute_completes_replay_journey() {
         .clone();
     let execute: Value = serde_json::from_slice(&execute_output).unwrap();
     assert_eq!(execute["data"]["flash"]["verified"], true);
+    assert_eq!(
+        execute["data"]["flash"]["segments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(execute["data"]["flash"]["segments"][0]["verified"], true);
     assert_eq!(execute["data"]["snapshot"]["captured_state"], "halted");
     assert_eq!(execute["data"]["snapshot"]["state"], "running");
     assert!(evidence.exists());
@@ -304,7 +312,7 @@ fn native_unknown_target_is_a_stable_error() {
 fn idf_plan_exposes_normalized_segments_and_execution_blockers() {
     let directory = tempdir().unwrap();
     let firmware = directory.path().join("firmware.elf");
-    let fixture = esp32s3_fixture(directory.path());
+    let fixture = esp32s3_fixture(directory.path(), true);
     fs::write(&firmware, support::minimal_esp32s3_idf_elf()).unwrap();
 
     let output = Command::cargo_bin("embedded-debugger")
@@ -370,6 +378,14 @@ fn idf_plan_exposes_normalized_segments_and_execution_blockers() {
         2
     );
     assert_eq!(
+        result["data"]["execution"]["blockers"][0]["code"],
+        "SEGMENTED_FLASH_ACCEPTANCE_REQUIRED"
+    );
+    assert_eq!(
+        result["data"]["execution"]["blockers"][1]["code"],
+        "MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED"
+    );
+    assert_eq!(
         result["data"]["firmware"]["image_options"]["flash_size"],
         8 * 1024 * 1024
     );
@@ -380,7 +396,7 @@ fn idf_execute_is_blocked_before_hardware_or_evidence() {
     let directory = tempdir().unwrap();
     let firmware = directory.path().join("firmware.elf");
     let evidence = directory.path().join("run.evidence.json");
-    let fixture = esp32s3_fixture(directory.path());
+    let fixture = esp32s3_fixture(directory.path(), true);
     fs::write(&firmware, support::minimal_esp32s3_idf_elf()).unwrap();
 
     let common = [
@@ -445,13 +461,87 @@ fn idf_execute_is_blocked_before_hardware_or_evidence() {
     assert!(!evidence.exists());
 }
 
-fn esp32s3_fixture(directory: &std::path::Path) -> std::path::PathBuf {
+#[test]
+fn idf_segmented_replay_execution_reports_verified_segments() {
+    let directory = tempdir().unwrap();
+    let firmware = directory.path().join("firmware.elf");
+    let evidence = directory.path().join("run.evidence.json");
+    let fixture = esp32c3_fixture(directory.path());
+    fs::write(&firmware, support::minimal_esp32c3_idf_elf()).unwrap();
+
+    let plan_output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture.to_str().unwrap(),
+            "flash",
+            "plan",
+            firmware.to_str().unwrap(),
+            "--format",
+            "idf",
+            "--flash-size",
+            "8MB",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let confirmation = plan["data"]["confirm_digest"].as_str().unwrap();
+    assert_eq!(plan["data"]["execution"]["supported"], true);
+
+    let execute_output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture.to_str().unwrap(),
+            "flash",
+            "execute",
+            firmware.to_str().unwrap(),
+            "--format",
+            "idf",
+            "--flash-size",
+            "8MB",
+            "--confirm",
+            confirmation,
+            "--evidence",
+            evidence.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let execute: Value = serde_json::from_slice(&execute_output).unwrap();
+
+    assert_eq!(execute["data"]["flash"]["verified"], true);
+    assert_eq!(
+        execute["data"]["flash"]["segments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(
+        execute["data"]["flash"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|segment| segment["verified"] == true)
+    );
+    assert!(evidence.exists());
+}
+
+fn esp32s3_fixture(directory: &std::path::Path, reset: bool) -> std::path::PathBuf {
     let mut value: Value =
         serde_json::from_slice(&fs::read("examples/replay/stm32g4.json").unwrap()).unwrap();
     value["target"]["name"] = "esp32s3".into();
     value["target"]["architecture"] = "xtensa".into();
     value["target"]["core_count"] = 2.into();
-    value["capabilities"]["reset"] = false.into();
+    value["capabilities"]["reset"] = reset.into();
     value["live_cores"] = serde_json::json!([
         {
             "index": 0,
@@ -485,6 +575,23 @@ fn esp32s3_fixture(directory: &std::path::Path) -> std::path::PathBuf {
         "length": 131072,
     }]);
     let path = directory.join("esp32s3.json");
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    path
+}
+
+fn esp32c3_fixture(directory: &std::path::Path) -> std::path::PathBuf {
+    let mut value: Value =
+        serde_json::from_slice(&fs::read("examples/replay/stm32g4.json").unwrap()).unwrap();
+    value["target"]["name"] = "esp32c3".into();
+    value["target"]["architecture"] = "riscv".into();
+    value["target"]["core_count"] = 1.into();
+    value["capabilities"]["segmented_flash"] = true.into();
+    value["flash"]["base_address"] = "0x00000000".into();
+    value["flash"]["erase_ranges"] = serde_json::json!([{
+        "start": "0x00000000",
+        "length": 131072,
+    }]);
+    let path = directory.join("esp32c3.json");
     fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     path
 }

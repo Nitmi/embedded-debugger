@@ -1,11 +1,14 @@
 pub mod probe_rs;
 pub mod replay;
 
+use sha2::Digest;
+
 use crate::{
-    error::Result,
+    error::{DebugError, ErrorCode, Result},
+    firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreObservation, CoreSnapshot, FirmwareImageOptions, FlashLayout,
-        FlashReport, ProbeInfo, SessionInfo, TargetInfo,
+        FlashReport, FlashSegmentReport, ProbeInfo, SessionInfo, TargetInfo,
     },
 };
 
@@ -50,13 +53,160 @@ pub trait DebugBackend {
     fn program(
         &mut self,
         session: &SessionInfo,
-        firmware: &[u8],
-        base_address: Address,
+        segments: &[FirmwareSegment],
         firmware_sha256: &str,
     ) -> Result<FlashReport>;
-    fn verify(&mut self, session: &SessionInfo, firmware_sha256: &str) -> Result<bool>;
+    fn verify(
+        &mut self,
+        session: &SessionInfo,
+        segments: &[FirmwareSegment],
+        firmware_sha256: &str,
+    ) -> Result<FlashReport>;
     fn reset(&mut self, session: &SessionInfo) -> Result<()>;
     fn snapshot(&mut self, session: &SessionInfo) -> Result<CoreSnapshot>;
     fn capture_live_snapshot(&mut self, session: &SessionInfo) -> Result<Vec<CoreObservation>>;
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()>;
+}
+
+pub(crate) fn validate_firmware_segments(segments: &[FirmwareSegment]) -> Result<u64> {
+    if segments.is_empty() {
+        return Err(DebugError::new(
+            ErrorCode::PlanStale,
+            "firmware image contains no payload segments",
+            2,
+            serde_json::json!({}),
+        ));
+    }
+
+    let mut previous_end = None;
+    let mut program_size = 0_u64;
+    for segment in segments {
+        if segment.data.is_empty() || segment.info.length != segment.data.len() as u64 {
+            return Err(DebugError::new(
+                ErrorCode::PlanStale,
+                "firmware segment length does not match its payload",
+                2,
+                serde_json::json!({
+                    "segment": segment.info,
+                    "payload_length": segment.data.len(),
+                }),
+            ));
+        }
+        let actual_sha256 = hex::encode(sha2::Sha256::digest(&segment.data));
+        if actual_sha256 != segment.info.sha256 {
+            return Err(DebugError::new(
+                ErrorCode::PlanStale,
+                "firmware segment payload does not match its planned SHA-256",
+                2,
+                serde_json::json!({
+                    "segment": segment.info,
+                    "actual_sha256": actual_sha256,
+                }),
+            ));
+        }
+        let end = segment
+            .info
+            .start
+            .0
+            .checked_add(segment.info.length)
+            .ok_or_else(|| {
+                DebugError::new(
+                    ErrorCode::PlanStale,
+                    "firmware segment overflows the target address space",
+                    2,
+                    serde_json::json!({"segment": segment.info}),
+                )
+            })?;
+        if previous_end.is_some_and(|previous| segment.info.start.0 < previous) {
+            return Err(DebugError::new(
+                ErrorCode::PlanStale,
+                "firmware payload segments are not ordered or overlap",
+                2,
+                serde_json::json!({"segment": segment.info}),
+            ));
+        }
+        previous_end = Some(end);
+        program_size = program_size
+            .checked_add(segment.info.length)
+            .ok_or_else(|| {
+                DebugError::new(
+                    ErrorCode::PlanStale,
+                    "firmware program size overflowed",
+                    2,
+                    serde_json::json!({}),
+                )
+            })?;
+    }
+    Ok(program_size)
+}
+
+pub(crate) fn firmware_flash_report(
+    segments: &[FirmwareSegment],
+    firmware_sha256: &str,
+    verified: bool,
+) -> Result<FlashReport> {
+    let bytes_programmed = validate_firmware_segments(segments)?;
+    Ok(FlashReport {
+        bytes_programmed,
+        firmware_sha256: firmware_sha256.to_string(),
+        segments: segments
+            .iter()
+            .map(|segment| FlashSegmentReport {
+                kind: segment.info.kind.clone(),
+                start: segment.info.start,
+                length: segment.info.length,
+                sha256: segment.info.sha256.clone(),
+                verified,
+            })
+            .collect(),
+        verified,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use sha2::{Digest, Sha256};
+
+    use super::*;
+    use crate::model::FirmwareSegmentInfo;
+
+    fn segment(start: u64, data: &[u8]) -> FirmwareSegment {
+        FirmwareSegment {
+            info: FirmwareSegmentInfo {
+                kind: "application".to_string(),
+                start: Address(start),
+                length: data.len() as u64,
+                sha256: hex::encode(Sha256::digest(data)),
+            },
+            data: data.to_vec(),
+        }
+    }
+
+    #[test]
+    fn segment_validation_sums_ordered_payloads() {
+        let segments = [segment(0x1000, b"first"), segment(0x2000, b"second")];
+
+        assert_eq!(validate_firmware_segments(&segments).unwrap(), 11);
+    }
+
+    #[test]
+    fn segment_validation_rejects_changed_payloads() {
+        let mut segments = [segment(0x1000, b"planned")];
+        segments[0].data[0] ^= 0xff;
+
+        let error = validate_firmware_segments(&segments).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::PlanStale);
+        assert!(error.message.contains("SHA-256"));
+    }
+
+    #[test]
+    fn segment_validation_rejects_overlaps() {
+        let segments = [segment(0x1000, b"first"), segment(0x1004, b"second")];
+
+        let error = validate_firmware_segments(&segments).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::PlanStale);
+        assert!(error.message.contains("overlap"));
+    }
 }

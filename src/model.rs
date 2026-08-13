@@ -104,6 +104,8 @@ pub struct TargetInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub flash: bool,
+    #[serde(default)]
+    pub segmented_flash: bool,
     pub verify: bool,
     pub halt: bool,
     pub run: bool,
@@ -387,6 +389,17 @@ pub struct FlashExecutionBlocker {
 pub struct FlashReport {
     pub bytes_programmed: u64,
     pub firmware_sha256: String,
+    #[serde(default)]
+    pub segments: Vec<FlashSegmentReport>,
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlashSegmentReport {
+    pub kind: String,
+    pub start: Address,
+    pub length: u64,
+    pub sha256: String,
     pub verified: bool,
 }
 

@@ -11,10 +11,16 @@ All notable changes to this project will be documented in this file.
 - Backend capability model and deterministic Replay backend.
 - Guarded raw BIN flash planning with digest-bound probe, target, firmware,
   write ranges, sector erase ranges, and execution policy.
-- Plan-only ESP-IDF ELF normalization through pinned espflash 4.5.0, including
+- ESP-IDF ELF normalization through pinned espflash 4.5.0, including
   physical bootloader, partition-table, and application segments; per-segment
   hashes; explicit flash capacity and chip revision; target flash-window
   validation; merged sector ranges; and digest-bound execution blockers.
+- Shared segmented flash staging and per-segment verification, including
+  payload hash validation, one-transaction backend commit, manifest-consistent
+  flash reports, and per-segment evidence. A single-core ESP32-C3 Replay fixture
+  exercises the complete plan/execute/verify/reset/evidence path.
+- Explicit `segmented_flash` target capability. Native targets remain disabled
+  until target-specific physical acceptance is complete.
 - Replay execution, verification, reset, snapshot capture, and atomic evidence
   publication.
 - Native probe discovery through probe-rs 0.32.
@@ -40,10 +46,11 @@ All notable changes to this project will be documented in this file.
 ### Known limitations
 
 - OpenOCD and MCP adapters are not implemented.
-- Raw BIN is the only executable firmware format. probe-rs requires an explicit
-  base address; Replay uses the fixture address unless the same address is
-  supplied. ESP-IDF ELF is plan-only and requires explicit format and flash
-  capacity inputs. General ELF and Intel HEX are not accepted.
+- Raw BIN is the only native physically accepted firmware format. probe-rs
+  requires an explicit base address; Replay uses the fixture address unless the
+  same address is supplied. ESP-IDF ELF requires explicit format and flash
+  capacity inputs, and native execution remains target-gated. General ELF and
+  Intel HEX are not accepted.
 - Native flashing is limited to readable boot NVM on single-core targets. RTT,
   arbitrary memory/register commands, breakpoints, and persistent sessions are
   not implemented.
@@ -54,6 +61,6 @@ All notable changes to this project will be documented in this file.
   passed. Physical probe removal consistently returns `PROBE_UNAVAILABLE`
   without falling back to another connected probe. ESP32-S3 live snapshot
   acceptance passed with enabled `cpu0` restored to running and disabled
-  `cpu1` reported explicitly. ESP32-S3 guarded flash execution awaits segmented
-  staging and a verified system-reset/post-flash policy; plan generation itself
-  is implemented.
+  `cpu1` reported explicitly. ESP32-S3 guarded flash execution awaits physical
+  segmented-flash acceptance and a verified multi-core system-reset/post-flash
+  policy; planning and shared staging/verification mechanisms are implemented.

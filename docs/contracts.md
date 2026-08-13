@@ -89,9 +89,10 @@ JavaScript clients. Firmware and artifact content is identified with lowercase
 SHA-256 hex strings. Large binary content will be returned as bounded artifact
 references rather than unbounded inline data.
 
-The executable contract accepts raw `.bin` firmware. A probe-rs BIN plan
-requires an explicit `--base-address`; Replay takes its address and erase impact
-from the fixture. The plan-only ESP-IDF path requires an explicit
+The native accepted contract currently executes raw `.bin` firmware. A
+probe-rs BIN plan requires an explicit `--base-address`; Replay takes its
+address and erase impact from the fixture. The target-gated ESP-IDF path
+requires an explicit
 `--format idf --flash-size <SIZE>` and rejects `--base-address`. An `.elf`
 extension is intentionally ambiguous and is never interpreted as ESP-IDF
 without that format selection.
@@ -127,13 +128,22 @@ declared capacity fits the target package's boot-flash window. Normalization
 does not attach, reset, or write the target. Planning still enumerates probes to
 bind an exact stable identity into the digest.
 
-ESP-IDF execution is currently blocked with
-`SEGMENTED_PROGRAMMING_NOT_IMPLEMENTED`; targets without the verified reset and
-state-restoration capability set also report
-`MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED`. Even with the exact digest,
-`flash execute` returns `CAPABILITY_UNAVAILABLE` before target attach, evidence
-reservation, flash operations, or reset. Probe enumeration has already occurred
-at that point and is reported separately in the error details.
+The shared execution layer validates every segment payload against its planned
+length and SHA-256, stages all non-overlapping segments in one backend commit,
+and independently verifies every segment. `flash.segments[]` reports each kind,
+physical address, length, SHA-256, and verification result. The service rejects
+backend reports whose aggregate bytes, source digest, segment manifest, or
+aggregate verification state differ from the confirmed firmware manifest.
+
+`capabilities.segmented_flash` is false by default and may be advertised only
+after target-specific physical acceptance. A normalized plan reports
+`SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` when that capability is absent. Multi-core
+targets also report `MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED` until the evidence
+model covers reset, snapshot, state restoration, and cleanup across all cores.
+For such a blocked plan, even the exact digest returns
+`CAPABILITY_UNAVAILABLE` before target attach, evidence reservation, flash
+operations, or reset. Probe enumeration has already occurred at that point and
+is reported separately in the error details.
 
 ## Snapshot and evidence semantics
 
@@ -155,8 +165,9 @@ identity, confirmation digest, write/erase ranges, policy, flash report, and
 ordered operations.
 
 General ELF and Intel HEX loading are not yet part of this contract. ESP-IDF
-application ELF normalization is the only format-aware path and remains
-plan-only.
+application ELF normalization is the only format-aware path; execution is
+available only to backends and targets whose capability matrix satisfies the
+entire guarded workflow.
 
 ## Compatibility
 
