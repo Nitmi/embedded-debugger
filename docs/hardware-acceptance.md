@@ -60,8 +60,28 @@ Partially run on 2026-08-13 with probe-rs 0.32.0 on Windows:
 - Wrong confirmation, RAM address `0x20000000`, and UICR address `0x10001000`
   were all rejected before a device write. A subsequent independent read
   matched the original 256-byte hash.
+- The exact confirmed plan
+  `4d3d3cf56af7548307f275415e78be15e67b631280d88d8882d8040ddc40f8c3`
+  completed on the nRF52840. It programmed 256 bytes, independently read them
+  back, reset and halted the core, captured `PC=0x00000998`,
+  `SP=0x20000400`, and `LR=0xFFFFFFFF`, resumed the core, disconnected, and
+  published a complete eight-operation evidence bundle.
+- The evidence SHA-256 is
+  `6bf2a0b5a4c3888c697d4a38f3e7114bbfc0eb1b4252a4c98080bdf387485ac3`.
+  `snapshot inspect` accepted it and matched the plan digest, exact identities,
+  write and erase ranges, policy, flash result, core state, and ordered
+  operations.
+- Independent full-page reads before and after the write both produced SHA-256
+  `beace458e24fbf367e831e3ab4a73e45abdbdcaff19df70e6933be00cb6e160d`.
+  All 3840 bytes outside the 256-byte image matched byte for byte. A subsequent
+  device-side comparison also verified the complete Code Flash and UICR against
+  their backups.
+- After the reset/resume workflow, `COM16` again emitted seven `Z` bytes in
+  three seconds at 115200 baud with DTR and RTS false. No bytes were sent, and
+  the observable firmware behavior matched the pre-write baseline.
 
-The planned nRF write, read-back verification, post-reset snapshot, page
-preservation comparison, evidence inspection, cross-sector case, and unplugged
-probe case remain pending. No device Flash has been changed by this acceptance
-run yet.
+The nRF single-page guarded write, read-back verification, post-reset snapshot,
+page preservation, evidence inspection, backup comparison, and observable
+runtime checks passed. The first 4096-byte Flash page was physically erased and
+reprogrammed, but its final byte content is identical to the write-before
+baseline. The cross-sector and unplugged-probe cases remain pending.

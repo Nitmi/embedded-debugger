@@ -37,5 +37,8 @@ All notable changes to this project will be documented in this file.
   arbitrary memory/register commands, breakpoints, and persistent sessions are
   not implemented.
 - Native attach/disconnect is verified on nRF52840/J-Link and ESP32-S3/native
-  USB-JTAG. nRF52840 device-write acceptance is pending exact plan confirmation;
-  ESP32-S3 guarded flash awaits a defined multi-core post-flash contract.
+  USB-JTAG. nRF52840 single-page guarded write acceptance passed, including
+  exact confirmation, read-back, page preservation, post-reset snapshot,
+  evidence, backup, and runtime checks. Cross-sector and disconnected-probe
+  cases remain pending. ESP32-S3 guarded flash awaits a defined multi-core
+  post-flash contract.

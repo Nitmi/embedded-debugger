@@ -116,12 +116,14 @@ See [docs/contracts.md](docs/contracts.md) and
 
 Replay and native probe-rs guarded application flashing are implemented.
 Native discovery and attach/disconnect have been exercised on an nRF52840 over
-J-Link and an ESP32-S3 over native ESP USB-JTAG. nRF52840 backup, plan, and
-pre-write safety checks are complete; the device-write portion remains pending
-exact plan confirmation. ESP32-S3 guarded flash remains intentionally blocked
-because the current post-flash snapshot contract is single-core. OpenOCD,
-ELF/HEX loading, RTT, persistent interactive debug sessions, multi-core
-post-flash snapshots, and non-boot NVM writes are not yet exposed. See
+J-Link and an ESP32-S3 over native ESP USB-JTAG. An nRF52840 single-page guarded
+write has passed exact-digest confirmation, read-back verification, unwritten
+byte preservation, reset/halt/snapshot/resume, complete evidence inspection,
+backup comparison, and serial runtime checks. ESP32-S3 guarded flash remains
+intentionally blocked because the current post-flash snapshot contract is
+single-core. OpenOCD, ELF/HEX loading, RTT, persistent interactive debug
+sessions, multi-core post-flash snapshots, and non-boot NVM writes are not yet
+exposed. See
 `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 
