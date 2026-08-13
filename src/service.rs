@@ -20,6 +20,7 @@ use crate::{
         FirmwareSegmentInfo, FlashExecution, FlashExecutionBlocker, FlashExecutionReadiness,
         FlashPlan, FlashPolicy, FlashRange, OperationRecord, PlannedAction, ProbeInfo,
         ProbeTestReport, SnapshotCaptureReport, validate_core_inventory,
+        validate_post_flash_core_inventory,
     },
 };
 
@@ -217,7 +218,7 @@ impl<B: DebugBackend> DebugService<B> {
         let capabilities = self.backend.capabilities();
         let execution = execution_readiness(&firmware.info.format, &target_info, capabilities);
         if firmware.info.format == FirmwareFormat::Bin.name() {
-            require_guarded_flash_capabilities(self.backend.name(), capabilities)?;
+            require_guarded_flash_capabilities(self.backend.name(), &target_info, capabilities)?;
         } else {
             require_image_planning_capabilities(self.backend.name(), capabilities)?;
         }
@@ -420,7 +421,23 @@ impl<B: DebugBackend> DebugService<B> {
                 ));
             }
             self.backend.reset(&session)?;
-            let snapshot = self.backend.snapshot(&session)?;
+            let post_flash_cores = self.backend.capture_post_flash_snapshot(&session)?;
+            validate_post_flash_core_inventory(&plan.target, &post_flash_cores).map_err(
+                |problem| {
+                    DebugError::new(
+                        ErrorCode::ProtocolError,
+                        "backend returned an invalid post-flash core inventory",
+                        6,
+                        json!({"target": plan.target, "problem": problem}),
+                    )
+                },
+            )?;
+            let snapshot = post_flash_cores
+                .iter()
+                .filter(|core| core.available)
+                .min_by_key(|core| core.index)
+                .and_then(|core| core.snapshot.clone())
+                .expect("validated post-flash inventory contains an available core");
             let evidence = EvidenceBundle {
                 schema_version: SCHEMA_VERSION.to_string(),
                 capture_id: format!("cap_{}", Uuid::new_v4().simple()),
@@ -436,6 +453,7 @@ impl<B: DebugBackend> DebugService<B> {
                 policy: Some(plan.policy.clone()),
                 flash: Some(flash.clone()),
                 core: snapshot.clone(),
+                post_flash_cores: post_flash_cores.clone(),
                 operations: vec![
                     operation(1, "session.attach"),
                     operation(2, "flash.erase_affected_sectors"),
@@ -447,7 +465,7 @@ impl<B: DebugBackend> DebugService<B> {
                 ],
                 complete: false,
             };
-            Ok((flash, snapshot, evidence))
+            Ok((flash, snapshot, post_flash_cores, evidence))
         })();
 
         let disconnect_result = self.backend.disconnect(&session);
@@ -455,7 +473,7 @@ impl<B: DebugBackend> DebugService<B> {
             (Err(error), Err(cleanup_error)) => Err(with_cleanup_failure(error, cleanup_error)),
             (Err(error), Ok(())) => Err(error),
             (Ok(_), Err(error)) => Err(error),
-            (Ok((flash, snapshot, mut evidence)), Ok(())) => {
+            (Ok((flash, snapshot, post_flash_cores, mut evidence)), Ok(())) => {
                 evidence.operations.push(operation(8, "session.disconnect"));
                 evidence.complete = true;
                 let artifact = evidence_reservation.publish(&evidence)?;
@@ -464,6 +482,7 @@ impl<B: DebugBackend> DebugService<B> {
                     session,
                     flash,
                     snapshot,
+                    post_flash_cores,
                     evidence: artifact,
                 })
             }
@@ -488,6 +507,7 @@ fn debug_control_effects<B: DebugBackend>(
 
 fn require_guarded_flash_capabilities(
     backend: &str,
+    target: &crate::model::TargetInfo,
     capabilities: &crate::model::Capabilities,
 ) -> Result<()> {
     let required = [
@@ -504,6 +524,14 @@ fn require_guarded_flash_capabilities(
             "selected backend cannot complete the guarded flash workflow",
             6,
             json!({"backend": backend, "capability": capability}),
+        ));
+    }
+    if target.core_count > 1 && !capabilities.multi_core_post_flash {
+        return Err(DebugError::new(
+            ErrorCode::CapabilityUnavailable,
+            "selected backend cannot complete the guarded multi-core post-flash workflow",
+            6,
+            json!({"backend": backend, "capability": "multi_core_post_flash"}),
         ));
     }
     Ok(())
@@ -576,7 +604,7 @@ fn execution_readiness(
                 .to_string(),
         });
     }
-    if target.core_count > 1 {
+    if target.core_count > 1 && !capabilities.multi_core_post_flash {
         blockers.push(FlashExecutionBlocker {
             code: "MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED".to_string(),
             message: "the multi-core target lacks a complete post-flash reset/snapshot/resume evidence policy"
@@ -619,6 +647,29 @@ pub fn inspect_evidence(path: &Path) -> Result<EvidenceBundle> {
                 "complete": bundle.complete,
             }),
         ));
+    }
+    if !bundle.post_flash_cores.is_empty() {
+        validate_post_flash_core_inventory(&bundle.target, &bundle.post_flash_cores).map_err(
+            |problem| {
+                DebugError::evidence(
+                    "evidence contains an invalid post-flash core inventory",
+                    json!({"path": path, "problem": problem}),
+                )
+            },
+        )?;
+        let compatibility_core = bundle
+            .post_flash_cores
+            .iter()
+            .filter(|core| core.available)
+            .min_by_key(|core| core.index)
+            .and_then(|core| core.snapshot.as_ref())
+            .expect("validated post-flash inventory contains an available core");
+        if &bundle.core != compatibility_core {
+            return Err(DebugError::evidence(
+                "evidence compatibility core does not match the first available post-flash core",
+                json!({"path": path}),
+            ));
+        }
     }
     Ok(bundle)
 }
@@ -828,10 +879,75 @@ mod tests {
 
     use super::*;
     use crate::backend::replay::{ReplayBackend, ReplayFixture};
-    use crate::model::{FirmwareInfo, FlashReport, FlashSegmentReport};
+    use crate::model::{
+        CoreObservation, CoreSnapshot, CoreState, FirmwareInfo, FlashReport, FlashSegmentReport,
+        PostFlashCoreObservation,
+    };
 
     fn fixture() -> ReplayFixture {
         serde_json::from_str(include_str!("../examples/replay/stm32g4.json")).unwrap()
+    }
+
+    fn esp32s3_post_flash_fixture() -> ReplayFixture {
+        let mut replay = fixture();
+        replay.target.name = "esp32s3".to_string();
+        replay.target.architecture = "xtensa".to_string();
+        replay.target.core_count = 2;
+        replay.capabilities.segmented_flash = true;
+        replay.capabilities.multi_core_post_flash = true;
+        replay.capabilities.reset = true;
+        replay.flash.base_address = Address(0);
+        replay.flash.erase_ranges = vec![FlashRange {
+            start: Address(0),
+            length: 0x2_0000,
+        }];
+        let cpu0_snapshot = CoreSnapshot {
+            captured_state: CoreState::Halted,
+            state: CoreState::Running,
+            pc: Address(0x4200_0000),
+            sp: Address(0x3fcf_0000),
+            registers: std::collections::BTreeMap::from([("lr".to_string(), Address(0x4200_0004))]),
+            halt_reason: Some("request".to_string()),
+        };
+        replay.live_cores = vec![
+            CoreObservation {
+                index: 0,
+                name: "cpu0".to_string(),
+                architecture: "xtensa".to_string(),
+                available: true,
+                original_state: Some(CoreState::Running),
+                snapshot: Some(cpu0_snapshot.clone()),
+                unavailable_reason: None,
+            },
+            CoreObservation {
+                index: 1,
+                name: "cpu1".to_string(),
+                architecture: "xtensa".to_string(),
+                available: false,
+                original_state: None,
+                snapshot: None,
+                unavailable_reason: Some("core is not enabled".to_string()),
+            },
+        ];
+        replay.post_flash_cores = vec![
+            PostFlashCoreObservation {
+                index: 0,
+                name: "cpu0".to_string(),
+                architecture: "xtensa".to_string(),
+                available: true,
+                snapshot: Some(cpu0_snapshot),
+                unavailable_reason: None,
+            },
+            PostFlashCoreObservation {
+                index: 1,
+                name: "cpu1".to_string(),
+                architecture: "xtensa".to_string(),
+                available: false,
+                snapshot: None,
+                unavailable_reason: Some("core is not enabled".to_string()),
+            },
+        ];
+        replay
     }
 
     #[test]
@@ -1146,6 +1262,83 @@ mod tests {
         let bundle = inspect_evidence(&evidence).unwrap();
         assert!(bundle.complete);
         assert_eq!(bundle.flash.as_ref().unwrap(), &result.flash);
+        assert_eq!(result.post_flash_cores.len(), 1);
+        assert_eq!(bundle.post_flash_cores, result.post_flash_cores);
+        assert_eq!(bundle.core, result.snapshot);
+    }
+
+    #[test]
+    fn idf_multi_core_execution_publishes_complete_post_flash_inventory() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("demo.elf");
+        let evidence = directory.path().join("run.evidence.json");
+        fs::write(&firmware, crate::firmware::tests::minimal_esp32s3_idf_elf()).unwrap();
+        let mut service = DebugService::new(ReplayBackend::new(esp32s3_post_flash_fixture()));
+        let options = FirmwareInputOptions {
+            format: Some(FirmwareFormat::EspIdf),
+            flash_size: Some(8 * 1024 * 1024),
+            ..FirmwareInputOptions::default()
+        };
+        let plan = service
+            .plan_flash_with_options(&firmware, None, None, &options)
+            .unwrap();
+
+        assert!(plan.execution.supported);
+        let result = service
+            .execute_flash_with_options(
+                &firmware,
+                None,
+                None,
+                &options,
+                &plan.confirm_digest,
+                &evidence,
+            )
+            .unwrap();
+
+        assert_eq!(result.post_flash_cores.len(), 2);
+        assert!(result.post_flash_cores[0].available);
+        assert!(!result.post_flash_cores[1].available);
+        assert_eq!(
+            result.snapshot,
+            result.post_flash_cores[0].snapshot.clone().unwrap()
+        );
+        let bundle = inspect_evidence(&evidence).unwrap();
+        assert_eq!(bundle.post_flash_cores, result.post_flash_cores);
+        assert_eq!(bundle.core, result.snapshot);
+    }
+
+    #[test]
+    fn invalid_post_flash_restoration_does_not_publish_evidence() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("demo.elf");
+        let evidence = directory.path().join("run.evidence.json");
+        fs::write(&firmware, crate::firmware::tests::minimal_esp32s3_idf_elf()).unwrap();
+        let mut replay = esp32s3_post_flash_fixture();
+        replay.post_flash_cores[0].snapshot.as_mut().unwrap().state = CoreState::Halted;
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+        let options = FirmwareInputOptions {
+            format: Some(FirmwareFormat::EspIdf),
+            flash_size: Some(8 * 1024 * 1024),
+            ..FirmwareInputOptions::default()
+        };
+        let plan = service
+            .plan_flash_with_options(&firmware, None, None, &options)
+            .unwrap();
+
+        let error = service
+            .execute_flash_with_options(
+                &firmware,
+                None,
+                None,
+                &options,
+                &plan.confirm_digest,
+                &evidence,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ProtocolError);
+        assert!(error.message.contains("post-flash core inventory"));
+        assert!(!evidence.exists());
     }
 
     #[test]
@@ -1293,6 +1486,7 @@ mod tests {
                 verified: true,
             }),
             core: fixture.after_reset_core,
+            post_flash_cores: Vec::new(),
             operations: vec![operation(1, "session.disconnect")],
             complete: true,
         };

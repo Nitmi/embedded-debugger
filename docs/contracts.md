@@ -135,11 +135,13 @@ physical address, length, SHA-256, and verification result. The service rejects
 backend reports whose aggregate bytes, source digest, segment manifest, or
 aggregate verification state differ from the confirmed firmware manifest.
 
-`capabilities.segmented_flash` is false by default and may be advertised only
-after target-specific physical acceptance. A normalized plan reports
+`capabilities.segmented_flash` and `capabilities.multi_core_post_flash` are
+false by default and may be advertised only after target-specific acceptance.
+A normalized plan reports
 `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` when that capability is absent. Multi-core
-targets also report `MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED` until the evidence
-model covers reset, snapshot, state restoration, and cleanup across all cores.
+targets report `MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED` until their backend can
+perform and prove reset, snapshot, state restoration, and cleanup across all
+described cores.
 For such a blocked plan, even the exact digest returns
 `CAPABILITY_UNAVAILABLE` before target attach, evidence reservation, flash
 operations, or reset. Probe enumeration has already occurred at that point and
@@ -150,6 +152,16 @@ is reported separately in the error details.
 `core.captured_state` is the state while PC/SP/registers were read. `core.state`
 is the state after capture is complete. The guarded flash workflow normally
 reports `captured_state="halted"` and `state="running"`.
+
+New flash results and evidence include `post_flash_cores[]`, with exactly one
+entry for every target core index. Available cores contain a snapshot captured
+while halted and must finish as `running`. Disabled or inaccessible cores omit
+the snapshot and retain a non-empty reason; they are never silently dropped.
+At least one core must be available. The legacy `snapshot` result field and
+`core` evidence field remain as compatibility views of the lowest-index
+available core. Evidence inspection rejects an invalid inventory or a
+compatibility view that does not match it. Older evidence without
+`post_flash_cores` remains readable within schema `1.x`.
 
 For live multi-core observations, each `cores[]` entry also has a stable target
 core `index`, target-defined `name`, `architecture`, and `original_state`.

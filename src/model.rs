@@ -106,6 +106,8 @@ pub struct Capabilities {
     pub flash: bool,
     #[serde(default)]
     pub segmented_flash: bool,
+    #[serde(default)]
+    pub multi_core_post_flash: bool,
     pub verify: bool,
     pub halt: bool,
     pub run: bool,
@@ -151,6 +153,18 @@ pub struct CoreObservation {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_state: Option<CoreState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<CoreSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostFlashCoreObservation {
+    pub index: u32,
+    pub name: String,
+    pub architecture: String,
+    pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<CoreSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,6 +245,83 @@ pub fn validate_core_inventory(
     }
     if !cores.iter().any(|core| core.available) {
         return Err("no target core is available".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_post_flash_core_inventory(
+    target: &TargetInfo,
+    cores: &[PostFlashCoreObservation],
+) -> std::result::Result<(), String> {
+    if cores.len() != target.core_count as usize {
+        return Err(format!(
+            "expected {} post-flash core entries, received {}",
+            target.core_count,
+            cores.len()
+        ));
+    }
+    let indexes = cores
+        .iter()
+        .map(|core| core.index)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_indexes = (0..target.core_count).collect::<std::collections::BTreeSet<_>>();
+    if indexes != expected_indexes {
+        return Err(format!(
+            "post-flash core indexes must be exactly 0..{}, received {indexes:?}",
+            target.core_count
+        ));
+    }
+
+    for core in cores {
+        if core.name.trim().is_empty() || core.architecture.trim().is_empty() {
+            return Err(format!(
+                "post-flash core {} requires a name and architecture",
+                core.index
+            ));
+        }
+        if core.available {
+            let snapshot = core.snapshot.as_ref().ok_or_else(|| {
+                format!("available post-flash core {} has no snapshot", core.index)
+            })?;
+            if snapshot.captured_state != CoreState::Halted {
+                return Err(format!(
+                    "post-flash core {} registers were not captured while halted",
+                    core.index
+                ));
+            }
+            if snapshot.state != CoreState::Running {
+                return Err(format!(
+                    "post-flash core {} finished as {:?}, expected running",
+                    core.index, snapshot.state
+                ));
+            }
+            if core.unavailable_reason.is_some() {
+                return Err(format!(
+                    "available post-flash core {} has an unavailable reason",
+                    core.index
+                ));
+            }
+        } else {
+            if core.snapshot.is_some() {
+                return Err(format!(
+                    "unavailable post-flash core {} contains a snapshot",
+                    core.index
+                ));
+            }
+            if !core
+                .unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+            {
+                return Err(format!(
+                    "unavailable post-flash core {} has no reason",
+                    core.index
+                ));
+            }
+        }
+    }
+    if !cores.iter().any(|core| core.available) {
+        return Err("no post-flash target core is available".to_string());
     }
     Ok(())
 }
@@ -432,6 +523,8 @@ pub struct EvidenceBundle {
     #[serde(default)]
     pub flash: Option<FlashReport>,
     pub core: CoreSnapshot,
+    #[serde(default)]
+    pub post_flash_cores: Vec<PostFlashCoreObservation>,
     pub operations: Vec<OperationRecord>,
     pub complete: bool,
 }
@@ -450,6 +543,8 @@ pub struct FlashExecution {
     pub session: SessionInfo,
     pub flash: FlashReport,
     pub snapshot: CoreSnapshot,
+    #[serde(default)]
+    pub post_flash_cores: Vec<PostFlashCoreObservation>,
     pub evidence: ArtifactReference,
 }
 
@@ -511,6 +606,48 @@ mod tests {
             validate_core_inventory(&target, &cores)
                 .unwrap_err()
                 .contains("restored")
+        );
+    }
+
+    #[test]
+    fn post_flash_inventory_requires_available_cores_to_finish_running() {
+        let target = TargetInfo {
+            name: "dual".to_string(),
+            architecture: "test".to_string(),
+            core_count: 2,
+        };
+        let mut cores = vec![
+            PostFlashCoreObservation {
+                index: 0,
+                name: "cpu0".to_string(),
+                architecture: "test".to_string(),
+                available: true,
+                snapshot: Some(CoreSnapshot {
+                    captured_state: CoreState::Halted,
+                    state: CoreState::Running,
+                    pc: Address(1),
+                    sp: Address(2),
+                    registers: BTreeMap::new(),
+                    halt_reason: Some("request".to_string()),
+                }),
+                unavailable_reason: None,
+            },
+            PostFlashCoreObservation {
+                index: 1,
+                name: "cpu1".to_string(),
+                architecture: "test".to_string(),
+                available: false,
+                snapshot: None,
+                unavailable_reason: Some("disabled".to_string()),
+            },
+        ];
+
+        assert!(validate_post_flash_core_inventory(&target, &cores).is_ok());
+        cores[0].snapshot.as_mut().unwrap().state = CoreState::Halted;
+        assert!(
+            validate_post_flash_core_inventory(&target, &cores)
+                .unwrap_err()
+                .contains("expected running")
         );
     }
 }

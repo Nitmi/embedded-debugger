@@ -18,6 +18,7 @@
   "capabilities": {
     "flash": true,
     "segmented_flash": false,
+    "multi_core_post_flash": false,
     "verify": true,
     "halt": true,
     "run": true,

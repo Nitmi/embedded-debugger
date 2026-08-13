@@ -11,7 +11,8 @@ use crate::{
     firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreObservation, CoreSnapshot, FirmwareSegmentInfo, FlashLayout,
-        FlashRange, FlashReport, ProbeInfo, SessionInfo, TargetInfo, validate_core_inventory,
+        FlashRange, FlashReport, PostFlashCoreObservation, ProbeInfo, SessionInfo, TargetInfo,
+        validate_core_inventory, validate_post_flash_core_inventory,
     },
 };
 
@@ -40,6 +41,8 @@ pub struct ReplayFixture {
     pub after_reset_core: CoreSnapshot,
     #[serde(default)]
     pub live_cores: Vec<CoreObservation>,
+    #[serde(default)]
+    pub post_flash_cores: Vec<PostFlashCoreObservation>,
     pub flash: ReplayFlashBehavior,
 }
 
@@ -122,6 +125,41 @@ impl ReplayFixture {
                 "multi-core replay snapshot capability requires live_cores evidence",
                 json!({"core_count": self.target.core_count}),
             ));
+        }
+        if !self.post_flash_cores.is_empty()
+            && let Err(problem) =
+                validate_post_flash_core_inventory(&self.target, &self.post_flash_cores)
+        {
+            return Err(DebugError::fixture(
+                "replay post-flash core inventory is invalid",
+                json!({"problem": problem}),
+            ));
+        }
+        if self.capabilities.multi_core_post_flash {
+            if self.target.core_count < 2 {
+                return Err(DebugError::fixture(
+                    "multi-core post-flash capability requires a multi-core target",
+                    json!({"core_count": self.target.core_count}),
+                ));
+            }
+            if self.post_flash_cores.is_empty() {
+                return Err(DebugError::fixture(
+                    "multi-core post-flash capability requires post_flash_cores evidence",
+                    json!({"core_count": self.target.core_count}),
+                ));
+            }
+            let required = [
+                ("reset", self.capabilities.reset),
+                ("halt", self.capabilities.halt),
+                ("run", self.capabilities.run),
+                ("register_read", self.capabilities.register_read),
+            ];
+            if let Some((capability, _)) = required.iter().find(|(_, enabled)| !enabled) {
+                return Err(DebugError::fixture(
+                    "multi-core post-flash capability requires reset, halt, run, and register access",
+                    json!({"capability": capability}),
+                ));
+            }
         }
         Ok(())
     }
@@ -454,6 +492,46 @@ impl DebugBackend for ReplayBackend {
         })
     }
 
+    fn capture_post_flash_snapshot(
+        &mut self,
+        session: &SessionInfo,
+    ) -> Result<Vec<PostFlashCoreObservation>> {
+        self.ensure_session(session)?;
+        if !self.reset_performed {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "post-flash snapshot requires a successful reset",
+                6,
+                json!({"session_id": session.session_id}),
+            ));
+        }
+        if self.fixture.target.core_count > 1 && !self.fixture.capabilities.multi_core_post_flash {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "replay fixture does not advertise multi-core post-flash capability",
+                6,
+                json!({"capability": "multi_core_post_flash"}),
+            ));
+        }
+        if !self.fixture.post_flash_cores.is_empty() {
+            return Ok(self.fixture.post_flash_cores.clone());
+        }
+        if self.fixture.target.core_count != 1 {
+            return Err(DebugError::fixture(
+                "multi-core replay post-flash snapshots require explicit evidence",
+                json!({"core_count": self.fixture.target.core_count}),
+            ));
+        }
+        Ok(vec![PostFlashCoreObservation {
+            index: 0,
+            name: "core0".to_string(),
+            architecture: self.fixture.target.architecture.clone(),
+            available: true,
+            snapshot: Some(self.fixture.after_reset_core.clone()),
+            unavailable_reason: None,
+        }])
+    }
+
     fn capture_live_snapshot(&mut self, session: &SessionInfo) -> Result<Vec<CoreObservation>> {
         self.ensure_session(session)?;
         if !self.fixture.capabilities.halt
@@ -672,6 +750,57 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::FixtureInvalid);
         assert_eq!(error.details["capability"], "segmented_flash");
+    }
+
+    #[test]
+    fn multi_core_post_flash_capability_requires_restoration_capabilities() {
+        let mut fixture = fixture();
+        fixture.target.core_count = 2;
+        fixture.capabilities.multi_core_post_flash = true;
+        fixture.capabilities.run = false;
+        fixture.live_cores = vec![
+            CoreObservation {
+                index: 0,
+                name: "cpu0".to_string(),
+                architecture: "test".to_string(),
+                available: true,
+                original_state: Some(crate::model::CoreState::Running),
+                snapshot: Some(fixture.after_reset_core.clone()),
+                unavailable_reason: None,
+            },
+            CoreObservation {
+                index: 1,
+                name: "cpu1".to_string(),
+                architecture: "test".to_string(),
+                available: false,
+                original_state: None,
+                snapshot: None,
+                unavailable_reason: Some("disabled".to_string()),
+            },
+        ];
+        fixture.post_flash_cores = vec![
+            PostFlashCoreObservation {
+                index: 0,
+                name: "cpu0".to_string(),
+                architecture: "test".to_string(),
+                available: true,
+                snapshot: Some(fixture.after_reset_core.clone()),
+                unavailable_reason: None,
+            },
+            PostFlashCoreObservation {
+                index: 1,
+                name: "cpu1".to_string(),
+                architecture: "test".to_string(),
+                available: false,
+                snapshot: None,
+                unavailable_reason: Some("disabled".to_string()),
+            },
+        ];
+
+        let error = fixture.validate().unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FixtureInvalid);
+        assert_eq!(error.details["capability"], "run");
     }
 
     #[test]

@@ -21,6 +21,11 @@ All notable changes to this project will be documented in this file.
   exercises the complete plan/execute/verify/reset/evidence path.
 - Explicit `segmented_flash` target capability. Native targets remain disabled
   until target-specific physical acceptance is complete.
+- Multi-core post-flash evidence inventories with exact core indexes, explicit
+  disabled-core reasons, halted capture and running-final-state validation,
+  backward-compatible single-core views, and Replay success/failure coverage.
+- Explicit `multi_core_post_flash` capability and pre-mutation native reset
+  gating. ESP32-S3 remains disabled pending target-specific physical acceptance.
 - Replay execution, verification, reset, snapshot capture, and atomic evidence
   publication.
 - Native probe discovery through probe-rs 0.32.

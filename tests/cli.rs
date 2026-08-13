@@ -535,6 +535,92 @@ fn idf_segmented_replay_execution_reports_verified_segments() {
     assert!(evidence.exists());
 }
 
+#[test]
+fn idf_multi_core_replay_execution_reports_post_flash_inventory() {
+    let directory = tempdir().unwrap();
+    let firmware = directory.path().join("firmware.elf");
+    let evidence = directory.path().join("run.evidence.json");
+    let fixture = esp32s3_executable_fixture(directory.path());
+    fs::write(&firmware, support::minimal_esp32s3_idf_elf()).unwrap();
+
+    let plan_output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture.to_str().unwrap(),
+            "flash",
+            "plan",
+            firmware.to_str().unwrap(),
+            "--format",
+            "idf",
+            "--flash-size",
+            "8MB",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let confirmation = plan["data"]["confirm_digest"].as_str().unwrap();
+    assert_eq!(plan["data"]["execution"]["supported"], true);
+
+    let execute_output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture.to_str().unwrap(),
+            "flash",
+            "execute",
+            firmware.to_str().unwrap(),
+            "--format",
+            "idf",
+            "--flash-size",
+            "8MB",
+            "--confirm",
+            confirmation,
+            "--evidence",
+            evidence.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let execute: Value = serde_json::from_slice(&execute_output).unwrap();
+
+    assert_eq!(
+        execute["data"]["flash"]["segments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        execute["data"]["post_flash_cores"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(execute["data"]["post_flash_cores"][0]["available"], true);
+    assert_eq!(execute["data"]["post_flash_cores"][1]["available"], false);
+    assert_eq!(
+        execute["data"]["snapshot"],
+        execute["data"]["post_flash_cores"][0]["snapshot"]
+    );
+
+    let bundle: Value = serde_json::from_slice(&fs::read(&evidence).unwrap()).unwrap();
+    assert_eq!(
+        bundle["post_flash_cores"],
+        execute["data"]["post_flash_cores"]
+    );
+    assert_eq!(bundle["core"], execute["data"]["snapshot"]);
+    assert_eq!(bundle["complete"], true);
+}
+
 fn esp32s3_fixture(directory: &std::path::Path, reset: bool) -> std::path::PathBuf {
     let mut value: Value =
         serde_json::from_slice(&fs::read("examples/replay/stm32g4.json").unwrap()).unwrap();
@@ -575,6 +661,40 @@ fn esp32s3_fixture(directory: &std::path::Path, reset: bool) -> std::path::PathB
         "length": 131072,
     }]);
     let path = directory.join("esp32s3.json");
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    path
+}
+
+fn esp32s3_executable_fixture(directory: &std::path::Path) -> std::path::PathBuf {
+    let path = esp32s3_fixture(directory, true);
+    let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["capabilities"]["segmented_flash"] = true.into();
+    value["capabilities"]["multi_core_post_flash"] = true.into();
+    value["post_flash_cores"] = serde_json::json!([
+        {
+            "index": 0,
+            "name": "cpu0",
+            "architecture": "xtensa",
+            "available": true,
+            "snapshot": {
+                "captured_state": "halted",
+                "state": "running",
+                "pc": "0x42010000",
+                "sp": "0x3fcf0000",
+                "registers": {"lr": "0x42010004"},
+                "halt_reason": "request"
+            },
+            "unavailable_reason": null
+        },
+        {
+            "index": 1,
+            "name": "cpu1",
+            "architecture": "xtensa",
+            "available": false,
+            "snapshot": null,
+            "unavailable_reason": "core is not enabled"
+        }
+    ]);
     fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     path
 }
