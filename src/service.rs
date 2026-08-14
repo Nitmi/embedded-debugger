@@ -19,7 +19,7 @@ use crate::{
         Address, ArtifactReference, DebugControlEffects, EvidenceBundle, FirmwareImageOptions,
         FirmwareSegmentInfo, FlashExecution, FlashExecutionBlocker, FlashExecutionReadiness,
         FlashPlan, FlashPolicy, FlashRange, OperationRecord, PlannedAction, ProbeInfo,
-        ProbeTestReport, SnapshotCaptureReport, validate_core_inventory,
+        ProbeTestReport, ResetCaptureReport, SnapshotCaptureReport, validate_core_inventory,
         validate_post_flash_core_inventory,
     },
 };
@@ -86,7 +86,7 @@ impl<B: DebugBackend> DebugService<B> {
         Ok(ProbeTestReport {
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, false),
+            effects: debug_control_effects(&self.backend, false, false),
             operations,
             complete: true,
         })
@@ -161,7 +161,7 @@ impl<B: DebugBackend> DebugService<B> {
             captured_at,
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, true),
+            effects: debug_control_effects(&self.backend, true, false),
             cores,
             operations: vec![
                 operation(1, "session.attach"),
@@ -170,6 +170,95 @@ impl<B: DebugBackend> DebugService<B> {
                 operation(4, "snapshot.capture_all_cores"),
                 operation(5, "target.restore_original_core_states"),
                 operation(6, "session.disconnect"),
+            ],
+            complete: true,
+        })
+    }
+
+    pub fn capture_reset_snapshot(
+        &mut self,
+        probe_id: &str,
+        target: &str,
+    ) -> Result<ResetCaptureReport> {
+        let target_info = self.backend.target().clone();
+        if !self.backend.matches_target(target) {
+            return Err(DebugError::unavailable(
+                ErrorCode::TargetUnavailable,
+                "requested target is not available from the selected backend",
+                json!({"requested": target, "available": target_info.name}),
+            ));
+        }
+        let capabilities = self.backend.capabilities();
+        let required_capabilities = [
+            ("reset", capabilities.reset),
+            ("halt", capabilities.halt),
+            ("run", capabilities.run),
+            ("register_read", capabilities.register_read),
+        ];
+        if let Some((capability, _)) = required_capabilities
+            .iter()
+            .find(|(_, available)| !available)
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "selected backend cannot capture a post-reset core snapshot",
+                6,
+                json!({"backend": self.backend.name(), "capability": capability}),
+            ));
+        }
+        if target_info.core_count > 1 && !capabilities.multi_core_post_flash {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "selected backend cannot capture a complete multi-core post-reset snapshot",
+                6,
+                json!({
+                    "backend": self.backend.name(),
+                    "capability": "multi_core_post_flash",
+                }),
+            ));
+        }
+
+        let probe = select_probe(&self.backend.list_probes()?, Some(probe_id))?;
+        let session = self.backend.attach(&probe.id, &target_info.name)?;
+        let capture_result = self
+            .backend
+            .reset(&session)
+            .and_then(|()| self.backend.capture_post_flash_snapshot(&session));
+        let captured_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let disconnect_result = self.backend.disconnect(&session);
+        let cores = match (capture_result, disconnect_result) {
+            (Err(error), Err(cleanup_error)) => {
+                return Err(with_cleanup_failure(error, cleanup_error));
+            }
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+            (Ok(cores), Ok(())) => cores,
+        };
+        if let Err(problem) = validate_post_flash_core_inventory(&target_info, &cores) {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned an invalid post-reset core inventory",
+                6,
+                json!({
+                    "problem": problem,
+                    "cores": cores,
+                }),
+            ));
+        }
+
+        Ok(ResetCaptureReport {
+            capture_id: format!("reset_cap_{}", Uuid::new_v4().simple()),
+            captured_at,
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            session,
+            effects: debug_control_effects(&self.backend, true, true),
+            cores,
+            operations: vec![
+                operation(1, "session.attach"),
+                operation(2, "target.system_reset_and_halt"),
+                operation(3, "snapshot.capture_post_reset_cores"),
+                operation(4, "target.restore_expected_post_reset_states"),
+                operation(5, "session.disconnect"),
             ],
             complete: true,
         })
@@ -493,10 +582,11 @@ impl<B: DebugBackend> DebugService<B> {
 fn debug_control_effects<B: DebugBackend>(
     backend: &B,
     core_execution_state_restoration_verified: bool,
+    reset_requested: bool,
 ) -> DebugControlEffects {
     let volatile_target_state_notes = backend.volatile_target_state_notes();
     DebugControlEffects {
-        reset_requested: false,
+        reset_requested,
         flash_operation_requested: false,
         arbitrary_memory_write_requested: false,
         core_execution_state_restoration_verified,
@@ -909,6 +999,14 @@ mod tests {
             registers: std::collections::BTreeMap::from([("lr".to_string(), Address(0x4200_0004))]),
             halt_reason: Some("request".to_string()),
         };
+        let cpu1_snapshot = CoreSnapshot {
+            captured_state: CoreState::Halted,
+            state: CoreState::Halted,
+            pc: Address(0x4000_03c0),
+            sp: Address(0),
+            registers: std::collections::BTreeMap::from([("lr".to_string(), Address(0))]),
+            halt_reason: Some("breakpoint".to_string()),
+        };
         replay.live_cores = vec![
             CoreObservation {
                 index: 0,
@@ -935,6 +1033,7 @@ mod tests {
                 name: "cpu0".to_string(),
                 architecture: "xtensa".to_string(),
                 available: true,
+                expected_final_state: Some(CoreState::Running),
                 snapshot: Some(cpu0_snapshot),
                 unavailable_reason: None,
             },
@@ -942,9 +1041,10 @@ mod tests {
                 index: 1,
                 name: "cpu1".to_string(),
                 architecture: "xtensa".to_string(),
-                available: false,
-                snapshot: None,
-                unavailable_reason: Some("core is not enabled".to_string()),
+                available: true,
+                expected_final_state: Some(CoreState::Halted),
+                snapshot: Some(cpu1_snapshot),
+                unavailable_reason: None,
             },
         ];
         replay
@@ -1103,6 +1203,42 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::CapabilityUnavailable);
         assert_eq!(error.details["capability"], "run");
+    }
+
+    #[test]
+    fn reset_capture_reports_and_preserves_per_core_expected_states() {
+        let replay = esp32s3_post_flash_fixture();
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let report = service.capture_reset_snapshot(&probe_id, &target).unwrap();
+
+        assert!(report.complete);
+        assert!(report.effects.reset_requested);
+        assert!(!report.effects.flash_operation_requested);
+        assert!(report.effects.core_execution_state_restoration_verified);
+        assert_eq!(report.cores.len(), 2);
+        assert_eq!(
+            report.cores[0].expected_final_state,
+            Some(CoreState::Running)
+        );
+        assert_eq!(
+            report.cores[0].snapshot.as_ref().unwrap().state,
+            CoreState::Running
+        );
+        assert_eq!(
+            report.cores[1].expected_final_state,
+            Some(CoreState::Halted)
+        );
+        assert_eq!(
+            report.cores[1].snapshot.as_ref().unwrap().state,
+            CoreState::Halted
+        );
+        assert_eq!(
+            report.operations.last().unwrap().operation,
+            "session.disconnect"
+        );
     }
 
     #[test]
@@ -1297,7 +1433,15 @@ mod tests {
 
         assert_eq!(result.post_flash_cores.len(), 2);
         assert!(result.post_flash_cores[0].available);
-        assert!(!result.post_flash_cores[1].available);
+        assert!(result.post_flash_cores[1].available);
+        assert_eq!(
+            result.post_flash_cores[1].expected_final_state,
+            Some(CoreState::Halted)
+        );
+        assert_eq!(
+            result.post_flash_cores[1].snapshot.as_ref().unwrap().state,
+            CoreState::Halted
+        );
         assert_eq!(
             result.snapshot,
             result.post_flash_cores[0].snapshot.clone().unwrap()

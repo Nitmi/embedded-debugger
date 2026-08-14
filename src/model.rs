@@ -165,6 +165,8 @@ pub struct PostFlashCoreObservation {
     pub name: String,
     pub architecture: String,
     pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_final_state: Option<CoreState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<CoreSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -280,6 +282,13 @@ pub fn validate_post_flash_core_inventory(
             ));
         }
         if core.available {
+            let expected_final_state = core.expected_final_state.unwrap_or(CoreState::Running);
+            if expected_final_state == CoreState::Unknown {
+                return Err(format!(
+                    "available post-flash core {} has an unknown expected final state",
+                    core.index
+                ));
+            }
             let snapshot = core.snapshot.as_ref().ok_or_else(|| {
                 format!("available post-flash core {} has no snapshot", core.index)
             })?;
@@ -289,10 +298,10 @@ pub fn validate_post_flash_core_inventory(
                     core.index
                 ));
             }
-            if snapshot.state != CoreState::Running {
+            if snapshot.state != expected_final_state {
                 return Err(format!(
-                    "post-flash core {} finished as {:?}, expected running",
-                    core.index, snapshot.state
+                    "post-flash core {} finished as {:?}, expected {:?}",
+                    core.index, snapshot.state, expected_final_state
                 ));
             }
             if core.unavailable_reason.is_some() {
@@ -302,9 +311,9 @@ pub fn validate_post_flash_core_inventory(
                 ));
             }
         } else {
-            if core.snapshot.is_some() {
+            if core.expected_final_state.is_some() || core.snapshot.is_some() {
                 return Err(format!(
-                    "unavailable post-flash core {} contains a snapshot",
+                    "unavailable post-flash core {} contains an expected state or snapshot",
                     core.index
                 ));
             }
@@ -320,8 +329,11 @@ pub fn validate_post_flash_core_inventory(
             }
         }
     }
-    if !cores.iter().any(|core| core.available) {
-        return Err("no post-flash target core is available".to_string());
+    if !cores.iter().any(|core| {
+        core.available
+            && core.expected_final_state.unwrap_or(CoreState::Running) == CoreState::Running
+    }) {
+        return Err("no post-flash target core is expected to run".to_string());
     }
     Ok(())
 }
@@ -362,6 +374,18 @@ pub struct SnapshotCaptureReport {
     pub session: SessionInfo,
     pub effects: DebugControlEffects,
     pub cores: Vec<CoreObservation>,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetCaptureReport {
+    pub capture_id: String,
+    pub captured_at: String,
+    pub risk: String,
+    pub session: SessionInfo,
+    pub effects: DebugControlEffects,
+    pub cores: Vec<PostFlashCoreObservation>,
     pub operations: Vec<OperationRecord>,
     pub complete: bool,
 }
@@ -610,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn post_flash_inventory_requires_available_cores_to_finish_running() {
+    fn post_flash_inventory_preserves_each_expected_final_state() {
         let target = TargetInfo {
             name: "dual".to_string(),
             architecture: "test".to_string(),
@@ -622,6 +646,7 @@ mod tests {
                 name: "cpu0".to_string(),
                 architecture: "test".to_string(),
                 available: true,
+                expected_final_state: Some(CoreState::Running),
                 snapshot: Some(CoreSnapshot {
                     captured_state: CoreState::Halted,
                     state: CoreState::Running,
@@ -636,18 +661,53 @@ mod tests {
                 index: 1,
                 name: "cpu1".to_string(),
                 architecture: "test".to_string(),
-                available: false,
-                snapshot: None,
-                unavailable_reason: Some("disabled".to_string()),
+                available: true,
+                expected_final_state: Some(CoreState::Halted),
+                snapshot: Some(CoreSnapshot {
+                    captured_state: CoreState::Halted,
+                    state: CoreState::Halted,
+                    pc: Address(3),
+                    sp: Address(4),
+                    registers: BTreeMap::new(),
+                    halt_reason: Some("breakpoint".to_string()),
+                }),
+                unavailable_reason: None,
             },
         ];
 
         assert!(validate_post_flash_core_inventory(&target, &cores).is_ok());
-        cores[0].snapshot.as_mut().unwrap().state = CoreState::Halted;
+        cores[1].snapshot.as_mut().unwrap().state = CoreState::Running;
         assert!(
             validate_post_flash_core_inventory(&target, &cores)
                 .unwrap_err()
-                .contains("expected running")
+                .contains("expected Halted")
         );
+    }
+
+    #[test]
+    fn post_flash_inventory_defaults_legacy_expected_state_to_running() {
+        let target = TargetInfo {
+            name: "single".to_string(),
+            architecture: "test".to_string(),
+            core_count: 1,
+        };
+        let json = r#"{
+            "index": 0,
+            "name": "cpu0",
+            "architecture": "test",
+            "available": true,
+            "snapshot": {
+                "captured_state": "halted",
+                "state": "running",
+                "pc": "0x00000001",
+                "sp": "0x00000002",
+                "registers": {},
+                "halt_reason": "request"
+            }
+        }"#;
+        let core: PostFlashCoreObservation = serde_json::from_str(json).unwrap();
+
+        assert_eq!(core.expected_final_state, None);
+        assert!(validate_post_flash_core_inventory(&target, &[core]).is_ok());
     }
 }

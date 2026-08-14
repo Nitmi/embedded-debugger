@@ -141,6 +141,51 @@ fn replay_snapshot_capture_reports_named_cores_and_restoration() {
 }
 
 #[test]
+fn replay_reset_capture_reports_per_core_reset_policy() {
+    let directory = tempdir().unwrap();
+    let fixture = esp32s3_executable_fixture(directory.path());
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture.to_str().unwrap(),
+            "snapshot",
+            "reset-capture",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "esp32s3",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "snapshot.reset_capture");
+    assert_eq!(result["data"]["complete"], true);
+    assert_eq!(result["data"]["effects"]["reset_requested"], true);
+    assert_eq!(
+        result["data"]["effects"]["flash_operation_requested"],
+        false
+    );
+    assert_eq!(result["data"]["cores"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        result["data"]["cores"][0]["expected_final_state"],
+        "running"
+    );
+    assert_eq!(result["data"]["cores"][0]["snapshot"]["state"], "running");
+    assert_eq!(result["data"]["cores"][1]["expected_final_state"], "halted");
+    assert_eq!(result["data"]["cores"][1]["snapshot"]["state"], "halted");
+    assert_eq!(
+        result["data"]["operations"][4]["operation"],
+        "session.disconnect"
+    );
+}
+
+#[test]
 fn wrong_confirmation_returns_stable_error() {
     let directory = tempdir().unwrap();
     let evidence = directory.path().join("run.evidence.json");
@@ -606,7 +651,11 @@ fn idf_multi_core_replay_execution_reports_post_flash_inventory() {
         2
     );
     assert_eq!(execute["data"]["post_flash_cores"][0]["available"], true);
-    assert_eq!(execute["data"]["post_flash_cores"][1]["available"], false);
+    assert_eq!(execute["data"]["post_flash_cores"][1]["available"], true);
+    assert_eq!(
+        execute["data"]["post_flash_cores"][1]["expected_final_state"],
+        "halted"
+    );
     assert_eq!(
         execute["data"]["snapshot"],
         execute["data"]["post_flash_cores"][0]["snapshot"]
@@ -676,6 +725,7 @@ fn esp32s3_executable_fixture(directory: &std::path::Path) -> std::path::PathBuf
             "name": "cpu0",
             "architecture": "xtensa",
             "available": true,
+            "expected_final_state": "running",
             "snapshot": {
                 "captured_state": "halted",
                 "state": "running",
@@ -690,9 +740,17 @@ fn esp32s3_executable_fixture(directory: &std::path::Path) -> std::path::PathBuf
             "index": 1,
             "name": "cpu1",
             "architecture": "xtensa",
-            "available": false,
-            "snapshot": null,
-            "unavailable_reason": "core is not enabled"
+            "available": true,
+            "expected_final_state": "halted",
+            "snapshot": {
+                "captured_state": "halted",
+                "state": "halted",
+                "pc": "0x400003c0",
+                "sp": "0x00000000",
+                "registers": {"lr": "0x00000000"},
+                "halt_reason": "breakpoint"
+            },
+            "unavailable_reason": null
         }
     ]);
     fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();

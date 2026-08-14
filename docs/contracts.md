@@ -59,8 +59,19 @@ available. The response distinguishes `original_state`, `captured_state`, and
 the final restored `state`. It does not request reset, erase, program, arbitrary
 memory write, or a persistent debug session.
 
+`snapshot reset-capture --probe <exact-selector> --target <exact-target>` is an
+`R1_REVERSIBLE_CONTROL` reset-policy acceptance command. It requires reset,
+halt, run, and register-read capabilities; multi-core targets additionally
+require `multi_core_post_flash`. The command performs system reset-and-halt,
+captures every available core while halted, restores each core to its explicit
+`expected_final_state`, verifies those states, and disconnects. It reports
+`effects.reset_requested=true` and never requests erase, program, or arbitrary
+memory write. CPU0 is expected to run after the workflow. Secondary cores retain
+the running or halted state observed immediately after the target reset sequence.
+
 R1 debug control is not equivalent to side-effect-free target inspection. Both
-`probes test` and `snapshot capture` return an `effects` object. It records
+`probes test`, `snapshot capture`, and `snapshot reset-capture` return an
+`effects` object. It records
 whether the command requested reset, Flash, or arbitrary memory writes; whether
 core execution-state restoration was verified; and any known backend-managed
 volatile target changes. probe-rs clears hardware breakpoints during attach and
@@ -155,9 +166,11 @@ reports `captured_state="halted"` and `state="running"`.
 
 New flash results and evidence include `post_flash_cores[]`, with exactly one
 entry for every target core index. Available cores contain a snapshot captured
-while halted and must finish as `running`. Disabled or inaccessible cores omit
-the snapshot and retain a non-empty reason; they are never silently dropped.
-At least one core must be available. The legacy `snapshot` result field and
+while halted and must finish in their declared `expected_final_state`. A missing
+expected state in older schema `1.x` data means `running`. At least one available
+core must be expected to run. Disabled or inaccessible cores omit both expected
+state and snapshot and retain a non-empty reason; they are never silently
+dropped. The legacy `snapshot` result field and
 `core` evidence field remain as compatibility views of the lowest-index
 available core. Evidence inspection rejects an invalid inventory or a
 compatibility view that does not match it. Older evidence without

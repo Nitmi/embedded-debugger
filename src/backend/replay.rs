@@ -527,6 +527,7 @@ impl DebugBackend for ReplayBackend {
             name: "core0".to_string(),
             architecture: self.fixture.target.architecture.clone(),
             available: true,
+            expected_final_state: Some(crate::model::CoreState::Running),
             snapshot: Some(self.fixture.after_reset_core.clone()),
             unavailable_reason: None,
         }])
@@ -784,6 +785,7 @@ mod tests {
                 name: "cpu0".to_string(),
                 architecture: "test".to_string(),
                 available: true,
+                expected_final_state: Some(crate::model::CoreState::Running),
                 snapshot: Some(fixture.after_reset_core.clone()),
                 unavailable_reason: None,
             },
@@ -792,6 +794,7 @@ mod tests {
                 name: "cpu1".to_string(),
                 architecture: "test".to_string(),
                 available: false,
+                expected_final_state: None,
                 snapshot: None,
                 unavailable_reason: Some("disabled".to_string()),
             },

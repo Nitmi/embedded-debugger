@@ -67,6 +67,7 @@ impl ProbeRsBackend {
         }
 
         let single_core = target.cores.len() == 1;
+        let accepted_esp32s3_post_reset = target.name.eq_ignore_ascii_case("esp32s3");
         let flash = !target.flash_algorithms.is_empty();
         let target_info = TargetInfo {
             name: target.name.clone(),
@@ -77,12 +78,12 @@ impl ProbeRsBackend {
             flash,
             // Advertise only after target-specific segmented execution acceptance.
             segmented_flash: false,
-            // Multi-core reset/snapshot/resume requires target-specific acceptance.
-            multi_core_post_flash: false,
+            // ESP32-S3 reset and per-core restoration passed target-specific acceptance.
+            multi_core_post_flash: accepted_esp32s3_post_reset,
             verify: flash,
             halt: true,
             run: true,
-            reset: single_core,
+            reset: single_core || accepted_esp32s3_post_reset,
             step: single_core,
             register_read: true,
             memory_read: single_core,
@@ -634,7 +635,7 @@ impl DebugBackend for ProbeRsBackend {
         &mut self,
         session: &SessionInfo,
     ) -> Result<Vec<PostFlashCoreObservation>> {
-        if self.target.cores.len() != 1 {
+        if self.target.cores.len() > 1 && !self.capabilities.multi_core_post_flash {
             return Err(DebugError::new(
                 ErrorCode::CapabilityUnavailable,
                 "multi-core post-flash observation has not passed target-specific acceptance",
@@ -647,17 +648,171 @@ impl DebugBackend for ProbeRsBackend {
                 }),
             ));
         }
-        let name = self.target.cores[0].name.clone();
-        let architecture = format!("{:?}", self.target.cores[0].core_type).to_ascii_lowercase();
-        let snapshot = self.snapshot(session)?;
-        Ok(vec![PostFlashCoreObservation {
-            index: 0,
-            name,
-            architecture,
-            available: true,
-            snapshot: Some(snapshot),
-            unavailable_reason: None,
-        }])
+        let core_specs = self
+            .target
+            .cores
+            .iter()
+            .enumerate()
+            .map(|(index, core)| {
+                (
+                    index,
+                    core.name.clone(),
+                    format!("{:?}", core.core_type).to_ascii_lowercase(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let active = self.ensure_session_mut(session)?;
+        if !active.reset_halted || !active.restore_before_disconnect.is_empty() {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "post-reset snapshot requires a successful reset-and-halt with no pending restoration",
+                6,
+                json!({"session_id": session.session_id}),
+            ));
+        }
+
+        let mut disabled = BTreeMap::<usize, String>::new();
+        let mut observed_states = BTreeMap::<usize, CoreState>::new();
+        let mut expected_states = BTreeMap::<usize, CoreState>::new();
+
+        // Core 0 is deliberately held by reset_and_halt and must resume. Other
+        // cores retain the state in which the target's reset sequence left them.
+        for (index, _, _) in &core_specs {
+            let state_result = match active.session.core(*index) {
+                Ok(mut core) => core.status(),
+                Err(error @ probe_rs::Error::CoreDisabled(_)) => {
+                    disabled.insert(*index, error.to_string());
+                    continue;
+                }
+                Err(error) => Err(error),
+            };
+            let observed_status = match state_result {
+                Ok(status) => status,
+                Err(error) => {
+                    return Err(restore_after_capture_error(
+                        active,
+                        "read post-reset core states",
+                        error,
+                    ));
+                }
+            };
+            let observed_state = match live_core_state(*index, observed_status) {
+                Ok(state) => state,
+                Err(error) => {
+                    return Err(restore_after_capture_error(
+                        active,
+                        "determine post-reset core states",
+                        error,
+                    ));
+                }
+            };
+            let expected_state = if *index == 0 {
+                CoreState::Running
+            } else {
+                observed_state
+            };
+            observed_states.insert(*index, observed_state);
+            expected_states.insert(*index, expected_state);
+            active
+                .restore_before_disconnect
+                .insert(*index, expected_state);
+        }
+
+        for (index, _, _) in &core_specs {
+            if disabled.contains_key(index)
+                || observed_states.get(index) == Some(&CoreState::Halted)
+            {
+                continue;
+            }
+            if let Err(error) = active
+                .session
+                .core(*index)
+                .and_then(|mut core| core.halt(CORE_OPERATION_TIMEOUT))
+            {
+                return Err(restore_after_capture_error(
+                    active,
+                    "halt running cores for post-reset snapshot",
+                    error,
+                ));
+            }
+        }
+
+        let captured =
+            (|| -> std::result::Result<Vec<PostFlashCoreObservation>, probe_rs::Error> {
+                let mut observations = Vec::with_capacity(core_specs.len());
+                for (index, name, architecture) in &core_specs {
+                    if let Some(reason) = disabled.get(index) {
+                        observations.push(PostFlashCoreObservation {
+                            index: *index as u32,
+                            name: name.clone(),
+                            architecture: architecture.clone(),
+                            available: false,
+                            expected_final_state: None,
+                            snapshot: None,
+                            unavailable_reason: Some(reason.clone()),
+                        });
+                        continue;
+                    }
+
+                    let mut core = active.session.core(*index)?;
+                    let captured_status = core.status()?;
+                    if live_core_state(*index, captured_status)? != CoreState::Halted {
+                        return Err(probe_rs::Error::GenericCoreError(format!(
+                            "core {index} was not halted when post-reset registers were captured"
+                        )));
+                    }
+                    let pc_id = core.program_counter().id();
+                    let sp_id = core.stack_pointer().id();
+                    let lr_id = core.return_address().id();
+                    let pc = core.read_core_reg::<u64>(pc_id)?;
+                    let sp = core.read_core_reg::<u64>(sp_id)?;
+                    let lr = core.read_core_reg::<u64>(lr_id)?;
+                    observations.push(PostFlashCoreObservation {
+                        index: *index as u32,
+                        name: name.clone(),
+                        architecture: architecture.clone(),
+                        available: true,
+                        expected_final_state: expected_states.get(index).copied(),
+                        snapshot: Some(CoreSnapshot {
+                            captured_state: CoreState::Halted,
+                            state: CoreState::Unknown,
+                            pc: Address(pc),
+                            sp: Address(sp),
+                            registers: BTreeMap::from([("lr".to_string(), Address(lr))]),
+                            halt_reason: halt_reason(captured_status),
+                        }),
+                        unavailable_reason: None,
+                    });
+                }
+                Ok(observations)
+            })();
+        let mut observations = match captured {
+            Ok(observations) => observations,
+            Err(error) => {
+                return Err(restore_after_capture_error(
+                    active,
+                    "read all cores for post-reset snapshot",
+                    error,
+                ));
+            }
+        };
+
+        let restored_states = restore_pending_core_states(active)
+            .map_err(|error| map_core_error("restore cores after post-reset snapshot", error))?;
+        if restored_states.get(&0) == Some(&CoreState::Running) {
+            active.reset_halted = false;
+        }
+        for observation in observations.iter_mut().filter(|core| core.available) {
+            observation
+                .snapshot
+                .as_mut()
+                .expect("available cores always contain a snapshot")
+                .state = restored_states
+                .get(&(observation.index as usize))
+                .copied()
+                .expect("every available core has a restored state");
+        }
+        Ok(observations)
     }
 
     fn capture_live_snapshot(&mut self, session: &SessionInfo) -> Result<Vec<CoreObservation>> {
@@ -928,7 +1083,11 @@ fn restore_after_capture_error(
     let primary = map_core_error(operation, error);
     // A failed first restoration remains pending. `disconnect` retries it and
     // reports a cleanup error only if that final attempt also fails.
-    let _ = restore_pending_core_states(active);
+    if let Ok(restored_states) = restore_pending_core_states(active)
+        && restored_states.get(&0) == Some(&CoreState::Running)
+    {
+        active.reset_halted = false;
+    }
     primary
 }
 
@@ -1379,8 +1538,8 @@ mod tests {
         assert_eq!(backend.target().name, "esp32s3");
         assert_eq!(backend.target().core_count, 2);
         assert!(!backend.capabilities().segmented_flash);
-        assert!(!backend.capabilities().multi_core_post_flash);
-        assert!(!backend.capabilities().reset);
+        assert!(backend.capabilities().multi_core_post_flash);
+        assert!(backend.capabilities().reset);
         assert!(
             backend
                 .volatile_target_state_notes()
@@ -1390,7 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn esp32s3_post_flash_controls_fail_before_session_access() {
+    fn esp32s3_post_flash_controls_require_an_active_session() {
         let mut backend = ProbeRsBackend::new("esp32s3").unwrap();
         let session = SessionInfo {
             session_id: "not-attached".to_string(),
@@ -1410,15 +1569,10 @@ mod tests {
         };
 
         let reset_error = backend.reset(&session).unwrap_err();
-        assert_eq!(reset_error.code, ErrorCode::CapabilityUnavailable);
-        assert_eq!(reset_error.details["capability"], "reset");
+        assert_eq!(reset_error.code, ErrorCode::ProbeUnavailable);
 
         let snapshot_error = backend.capture_post_flash_snapshot(&session).unwrap_err();
-        assert_eq!(snapshot_error.code, ErrorCode::CapabilityUnavailable);
-        assert_eq!(
-            snapshot_error.details["capability"],
-            "multi_core_post_flash"
-        );
+        assert_eq!(snapshot_error.code, ErrorCode::ProbeUnavailable);
     }
 
     #[test]

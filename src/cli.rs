@@ -158,6 +158,7 @@ pub enum ReplayCommand {
 #[derive(Debug, Subcommand)]
 pub enum SnapshotCommand {
     Capture(SnapshotSelection),
+    ResetCapture(SnapshotSelection),
     Inspect { evidence: PathBuf },
 }
 
@@ -212,6 +213,9 @@ impl Cli {
                 command: SnapshotCommand::Capture(_),
             } => "snapshot.capture",
             Command::Snapshot {
+                command: SnapshotCommand::ResetCapture(_),
+            } => "snapshot.reset_capture",
+            Command::Snapshot {
                 command: SnapshotCommand::Inspect { .. },
             } => "snapshot.inspect",
         }
@@ -248,6 +252,9 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
         Command::Snapshot {
             command: SnapshotCommand::Capture(selection),
         } => capture_snapshot(cli, selection),
+        Command::Snapshot {
+            command: SnapshotCommand::ResetCapture(selection),
+        } => capture_reset_snapshot(cli, selection),
         Command::Probes {
             command: ProbeCommand::List,
         } => list_probes(cli),
@@ -492,6 +499,63 @@ fn capture_snapshot(cli: &Cli, selection: &SnapshotSelection) -> Result<CommandR
     );
     Ok(CommandResult::serializable(
         "snapshot.capture",
+        &report,
+        human,
+    ))
+}
+
+fn capture_reset_snapshot(cli: &Cli, selection: &SnapshotSelection) -> Result<CommandResult> {
+    let report = match cli.backend {
+        BackendArg::Replay => {
+            let mut service =
+                DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
+            service.capture_reset_snapshot(&selection.probe, &selection.target)?
+        }
+        BackendArg::ProbeRs => {
+            let backend = ProbeRsBackend::new(&selection.target)?;
+            let mut service = DebugService::new(backend);
+            service.capture_reset_snapshot(&selection.probe, &selection.target)?
+        }
+        BackendArg::Openocd => return Err(unsupported_openocd("post_reset_snapshot")),
+    };
+    let core_lines = report
+        .cores
+        .iter()
+        .map(|core| match &core.snapshot {
+            Some(snapshot) => format!(
+                "core {} ({}, {}): expected={:?}, captured={:?}, final={:?}, PC={}, SP={}",
+                core.index,
+                core.name,
+                core.architecture,
+                core.expected_final_state
+                    .unwrap_or(crate::model::CoreState::Running),
+                snapshot.captured_state,
+                snapshot.state,
+                snapshot.pc,
+                snapshot.sp
+            ),
+            None => format!(
+                "core {} ({}, {}): unavailable ({})",
+                core.index,
+                core.name,
+                core.architecture,
+                core.unavailable_reason.as_deref().unwrap_or("unknown")
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let available_cores = report.cores.iter().filter(|core| core.available).count();
+    let human = format!(
+        "Reset and observed {} described core(s), {} available on {}\n{}\nRisk: {}\nEffects: {}",
+        report.cores.len(),
+        available_cores,
+        report.session.target.name,
+        core_lines,
+        report.risk,
+        describe_debug_control_effects(&report.effects)
+    );
+    Ok(CommandResult::serializable(
+        "snapshot.reset_capture",
         &report,
         human,
     ))

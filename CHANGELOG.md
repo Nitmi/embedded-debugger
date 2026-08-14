@@ -22,10 +22,12 @@ All notable changes to this project will be documented in this file.
 - Explicit `segmented_flash` target capability. Native targets remain disabled
   until target-specific physical acceptance is complete.
 - Multi-core post-flash evidence inventories with exact core indexes, explicit
-  disabled-core reasons, halted capture and running-final-state validation,
-  backward-compatible single-core views, and Replay success/failure coverage.
+  disabled-core reasons, halted capture, per-core expected-final-state
+  validation, backward-compatible running defaults and single-core views, and
+  Replay success/failure coverage.
 - Explicit `multi_core_post_flash` capability and pre-mutation native reset
-  gating. ESP32-S3 remains disabled pending target-specific physical acceptance.
+  gating. ESP32-S3 system reset and per-core restoration passed physical
+  acceptance; segmented flash remains independently gated.
 - Replay execution, verification, reset, snapshot capture, and atomic evidence
   publication.
 - Native probe discovery through probe-rs 0.32.
@@ -36,6 +38,8 @@ All notable changes to this project will be documented in this file.
 - State-preserving `snapshot capture` for all described target cores, with
   explicit disabled-core reporting, original/captured/final states, and cleanup
   on both success and failure.
+- Non-flashing `snapshot reset-capture` with structured reset effects, complete
+  per-core post-reset observations, verified restoration, and disconnect.
 - Structured R1 `effects` disclosure for backend-managed volatile target state,
   including probe-rs hardware-breakpoint clearing and ESP32-S3 watchdog changes.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
@@ -64,8 +68,8 @@ All notable changes to this project will be documented in this file.
   exact confirmation, read-back, page preservation, post-reset snapshot,
   evidence, backup, and runtime checks. The two-page cross-sector case also
   passed. Physical probe removal consistently returns `PROBE_UNAVAILABLE`
-  without falling back to another connected probe. ESP32-S3 live snapshot
-  acceptance passed with enabled `cpu0` restored to running and disabled
-  `cpu1` reported explicitly. ESP32-S3 guarded flash execution awaits physical
-  segmented-flash acceptance and a verified multi-core system-reset/post-flash
-  policy; planning and shared staging/verification mechanisms are implemented.
+  without falling back to another connected probe. ESP32-S3 live and system
+  reset snapshots passed with `cpu0` restored to running and reset-accessible
+  `cpu1` preserved as halted. ESP32-S3 guarded flash execution now awaits only
+  physical segmented-flash acceptance; planning and shared staging/verification
+  mechanisms are implemented.
