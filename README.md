@@ -56,6 +56,26 @@ breakpoints on attach, and some target debug sequences change control
 registers. On ESP32-S3, the current probe-rs sequence disables multiple
 watchdogs during attach/halt. This is why the command is R1 rather than R0.
 
+Read a bounded set of registers from one core while preserving that core's
+original running or halted state:
+
+```console
+cargo run -- --backend probe-rs registers read pc sp lr \
+  --probe <vid:pid:serial> --target <exact-target> --core 0 --json
+```
+
+Names and architecture-defined aliases are matched case-insensitively. Omitting
+the positional names reads the target's register inventory only when it contains
+at most 64 entries; larger inventories require an explicit selection. Each
+reading reports its canonical name, aliases, backend register ID, bit width,
+kind, and fixed-width hexadecimal value. Floating-point values are returned as
+raw register bit patterns. The command halts only the selected core when needed,
+verifies restoration to its original state, and disconnects. As with live
+snapshots, probe-rs attach sequences can modify volatile debug-control state, so
+the result is classified as `R1_REVERSIBLE_CONTROL` and includes `effects`.
+Halting can also interrupt an in-flight peripheral or log write; restoring the
+core state cannot retract bytes already emitted externally.
+
 Exercise the target's accepted reset policy without flashing it:
 
 ```console
@@ -193,8 +213,8 @@ per-segment verification, preservation of every byte outside the image ranges,
 multi-core post-reset evidence, a full 16 MiB external readback, and serial
 heartbeat checks all succeeded. State-preserving live snapshots and system-reset
 snapshots also passed. OpenOCD, general ELF/HEX loading, RTT, persistent
-interactive debug sessions, other physically accepted native segmented targets,
-and non-boot NVM writes are not yet exposed.
+interactive debug sessions, memory commands, breakpoints, other physically
+accepted native segmented targets, and non-boot NVM writes are not yet exposed.
 See `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 

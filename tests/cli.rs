@@ -186,6 +186,84 @@ fn replay_reset_capture_reports_per_core_reset_policy() {
 }
 
 #[test]
+fn replay_register_read_reports_metadata_and_restored_state() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "registers",
+            "read",
+            "r15",
+            "xpsr",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--core",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "registers.read");
+    assert_eq!(result["data"]["risk"], "R1_REVERSIBLE_CONTROL");
+    assert_eq!(result["data"]["complete"], true);
+    assert_eq!(result["data"]["core"]["index"], 0);
+    assert_eq!(result["data"]["core"]["original_state"], "halted");
+    assert_eq!(result["data"]["core"]["captured_state"], "halted");
+    assert_eq!(result["data"]["core"]["state"], "halted");
+    assert_eq!(result["data"]["core"]["registers"][0]["name"], "pc");
+    assert_eq!(
+        result["data"]["core"]["registers"][0]["value"],
+        "0x08001234"
+    );
+    assert_eq!(result["data"]["core"]["registers"][1]["name"], "xpsr");
+    assert_eq!(
+        result["data"]["effects"]["core_execution_state_restoration_verified"],
+        true
+    );
+    assert_eq!(
+        result["data"]["operations"][5]["operation"],
+        "session.disconnect"
+    );
+}
+
+#[test]
+fn replay_register_read_returns_a_stable_unknown_name_error() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "registers",
+            "read",
+            "missing",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["operation"], "registers.read");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["requested"], "missing");
+}
+
+#[test]
 fn wrong_confirmation_returns_stable_error() {
     let directory = tempdir().unwrap();
     let evidence = directory.path().join("run.evidence.json");

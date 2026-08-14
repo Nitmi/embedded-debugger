@@ -53,6 +53,50 @@
     },
     "halt_reason": null
   },
+  "register_cores": [
+    {
+      "index": 0,
+      "name": "core0",
+      "architecture": "armv7em",
+      "original_state": "halted",
+      "captured_state": "halted",
+      "state": "halted",
+      "halt_reason": "breakpoint",
+      "registers": [
+        {
+          "name": "pc",
+          "aliases": ["r15"],
+          "id": "0x000F",
+          "bits": 32,
+          "kind": "unsigned_integer",
+          "value": "0x08001234"
+        },
+        {
+          "name": "sp",
+          "aliases": ["r13"],
+          "id": "0x000D",
+          "bits": 32,
+          "kind": "unsigned_integer",
+          "value": "0x20007F00"
+        },
+        {
+          "name": "lr",
+          "aliases": ["r14"],
+          "id": "0x000E",
+          "bits": 32,
+          "kind": "unsigned_integer",
+          "value": "0x08001001"
+        },
+        {
+          "name": "xpsr",
+          "id": "0x0010",
+          "bits": 32,
+          "kind": "unsigned_integer",
+          "value": "0x21000000"
+        }
+      ]
+    }
+  ],
   "flash": {
     "base_address": "0x08000000",
     "erase_ranges": [

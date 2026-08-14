@@ -59,6 +59,10 @@ pub enum Command {
         #[command(subcommand)]
         command: SnapshotCommand,
     },
+    Registers {
+        #[command(subcommand)]
+        command: RegisterCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -171,6 +175,30 @@ pub struct SnapshotSelection {
     pub target: String,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum RegisterCommand {
+    Read(RegisterReadSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct RegisterReadSelection {
+    #[arg(
+        value_name = "NAME",
+        num_args = 0..=64,
+        help = "register names or aliases; omit to read the bounded register inventory"
+    )]
+    pub names: Vec<String>,
+
+    #[arg(long, help = "exact probe selector from probes list")]
+    pub probe: String,
+
+    #[arg(long, help = "exact target name")]
+    pub target: String,
+
+    #[arg(long, default_value_t = 0, help = "zero-based target core index")]
+    pub core: u32,
+}
+
 #[derive(Debug)]
 pub struct CommandResult {
     pub operation: &'static str,
@@ -218,6 +246,9 @@ impl Cli {
             Command::Snapshot {
                 command: SnapshotCommand::Inspect { .. },
             } => "snapshot.inspect",
+            Command::Registers {
+                command: RegisterCommand::Read(_),
+            } => "registers.read",
         }
     }
 }
@@ -255,6 +286,9 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
         Command::Snapshot {
             command: SnapshotCommand::ResetCapture(selection),
         } => capture_reset_snapshot(cli, selection),
+        Command::Registers {
+            command: RegisterCommand::Read(selection),
+        } => read_registers(cli, selection),
         Command::Probes {
             command: ProbeCommand::List,
         } => list_probes(cli),
@@ -556,6 +590,68 @@ fn capture_reset_snapshot(cli: &Cli, selection: &SnapshotSelection) -> Result<Co
     );
     Ok(CommandResult::serializable(
         "snapshot.reset_capture",
+        &report,
+        human,
+    ))
+}
+
+fn read_registers(cli: &Cli, selection: &RegisterReadSelection) -> Result<CommandResult> {
+    let report = match cli.backend {
+        BackendArg::Replay => {
+            let mut service =
+                DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
+            service.read_registers(
+                &selection.probe,
+                &selection.target,
+                selection.core,
+                &selection.names,
+            )?
+        }
+        BackendArg::ProbeRs => {
+            let backend = ProbeRsBackend::new(&selection.target)?;
+            let mut service = DebugService::new(backend);
+            service.read_registers(
+                &selection.probe,
+                &selection.target,
+                selection.core,
+                &selection.names,
+            )?
+        }
+        BackendArg::Openocd => return Err(unsupported_openocd("register_read")),
+    };
+    let register_lines = report
+        .core
+        .registers
+        .iter()
+        .map(|register| {
+            let aliases = if register.aliases.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", register.aliases.join(", "))
+            };
+            format!(
+                "{}{} [{}; {} bit] = {}",
+                register.name, aliases, register.id, register.bits, register.value
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let human = format!(
+        "Read {} register(s) from core {} ({}, {}) on {}\noriginal={:?}, captured={:?}, restored={:?}\n{}\nRisk: {}\nEffects: {}",
+        report.core.registers.len(),
+        report.core.index,
+        report.core.name,
+        report.core.architecture,
+        report.session.target.name,
+        report.core.original_state,
+        report.core.captured_state,
+        report.core.state,
+        register_lines,
+        report.risk,
+        describe_debug_control_effects(&report.effects)
+    );
+    Ok(CommandResult::serializable(
+        "registers.read",
         &report,
         human,
     ))

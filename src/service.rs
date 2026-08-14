@@ -18,9 +18,10 @@ use crate::{
     model::{
         Address, ArtifactReference, DebugControlEffects, EvidenceBundle, FirmwareImageOptions,
         FirmwareSegmentInfo, FlashExecution, FlashExecutionBlocker, FlashExecutionReadiness,
-        FlashPlan, FlashPolicy, FlashRange, OperationRecord, PlannedAction, ProbeInfo,
-        ProbeTestReport, ResetCaptureReport, SnapshotCaptureReport, validate_core_inventory,
-        validate_post_flash_core_inventory,
+        FlashPlan, FlashPolicy, FlashRange, MAX_REGISTER_READS, OperationRecord, PlannedAction,
+        ProbeInfo, ProbeTestReport, RegisterReadReport, ResetCaptureReport, SnapshotCaptureReport,
+        validate_core_inventory, validate_post_flash_core_inventory,
+        validate_register_core_observation,
     },
 };
 
@@ -259,6 +260,100 @@ impl<B: DebugBackend> DebugService<B> {
                 operation(3, "snapshot.capture_post_reset_cores"),
                 operation(4, "target.restore_expected_post_reset_states"),
                 operation(5, "session.disconnect"),
+            ],
+            complete: true,
+        })
+    }
+
+    pub fn read_registers(
+        &mut self,
+        probe_id: &str,
+        target: &str,
+        core_index: u32,
+        names: &[String],
+    ) -> Result<RegisterReadReport> {
+        let target_info = self.backend.target().clone();
+        if !self.backend.matches_target(target) {
+            return Err(DebugError::unavailable(
+                ErrorCode::TargetUnavailable,
+                "requested target is not available from the selected backend",
+                json!({"requested": target, "available": target_info.name}),
+            ));
+        }
+        if core_index >= target_info.core_count {
+            return Err(DebugError::config(
+                "requested core index is outside the target core inventory",
+                json!({
+                    "core_index": core_index,
+                    "core_count": target_info.core_count,
+                    "target": target_info.name,
+                }),
+            ));
+        }
+        validate_register_request(names)?;
+
+        let capabilities = self.backend.capabilities();
+        let required_capabilities = [
+            ("halt", capabilities.halt),
+            ("run", capabilities.run),
+            ("register_read", capabilities.register_read),
+        ];
+        if let Some((capability, _)) = required_capabilities
+            .iter()
+            .find(|(_, available)| !available)
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "selected backend cannot perform a state-preserving register read",
+                6,
+                json!({"backend": self.backend.name(), "capability": capability}),
+            ));
+        }
+
+        let probe = select_probe(&self.backend.list_probes()?, Some(probe_id))?;
+        let session = self.backend.attach(&probe.id, &target_info.name)?;
+        let read_result = self.backend.read_registers(&session, core_index, names);
+        let captured_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let disconnect_result = self.backend.disconnect(&session);
+        let core = match (read_result, disconnect_result) {
+            (Err(error), Err(cleanup_error)) => {
+                return Err(with_cleanup_failure(error, cleanup_error));
+            }
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+            (Ok(core), Ok(())) => core,
+        };
+        if core.index != core_index {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned register data for a different core",
+                6,
+                json!({"requested_core": core_index, "received_core": core.index}),
+            ));
+        }
+        if let Err(problem) = validate_register_core_observation(&target_info, &core) {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned an invalid register observation",
+                6,
+                json!({"problem": problem, "core": core}),
+            ));
+        }
+
+        Ok(RegisterReadReport {
+            read_id: format!("reg_{}", Uuid::new_v4().simple()),
+            captured_at,
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            session,
+            effects: debug_control_effects(&self.backend, true, false),
+            core,
+            operations: vec![
+                operation(1, "session.attach"),
+                operation(2, "target.capture_original_core_state"),
+                operation(3, "target.halt_core_if_running"),
+                operation(4, "registers.read"),
+                operation(5, "target.restore_original_core_state"),
+                operation(6, "session.disconnect"),
             ],
             complete: true,
         })
@@ -577,6 +672,36 @@ impl<B: DebugBackend> DebugService<B> {
             }
         }
     }
+}
+
+fn validate_register_request(names: &[String]) -> Result<()> {
+    if names.len() > MAX_REGISTER_READS {
+        return Err(DebugError::config(
+            "too many register names were requested",
+            json!({"requested_count": names.len(), "maximum": MAX_REGISTER_READS}),
+        ));
+    }
+
+    let mut normalized_names = std::collections::BTreeSet::new();
+    for name in names {
+        if name.is_empty()
+            || name.len() > 64
+            || name.trim() != name
+            || name.chars().any(char::is_control)
+        {
+            return Err(DebugError::config(
+                "register names must be 1 to 64 visible characters without surrounding whitespace",
+                json!({"name": name}),
+            ));
+        }
+        if !normalized_names.insert(name.to_ascii_lowercase()) {
+            return Err(DebugError::config(
+                "duplicate register names are not allowed",
+                json!({"name": name}),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn debug_control_effects<B: DebugBackend>(
@@ -1203,6 +1328,57 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::CapabilityUnavailable);
         assert_eq!(error.details["capability"], "run");
+    }
+
+    #[test]
+    fn register_read_is_bounded_state_preserving_and_repeatable() {
+        let replay = fixture();
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+        let names = ["r14".to_string(), "pc".to_string()];
+
+        let first = service
+            .read_registers(&probe_id, &target, 0, &names)
+            .unwrap();
+        let second = service
+            .read_registers(&probe_id, &target, 0, &names)
+            .unwrap();
+
+        assert!(first.complete);
+        assert!(second.complete);
+        assert_eq!(first.core.original_state, CoreState::Halted);
+        assert_eq!(first.core.captured_state, CoreState::Halted);
+        assert_eq!(first.core.state, CoreState::Halted);
+        assert_eq!(first.core.registers[0].name, "lr");
+        assert_eq!(first.core.registers[1].name, "pc");
+        assert!(first.effects.core_execution_state_restoration_verified);
+        assert!(!first.effects.reset_requested);
+        assert_eq!(first.operations[3].operation, "registers.read");
+        assert_eq!(
+            first.operations.last().unwrap().operation,
+            "session.disconnect"
+        );
+    }
+
+    #[test]
+    fn invalid_register_core_is_rejected_before_a_session_is_opened() {
+        let replay = fixture();
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let error = service
+            .read_registers(&probe_id, &target, 1, &[])
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(error.details["core_count"], 1);
+
+        assert!(
+            service
+                .read_registers(&probe_id, &target, 0, &["pc".to_string()])
+                .is_ok()
+        );
     }
 
     #[test]

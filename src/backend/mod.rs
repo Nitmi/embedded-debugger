@@ -8,8 +8,8 @@ use crate::{
     firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreObservation, CoreSnapshot, FirmwareImageOptions, FlashLayout,
-        FlashReport, FlashSegmentReport, PostFlashCoreObservation, ProbeInfo, SessionInfo,
-        TargetInfo,
+        FlashReport, FlashSegmentReport, PostFlashCoreObservation, ProbeInfo,
+        RegisterCoreObservation, SessionInfo, TargetInfo,
     },
 };
 
@@ -70,6 +70,12 @@ pub trait DebugBackend {
         session: &SessionInfo,
     ) -> Result<Vec<PostFlashCoreObservation>>;
     fn capture_live_snapshot(&mut self, session: &SessionInfo) -> Result<Vec<CoreObservation>>;
+    fn read_registers(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        names: &[String],
+    ) -> Result<RegisterCoreObservation>;
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()>;
 }
 

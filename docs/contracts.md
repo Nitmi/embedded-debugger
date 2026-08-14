@@ -59,6 +59,23 @@ available. The response distinguishes `original_state`, `captured_state`, and
 the final restored `state`. It does not request reset, erase, program, arbitrary
 memory write, or a persistent debug session.
 
+`registers read [name...] --probe <exact-selector> --target <exact-target>
+--core <index>` is an `R1_REVERSIBLE_CONTROL` one-shot observation. It validates
+the zero-based core index and a maximum of 64 requested names before attach,
+records the selected core's original state, halts it only when necessary, reads
+the selected registers while halted, verifies restoration to the original
+state, and disconnects. Names and target-defined aliases are matched
+case-insensitively; two names resolving to one register are rejected. Omitting
+names requests the complete backend inventory only when that inventory contains
+at most 64 registers. Every reading contains a canonical name, aliases, backend
+register ID, width in bits, kind, and fixed-width hexadecimal raw value. The
+result distinguishes `original_state`, halted `captured_state`, and final
+restored `state`. Unknown or ambiguous names use `CONFIG_INVALID` with the
+available canonical names. A successful response always has at least one
+reading and `effects.core_execution_state_restoration_verified=true`. Replay
+requires explicit `register_cores` evidence for the selected core; it never
+synthesizes register IDs or widths from a legacy PC/SP snapshot.
+
 `snapshot reset-capture --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` reset-policy acceptance command. It requires reset,
 halt, run, and register-read capabilities; multi-core targets additionally
@@ -69,15 +86,18 @@ captures every available core while halted, restores each core to its explicit
 memory write. CPU0 is expected to run after the workflow. Secondary cores retain
 the running or halted state observed immediately after the target reset sequence.
 
-R1 debug control is not equivalent to side-effect-free target inspection. Both
-`probes test`, `snapshot capture`, and `snapshot reset-capture` return an
+R1 debug control is not equivalent to side-effect-free target inspection.
+`probes test`, `registers read`, `snapshot capture`, and
+`snapshot reset-capture` return an
 `effects` object. It records
 whether the command requested reset, Flash, or arbitrary memory writes; whether
 core execution-state restoration was verified; and any known backend-managed
 volatile target changes. probe-rs clears hardware breakpoints during attach and
 may invoke target-specific attach/halt sequences. The ESP32-S3 sequence disables
-several watchdogs. Agents must surface these notes instead of treating R1 as
-R0 read-only behavior.
+several watchdogs. Halting a running core can also interrupt in-flight peripheral
+activity or produce partial external I/O; restoration cannot undo bytes or
+physical actions already emitted. Agents must surface these notes instead of
+treating R1 as R0 read-only behavior.
 
 ## Exit codes
 

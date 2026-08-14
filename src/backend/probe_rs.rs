@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, sync::Once, time::Duration};
 
 use probe_rs::{
-    CoreStatus, HaltReason, Permissions, Session, Target,
+    CoreRegister, CoreStatus, HaltReason, Permissions, RegisterDataType, RegisterValue, Session,
+    Target,
     config::{NvmRegion, RawFlashAlgorithm, Registry, RegistryError},
     flashing::{DownloadOptions, FlashError, FlashProgress},
     probe::{
@@ -18,8 +19,9 @@ use crate::{
     firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreObservation, CoreSnapshot, CoreState, FirmwareImageOptions,
-        FirmwareSegmentInfo, FlashLayout, FlashRange, FlashReport, PostFlashCoreObservation,
-        ProbeInfo, SessionInfo, TargetInfo,
+        FirmwareSegmentInfo, FlashLayout, FlashRange, FlashReport, MAX_REGISTER_READS,
+        PostFlashCoreObservation, ProbeInfo, RegisterCoreObservation, RegisterKind,
+        RegisterReading, SessionInfo, TargetInfo,
     },
 };
 
@@ -188,6 +190,8 @@ impl DebugBackend for ProbeRsBackend {
         let mut notes = vec![
             "probe-rs session attach clears hardware breakpoints".to_string(),
             "probe-rs target attach/halt sequences may modify volatile target control state"
+                .to_string(),
+            "halting a running core can interrupt in-flight peripheral activity and produce partial external I/O"
                 .to_string(),
         ];
         if self.target_info.name.eq_ignore_ascii_case("esp32s3") {
@@ -974,6 +978,131 @@ impl DebugBackend for ProbeRsBackend {
         Ok(observations)
     }
 
+    fn read_registers(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        names: &[String],
+    ) -> Result<RegisterCoreObservation> {
+        let index = core_index as usize;
+        let (core_name, architecture) = self
+            .target
+            .cores
+            .get(index)
+            .map(|core| {
+                (
+                    core.name.clone(),
+                    format!("{:?}", core.core_type).to_ascii_lowercase(),
+                )
+            })
+            .ok_or_else(|| {
+                DebugError::config(
+                    "requested core index is outside the target core inventory",
+                    json!({
+                        "core_index": core_index,
+                        "core_count": self.target.cores.len(),
+                    }),
+                )
+            })?;
+        let active = self.ensure_session_mut(session)?;
+        if active.reset_halted || !active.restore_before_disconnect.is_empty() {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "cannot read registers while core restoration is pending",
+                6,
+                json!({"session_id": session.session_id}),
+            ));
+        }
+
+        let (selected, original_state) = {
+            let mut core = active.session.core(index).map_err(|error| match error {
+                probe_rs::Error::CoreDisabled(_) => DebugError::new(
+                    ErrorCode::CapabilityUnavailable,
+                    "requested target core is disabled",
+                    6,
+                    json!({"core_index": core_index}),
+                ),
+                other => map_core_error("attach core for register read", other),
+            })?;
+            let available = core
+                .registers()
+                .all_registers()
+                .copied()
+                .collect::<Vec<_>>();
+            let selected = select_probe_registers(&available, names, core_index)?;
+            let status = core
+                .status()
+                .map_err(|error| map_core_error("read original core state", error))?;
+            let state = live_core_state(index, status)
+                .map_err(|error| map_core_error("determine original core state", error))?;
+            (selected, state)
+        };
+        active
+            .restore_before_disconnect
+            .insert(index, original_state);
+
+        if original_state == CoreState::Running
+            && let Err(error) = active
+                .session
+                .core(index)
+                .and_then(|mut core| core.halt(CORE_OPERATION_TIMEOUT))
+        {
+            return Err(restore_after_capture_error(
+                active,
+                "halt core for register read",
+                error,
+            ));
+        }
+
+        let captured =
+            (|| -> std::result::Result<(CoreStatus, Vec<RegisterReading>), probe_rs::Error> {
+                let mut core = active.session.core(index)?;
+                let captured_status = core.status()?;
+                if live_core_state(index, captured_status)? != CoreState::Halted {
+                    return Err(probe_rs::Error::GenericCoreError(format!(
+                        "core {index} was not halted when registers were read"
+                    )));
+                }
+                let mut readings = Vec::with_capacity(selected.len());
+                for register in &selected {
+                    let value = core.read_core_reg::<RegisterValue>(register.id())?;
+                    readings.push(probe_register_reading(register, value));
+                }
+                Ok((captured_status, readings))
+            })();
+        let (captured_status, registers) = match captured {
+            Ok(captured) => captured,
+            Err(error) => {
+                return Err(restore_after_capture_error(
+                    active,
+                    "read selected core registers",
+                    error,
+                ));
+            }
+        };
+
+        let restored_states = restore_pending_core_states(active)
+            .map_err(|error| map_core_error("restore core after register read", error))?;
+        let state = restored_states.get(&index).copied().ok_or_else(|| {
+            DebugError::new(
+                ErrorCode::Internal,
+                "core restoration result is missing the selected core",
+                10,
+                json!({"core_index": core_index}),
+            )
+        })?;
+        Ok(RegisterCoreObservation {
+            index: core_index,
+            name: core_name,
+            architecture,
+            original_state,
+            captured_state: CoreState::Halted,
+            state,
+            halt_reason: halt_reason(captured_status),
+            registers,
+        })
+    }
+
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()> {
         self.ensure_session(session)?;
         let active = self.active.as_mut().expect("active session was validated");
@@ -998,6 +1127,122 @@ impl DebugBackend for ProbeRsBackend {
             .map_err(|error| map_core_error("restore core states before disconnect", error))?;
         self.active.take();
         Ok(())
+    }
+}
+
+fn select_probe_registers(
+    available: &[CoreRegister],
+    names: &[String],
+    core_index: u32,
+) -> Result<Vec<CoreRegister>> {
+    if names.len() > MAX_REGISTER_READS {
+        return Err(DebugError::config(
+            "too many register names were requested",
+            json!({"requested_count": names.len(), "maximum": MAX_REGISTER_READS}),
+        ));
+    }
+    if names.is_empty() {
+        if available.len() > MAX_REGISTER_READS {
+            return Err(DebugError::config(
+                "the target register inventory exceeds the bounded read limit; select register names explicitly",
+                json!({
+                    "core_index": core_index,
+                    "available_count": available.len(),
+                    "maximum": MAX_REGISTER_READS,
+                }),
+            ));
+        }
+        return Ok(available.to_vec());
+    }
+
+    let available_names = available
+        .iter()
+        .map(|register| register.name())
+        .collect::<Vec<_>>();
+    let mut selected = Vec::with_capacity(names.len());
+    let mut selected_ids = std::collections::BTreeSet::new();
+    for requested in names {
+        let matches = available
+            .iter()
+            .filter(|register| register_matches_name(register, requested))
+            .collect::<Vec<_>>();
+        let register = match matches.as_slice() {
+            [register] => **register,
+            [] => {
+                return Err(DebugError::config(
+                    "requested register name is not available on the selected core",
+                    json!({
+                        "core_index": core_index,
+                        "requested": requested,
+                        "available": available_names,
+                    }),
+                ));
+            }
+            _ => {
+                return Err(DebugError::config(
+                    "requested register name is ambiguous on the selected core",
+                    json!({
+                        "core_index": core_index,
+                        "requested": requested,
+                        "matches": matches.iter().map(|item| item.name()).collect::<Vec<_>>(),
+                    }),
+                ));
+            }
+        };
+        if !selected_ids.insert(register.id()) {
+            return Err(DebugError::config(
+                "multiple requested names resolve to the same register",
+                json!({
+                    "core_index": core_index,
+                    "requested": requested,
+                    "register": register.name(),
+                }),
+            ));
+        }
+        selected.push(register);
+    }
+    Ok(selected)
+}
+
+fn register_matches_name(register: &CoreRegister, requested: &str) -> bool {
+    register.name().eq_ignore_ascii_case(requested)
+        || register
+            .roles
+            .iter()
+            .any(|role| role.to_string().eq_ignore_ascii_case(requested))
+}
+
+fn probe_register_reading(register: &CoreRegister, value: RegisterValue) -> RegisterReading {
+    let name = register.name().to_string();
+    let mut aliases = Vec::new();
+    for role in register.roles {
+        let alias = role.to_string();
+        if !alias.eq_ignore_ascii_case(&name)
+            && !aliases
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(&alias))
+        {
+            aliases.push(alias);
+        }
+    }
+    let kind = match register.data_type() {
+        RegisterDataType::UnsignedInteger(_) => RegisterKind::UnsignedInteger,
+        RegisterDataType::FloatingPoint(_) => RegisterKind::FloatingPoint,
+    };
+    let numeric = match value {
+        RegisterValue::U32(value) => value as u128,
+        RegisterValue::U64(value) => value as u128,
+        RegisterValue::U128(value) => value,
+    };
+    let bits = register.size_in_bits() as u32;
+    let width = bits.div_ceil(4) as usize;
+    RegisterReading {
+        name,
+        aliases,
+        id: format!("0x{:04X}", register.id().0),
+        bits,
+        kind,
+        value: format!("0x{numeric:0width$X}"),
     }
 }
 
@@ -1588,6 +1833,34 @@ mod tests {
             live_core_state(0, CoreStatus::Halted(HaltReason::Request)).unwrap(),
             CoreState::Halted
         );
+    }
+
+    #[test]
+    fn native_register_selection_resolves_architecture_roles() {
+        use probe_rs::architecture::xtensa::registers::{PC, RA, SP};
+
+        let selected =
+            select_probe_registers(&[RA, SP, PC], &["lr".to_string(), "pc".to_string()], 0)
+                .unwrap();
+
+        assert_eq!(selected, vec![RA, PC]);
+        let reading = probe_register_reading(&RA, RegisterValue::U32(0x4037_8695));
+        assert_eq!(reading.name, "a0");
+        assert_eq!(reading.aliases, vec!["LR"]);
+        assert_eq!(reading.id, "0x0000");
+        assert_eq!(reading.bits, 32);
+        assert_eq!(reading.value, "0x40378695");
+    }
+
+    #[test]
+    fn native_register_selection_rejects_duplicate_aliases() {
+        use probe_rs::architecture::xtensa::registers::RA;
+
+        let error =
+            select_probe_registers(&[RA], &["a0".to_string(), "lr".to_string()], 0).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(error.details["register"], "a0");
     }
 
     #[test]

@@ -99,6 +99,19 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   an independent live snapshot restored `cpu0` from halted to running, a second
   five-second monitor received heartbeats `65..69`. No serial bytes were sent.
   Recovery was not required. This accepts native ESP32-S3 `segmented_flash`.
+- Product-level `registers read` passed on ESP32-S3 `cpu0`. An explicit
+  `pc sp lr a2 ps` request resolved the Xtensa `lr` alias to canonical `a0`,
+  captured all five 32-bit values while halted, and reported
+  `running -> halted -> running`. Omitting names then captured the complete
+  bounded 18-register Xtensa inventory with the same verified restoration and
+  disconnect lifecycle. An independent live snapshot again entered and left
+  `cpu0` running. Read-only `baud` monitors at 115200 with DTR/RTS false observed
+  heartbeats `2875..2879` before the reads and clean consecutive heartbeats
+  `2945..2951` and `2972..2976` afterward; no bytes were sent. One immediate
+  post-halt sample contained partial ANSI/log prefixes followed by heartbeat
+  `2918`, demonstrating that execution-state restoration cannot make an
+  interrupted external log write atomic. The command now reports that generic
+  R1 effect explicitly. This accepts native ESP32-S3 register reads on `cpu0`.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.

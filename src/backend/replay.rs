@@ -11,8 +11,9 @@ use crate::{
     firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreObservation, CoreSnapshot, FirmwareSegmentInfo, FlashLayout,
-        FlashRange, FlashReport, PostFlashCoreObservation, ProbeInfo, SessionInfo, TargetInfo,
-        validate_core_inventory, validate_post_flash_core_inventory,
+        FlashRange, FlashReport, MAX_REGISTER_READS, PostFlashCoreObservation, ProbeInfo,
+        RegisterCoreObservation, RegisterReading, SessionInfo, TargetInfo, validate_core_inventory,
+        validate_post_flash_core_inventory, validate_register_core_observation,
     },
 };
 
@@ -43,6 +44,8 @@ pub struct ReplayFixture {
     pub live_cores: Vec<CoreObservation>,
     #[serde(default)]
     pub post_flash_cores: Vec<PostFlashCoreObservation>,
+    #[serde(default)]
+    pub register_cores: Vec<RegisterCoreObservation>,
     pub flash: ReplayFlashBehavior,
 }
 
@@ -158,6 +161,21 @@ impl ReplayFixture {
                 return Err(DebugError::fixture(
                     "multi-core post-flash capability requires reset, halt, run, and register access",
                     json!({"capability": capability}),
+                ));
+            }
+        }
+        let mut register_core_indexes = std::collections::BTreeSet::new();
+        for core in &self.register_cores {
+            if !register_core_indexes.insert(core.index) {
+                return Err(DebugError::fixture(
+                    "replay register evidence contains a duplicate core index",
+                    json!({"core_index": core.index}),
+                ));
+            }
+            if let Err(problem) = validate_register_core_observation(&self.target, core) {
+                return Err(DebugError::fixture(
+                    "replay register evidence is invalid",
+                    json!({"core_index": core.index, "problem": problem}),
                 ));
             }
         }
@@ -573,6 +591,47 @@ impl DebugBackend for ReplayBackend {
         }])
     }
 
+    fn read_registers(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        names: &[String],
+    ) -> Result<RegisterCoreObservation> {
+        self.ensure_session(session)?;
+        if !self.fixture.capabilities.halt
+            || !self.fixture.capabilities.run
+            || !self.fixture.capabilities.register_read
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "replay fixture cannot perform a state-preserving register read",
+                6,
+                json!({"required": ["halt", "run", "register_read"]}),
+            ));
+        }
+
+        let mut core = self
+            .fixture
+            .register_cores
+            .iter()
+            .find(|core| core.index == core_index)
+            .cloned()
+            .ok_or_else(|| {
+                DebugError::fixture(
+                    "replay fixture has no explicit register evidence for the requested core",
+                    json!({"core_index": core_index}),
+                )
+            })?;
+        core.registers = select_replay_registers(&core.registers, names, core_index)?;
+        validate_register_core_observation(&self.fixture.target, &core).map_err(|problem| {
+            DebugError::fixture(
+                "replay register evidence is invalid",
+                json!({"core_index": core_index, "problem": problem}),
+            )
+        })?;
+        Ok(core)
+    }
+
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()> {
         self.ensure_session(session)?;
         self.active_session_id = None;
@@ -580,6 +639,86 @@ impl DebugBackend for ReplayBackend {
         self.reset_performed = false;
         Ok(())
     }
+}
+
+fn select_replay_registers(
+    available: &[RegisterReading],
+    names: &[String],
+    core_index: u32,
+) -> Result<Vec<RegisterReading>> {
+    if names.len() > MAX_REGISTER_READS {
+        return Err(DebugError::config(
+            "too many register names were requested",
+            json!({"requested_count": names.len(), "maximum": MAX_REGISTER_READS}),
+        ));
+    }
+    if names.is_empty() {
+        if available.len() > MAX_REGISTER_READS {
+            return Err(DebugError::config(
+                "the replay register inventory exceeds the bounded read limit; select register names explicitly",
+                json!({
+                    "core_index": core_index,
+                    "available_count": available.len(),
+                    "maximum": MAX_REGISTER_READS,
+                }),
+            ));
+        }
+        return Ok(available.to_vec());
+    }
+
+    let available_names = available
+        .iter()
+        .map(|register| register.name.as_str())
+        .collect::<Vec<_>>();
+    let mut selected = Vec::with_capacity(names.len());
+    let mut selected_ids = std::collections::BTreeSet::new();
+    for requested in names {
+        let matches = available
+            .iter()
+            .filter(|register| {
+                register.name.eq_ignore_ascii_case(requested)
+                    || register
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(requested))
+            })
+            .collect::<Vec<_>>();
+        let register = match matches.as_slice() {
+            [register] => *register,
+            [] => {
+                return Err(DebugError::config(
+                    "requested register name is not present in replay evidence",
+                    json!({
+                        "core_index": core_index,
+                        "requested": requested,
+                        "available": available_names,
+                    }),
+                ));
+            }
+            _ => {
+                return Err(DebugError::config(
+                    "requested register name is ambiguous in replay evidence",
+                    json!({
+                        "core_index": core_index,
+                        "requested": requested,
+                        "matches": matches.iter().map(|item| &item.name).collect::<Vec<_>>(),
+                    }),
+                ));
+            }
+        };
+        if !selected_ids.insert(register.id.to_ascii_lowercase()) {
+            return Err(DebugError::config(
+                "multiple requested names resolve to the same register",
+                json!({
+                    "core_index": core_index,
+                    "requested": requested,
+                    "register": register.name,
+                }),
+            ));
+        }
+        selected.push(register.clone());
+    }
+    Ok(selected)
 }
 
 fn ranges_cover(ranges: &[FlashRange], required: &FlashRange) -> Result<bool> {
@@ -804,6 +943,60 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::FixtureInvalid);
         assert_eq!(error.details["capability"], "run");
+    }
+
+    #[test]
+    fn register_read_resolves_aliases_and_preserves_requested_order() {
+        let fixture = fixture();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+
+        let observation = backend
+            .read_registers(&session, 0, &["r15".to_string(), "xpsr".to_string()])
+            .unwrap();
+
+        assert_eq!(observation.original_state, crate::model::CoreState::Halted);
+        assert_eq!(observation.state, crate::model::CoreState::Halted);
+        assert_eq!(observation.registers.len(), 2);
+        assert_eq!(observation.registers[0].name, "pc");
+        assert_eq!(observation.registers[0].value, "0x08001234");
+        assert_eq!(observation.registers[1].name, "xpsr");
+        backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn register_read_rejects_names_absent_from_replay_evidence() {
+        let fixture = fixture();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+
+        let error = backend
+            .read_registers(&session, 0, &["missing".to_string()])
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(error.details["requested"], "missing");
+        backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn register_read_never_synthesizes_missing_replay_evidence() {
+        let mut fixture = fixture();
+        fixture.register_cores.clear();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+
+        let error = backend.read_registers(&session, 0, &[]).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FixtureInvalid);
+        assert_eq!(error.details["core_index"], 0);
+        backend.disconnect(&session).unwrap();
     }
 
     #[test]

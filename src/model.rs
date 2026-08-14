@@ -4,6 +4,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::error::{DebugError, Result};
 
+pub const MAX_REGISTER_READS: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address(pub u64);
 
@@ -127,6 +129,36 @@ pub enum CoreState {
     Running,
     Halted,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegisterKind {
+    UnsignedInteger,
+    FloatingPoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterReading {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    pub id: String,
+    pub bits: u32,
+    pub kind: RegisterKind,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterCoreObservation {
+    pub index: u32,
+    pub name: String,
+    pub architecture: String,
+    pub original_state: CoreState,
+    pub captured_state: CoreState,
+    pub state: CoreState,
+    pub halt_reason: Option<String>,
+    pub registers: Vec<RegisterReading>,
 }
 
 fn unknown_core_state() -> CoreState {
@@ -388,6 +420,134 @@ pub struct ResetCaptureReport {
     pub cores: Vec<PostFlashCoreObservation>,
     pub operations: Vec<OperationRecord>,
     pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterReadReport {
+    pub read_id: String,
+    pub captured_at: String,
+    pub risk: String,
+    pub session: SessionInfo,
+    pub effects: DebugControlEffects,
+    pub core: RegisterCoreObservation,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
+pub fn validate_register_core_observation(
+    target: &TargetInfo,
+    core: &RegisterCoreObservation,
+) -> std::result::Result<(), String> {
+    if core.index >= target.core_count {
+        return Err(format!(
+            "core index {} is outside target core count {}",
+            core.index, target.core_count
+        ));
+    }
+    if core.name.trim().is_empty() || core.architecture.trim().is_empty() {
+        return Err(format!(
+            "core {} requires a name and architecture",
+            core.index
+        ));
+    }
+    if core.original_state == CoreState::Unknown {
+        return Err(format!("core {} has an unknown original state", core.index));
+    }
+    if core.captured_state != CoreState::Halted {
+        return Err(format!(
+            "core {} registers were not captured while halted",
+            core.index
+        ));
+    }
+    if core.state != core.original_state {
+        return Err(format!(
+            "core {} was restored as {:?}, expected {:?}",
+            core.index, core.state, core.original_state
+        ));
+    }
+    if core.registers.is_empty() {
+        return Err(format!("core {} contains no register readings", core.index));
+    }
+    if core.registers.len() > MAX_REGISTER_READS {
+        return Err(format!(
+            "core {} contains {} register readings, maximum is {MAX_REGISTER_READS}",
+            core.index,
+            core.registers.len()
+        ));
+    }
+
+    let mut ids = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeMap::<String, String>::new();
+    for register in &core.registers {
+        if register.name.trim().is_empty() || register.id.trim().is_empty() {
+            return Err(format!(
+                "core {} contains a register without a name or id",
+                core.index
+            ));
+        }
+        if !(1..=128).contains(&register.bits) {
+            return Err(format!(
+                "register {} has unsupported width {}",
+                register.name, register.bits
+            ));
+        }
+        if !ids.insert(register.id.to_ascii_lowercase()) {
+            return Err(format!(
+                "core {} contains duplicate register id {}",
+                core.index, register.id
+            ));
+        }
+
+        let mut labels = Vec::with_capacity(register.aliases.len() + 1);
+        labels.push(register.name.as_str());
+        labels.extend(register.aliases.iter().map(String::as_str));
+        for label in labels {
+            if label.trim().is_empty() {
+                return Err(format!(
+                    "register {} contains an empty alias",
+                    register.name
+                ));
+            }
+            let normalized = label.to_ascii_lowercase();
+            if let Some(previous) = names.insert(normalized, register.id.clone())
+                && !previous.eq_ignore_ascii_case(&register.id)
+            {
+                return Err(format!(
+                    "register label {label} resolves to multiple ids on core {}",
+                    core.index
+                ));
+            }
+        }
+
+        let digits = register
+            .value
+            .strip_prefix("0x")
+            .or_else(|| register.value.strip_prefix("0X"))
+            .ok_or_else(|| format!("register {} value is not hexadecimal", register.name))?;
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!(
+                "register {} value is not hexadecimal",
+                register.name
+            ));
+        }
+        let maximum_digits = register.bits.div_ceil(4) as usize;
+        let numeric = u128::from_str_radix(digits, 16).map_err(|_| {
+            format!(
+                "register {} value does not fit its {}-bit width",
+                register.name, register.bits
+            )
+        })?;
+        if digits.len() > maximum_digits
+            || (register.bits < 128 && numeric >= (1_u128 << register.bits))
+        {
+            return Err(format!(
+                "register {} value does not fit its {}-bit width",
+                register.name, register.bits
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -709,5 +869,47 @@ mod tests {
 
         assert_eq!(core.expected_final_state, None);
         assert!(validate_post_flash_core_inventory(&target, &[core]).is_ok());
+    }
+
+    #[test]
+    fn register_observation_requires_unique_bounded_values_and_state_restoration() {
+        let target = TargetInfo {
+            name: "single".to_string(),
+            architecture: "armv7em".to_string(),
+            core_count: 1,
+        };
+        let mut core = RegisterCoreObservation {
+            index: 0,
+            name: "core0".to_string(),
+            architecture: "armv7em".to_string(),
+            original_state: CoreState::Running,
+            captured_state: CoreState::Halted,
+            state: CoreState::Running,
+            halt_reason: Some("request".to_string()),
+            registers: vec![RegisterReading {
+                name: "pc".to_string(),
+                aliases: vec!["r15".to_string()],
+                id: "0x000F".to_string(),
+                bits: 32,
+                kind: RegisterKind::UnsignedInteger,
+                value: "0x08001234".to_string(),
+            }],
+        };
+
+        assert!(validate_register_core_observation(&target, &core).is_ok());
+
+        core.state = CoreState::Halted;
+        assert!(
+            validate_register_core_observation(&target, &core)
+                .unwrap_err()
+                .contains("restored")
+        );
+        core.state = CoreState::Running;
+        core.registers[0].value = "0x100000000".to_string();
+        assert!(
+            validate_register_core_observation(&target, &core)
+                .unwrap_err()
+                .contains("does not fit")
+        );
     }
 }

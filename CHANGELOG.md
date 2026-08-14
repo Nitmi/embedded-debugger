@@ -38,6 +38,10 @@ All notable changes to this project will be documented in this file.
 - State-preserving `snapshot capture` for all described target cores, with
   explicit disabled-core reporting, original/captured/final states, and cleanup
   on both success and failure.
+- Bounded, state-preserving `registers read` with exact core selection,
+  case-insensitive architecture aliases, canonical register metadata,
+  fixed-width raw hexadecimal values, a 64-register limit, Replay evidence,
+  and verified restoration and disconnect on success and failure.
 - Non-flashing `snapshot reset-capture` with structured reset effects, complete
   per-core post-reset observations, verified restoration, and disconnect.
 - Structured R1 `effects` disclosure for backend-managed volatile target state,
@@ -61,8 +65,8 @@ All notable changes to this project will be documented in this file.
   General ELF and Intel HEX are not accepted.
 - Native flashing is limited to readable boot NVM. Multi-core segmented
   execution is physically accepted only on ESP32-S3. RTT, arbitrary
-  memory/register commands, breakpoints, and persistent sessions are not
-  implemented.
+  memory commands, register writes, breakpoints, and persistent sessions are
+  not implemented.
 - Native attach/disconnect is verified on nRF52840/J-Link and ESP32-S3/native
   USB-JTAG. nRF52840 single-page guarded write acceptance passed, including
   exact confirmation, read-back, page preservation, post-reset snapshot,
