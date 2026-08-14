@@ -42,6 +42,12 @@ All notable changes to this project will be documented in this file.
   case-insensitive architecture aliases, canonical register metadata,
   fixed-width raw hexadecimal values, a 64-register limit, Replay evidence,
   and verified restoration and disconnect on success and failure.
+- Exact, state-preserving `memory read` with a 4096-byte inline limit,
+  pre-attach readable RAM/NVM containment checks, Generic/MMIO and cross-region
+  rejection, target region metadata, hexadecimal data and SHA-256, explicit
+  Replay core/byte evidence, and probe-rs byte reads that do not widen the
+  requested address range. ESP32-S3 CPU0 RAM and mapped NVM passed physical
+  acceptance with serial heartbeat recovery.
 - Non-flashing `snapshot reset-capture` with structured reset effects, complete
   per-core post-reset observations, verified restoration, and disconnect.
 - Structured R1 `effects` disclosure for backend-managed volatile target state,
@@ -65,8 +71,9 @@ All notable changes to this project will be documented in this file.
   General ELF and Intel HEX are not accepted.
 - Native flashing is limited to readable boot NVM. Multi-core segmented
   execution is physically accepted only on ESP32-S3. RTT, arbitrary
-  memory commands, register writes, breakpoints, and persistent sessions are
-  not implemented.
+  memory writes, Generic/MMIO reads, register writes, breakpoints, and persistent
+  sessions are not implemented. Memory reads are one-shot, limited to 4096 bytes,
+  and do not freeze other cores or DMA.
 - Native attach/disconnect is verified on nRF52840/J-Link and ESP32-S3/native
   USB-JTAG. nRF52840 single-page guarded write acceptance passed, including
   exact confirmation, read-back, page preservation, post-reset snapshot,

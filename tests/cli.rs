@@ -264,6 +264,86 @@ fn replay_register_read_returns_a_stable_unknown_name_error() {
 }
 
 #[test]
+fn replay_memory_read_reports_exact_bytes_region_hash_and_restored_state() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "memory",
+            "read",
+            "0x20007F04",
+            "0x8",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--core",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "memory.read");
+    assert_eq!(result["data"]["risk"], "R1_REVERSIBLE_CONTROL");
+    assert_eq!(result["data"]["complete"], true);
+    assert_eq!(result["data"]["core"]["index"], 0);
+    assert_eq!(result["data"]["core"]["original_state"], "halted");
+    assert_eq!(result["data"]["core"]["captured_state"], "halted");
+    assert_eq!(result["data"]["core"]["state"], "halted");
+    assert_eq!(result["data"]["range"]["start"], "0x20007F04");
+    assert_eq!(result["data"]["range"]["length"], 8);
+    assert_eq!(result["data"]["range"]["region"]["kind"], "ram");
+    assert_eq!(result["data"]["encoding"], "hex");
+    assert_eq!(result["data"]["data"], "0405060708090a0b");
+    assert_eq!(result["data"]["sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(result["data"]["effects"]["memory_read_requested"], true);
+    assert_eq!(
+        result["data"]["effects"]["arbitrary_memory_write_requested"],
+        false
+    );
+    assert_eq!(
+        result["data"]["operations"][6]["operation"],
+        "session.disconnect"
+    );
+}
+
+#[test]
+fn replay_memory_read_returns_a_stable_boundary_error() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "memory",
+            "read",
+            "0x20007F18",
+            "16",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["operation"], "memory.read");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["start"], "0x20007F18");
+}
+
+#[test]
 fn wrong_confirmation_returns_stable_error() {
     let directory = tempdir().unwrap();
     let evidence = directory.path().join("run.evidence.json");

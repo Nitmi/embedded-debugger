@@ -6,13 +6,18 @@ use uuid::Uuid;
 
 use crate::{
     SCHEMA_VERSION,
-    backend::{DebugBackend, firmware_flash_report, validate_firmware_segments},
+    backend::{
+        DebugBackend, checked_memory_read_end, firmware_flash_report, validate_firmware_segments,
+    },
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreObservation, CoreSnapshot, FirmwareSegmentInfo, FlashLayout,
-        FlashRange, FlashReport, MAX_REGISTER_READS, PostFlashCoreObservation, ProbeInfo,
-        RegisterCoreObservation, RegisterReading, SessionInfo, TargetInfo, validate_core_inventory,
+        FlashRange, FlashReport, MAX_INLINE_MEMORY_READ_BYTES, MAX_REGISTER_READS,
+        MemoryCoreObservation, MemoryReadRange, MemoryReadResult, MemoryRegionInfo,
+        MemoryRegionKind, PostFlashCoreObservation, ProbeInfo, RegisterCoreObservation,
+        RegisterReading, SessionInfo, TargetInfo, validate_core_inventory,
+        validate_memory_core_observation, validate_memory_read_range,
         validate_post_flash_core_inventory, validate_register_core_observation,
     },
 };
@@ -26,6 +31,17 @@ pub struct ReplayFlashBehavior {
     pub expected_firmware_sha256: Option<String>,
     #[serde(default = "default_true")]
     pub verify_success: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayMemoryBlock {
+    pub core_index: u32,
+    pub name: Option<String>,
+    pub kind: MemoryRegionKind,
+    pub start: Address,
+    pub data: String,
+    #[serde(default)]
+    pub is_alias: bool,
 }
 
 fn default_true() -> bool {
@@ -46,6 +62,10 @@ pub struct ReplayFixture {
     pub post_flash_cores: Vec<PostFlashCoreObservation>,
     #[serde(default)]
     pub register_cores: Vec<RegisterCoreObservation>,
+    #[serde(default)]
+    pub memory_cores: Vec<MemoryCoreObservation>,
+    #[serde(default)]
+    pub memory_blocks: Vec<ReplayMemoryBlock>,
     pub flash: ReplayFlashBehavior,
 }
 
@@ -176,6 +196,80 @@ impl ReplayFixture {
                 return Err(DebugError::fixture(
                     "replay register evidence is invalid",
                     json!({"core_index": core.index, "problem": problem}),
+                ));
+            }
+        }
+        let mut memory_core_indexes = std::collections::BTreeSet::new();
+        for core in &self.memory_cores {
+            if !memory_core_indexes.insert(core.index) {
+                return Err(DebugError::fixture(
+                    "replay memory evidence contains a duplicate core index",
+                    json!({"core_index": core.index}),
+                ));
+            }
+            if let Err(problem) = validate_memory_core_observation(&self.target, core) {
+                return Err(DebugError::fixture(
+                    "replay memory core evidence is invalid",
+                    json!({"core_index": core.index, "problem": problem}),
+                ));
+            }
+        }
+        let mut memory_spans = Vec::with_capacity(self.memory_blocks.len());
+        for block in &self.memory_blocks {
+            if block.core_index >= self.target.core_count {
+                return Err(DebugError::fixture(
+                    "replay memory block core is outside the target inventory",
+                    json!({
+                        "core_index": block.core_index,
+                        "core_count": self.target.core_count,
+                    }),
+                ));
+            }
+            if !memory_core_indexes.contains(&block.core_index) {
+                return Err(DebugError::fixture(
+                    "replay memory block has no matching core state evidence",
+                    json!({"core_index": block.core_index, "start": block.start}),
+                ));
+            }
+            let bytes = decode_memory_block(block)?;
+            let length = bytes.len() as u64;
+            let end = block.start.0.checked_add(length).ok_or_else(|| {
+                DebugError::fixture(
+                    "replay memory block overflows the target address space",
+                    json!({"core_index": block.core_index, "start": block.start, "length": length}),
+                )
+            })?;
+            memory_spans.push((block.core_index, block.start.0, end));
+        }
+        memory_spans.sort_unstable();
+        for pair in memory_spans.windows(2) {
+            let (left_core, _, left_end) = pair[0];
+            let (right_core, right_start, _) = pair[1];
+            if left_core == right_core && right_start < left_end {
+                return Err(DebugError::fixture(
+                    "replay memory blocks overlap on the same core",
+                    json!({"core_index": left_core, "overlap_start": Address(right_start)}),
+                ));
+            }
+        }
+        if self.capabilities.memory_read {
+            let required = [
+                ("halt", self.capabilities.halt),
+                ("run", self.capabilities.run),
+            ];
+            if let Some((capability, _)) = required.iter().find(|(_, enabled)| !enabled) {
+                return Err(DebugError::fixture(
+                    "memory read capability requires halt and run support",
+                    json!({"capability": capability}),
+                ));
+            }
+            if self.memory_cores.is_empty() || self.memory_blocks.is_empty() {
+                return Err(DebugError::fixture(
+                    "memory read capability requires explicit core state and byte evidence",
+                    json!({
+                        "memory_core_count": self.memory_cores.len(),
+                        "memory_block_count": self.memory_blocks.len(),
+                    }),
                 ));
             }
         }
@@ -632,6 +726,173 @@ impl DebugBackend for ReplayBackend {
         Ok(core)
     }
 
+    fn plan_memory_read(
+        &self,
+        core_index: u32,
+        start: Address,
+        length: u64,
+    ) -> Result<MemoryReadRange> {
+        if core_index >= self.fixture.target.core_count {
+            return Err(DebugError::config(
+                "requested core index is outside the target core inventory",
+                json!({
+                    "core_index": core_index,
+                    "core_count": self.fixture.target.core_count,
+                }),
+            ));
+        }
+        let end = checked_memory_read_end(start, length)?;
+        let mut matches = Vec::new();
+        for block in &self.fixture.memory_blocks {
+            if block.core_index != core_index {
+                continue;
+            }
+            let bytes = decode_memory_block(block)?;
+            let block_end = block
+                .start
+                .0
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| {
+                    DebugError::fixture(
+                        "replay memory block overflows the target address space",
+                        json!({"core_index": core_index, "start": block.start}),
+                    )
+                })?;
+            if block.start.0 <= start.0 && end <= block_end {
+                matches.push((block, bytes.len() as u64));
+            }
+        }
+        let (block, block_length) = match matches.as_slice() {
+            [(block, block_length)] => (*block, *block_length),
+            [] => {
+                let available = self
+                    .fixture
+                    .memory_blocks
+                    .iter()
+                    .filter(|block| block.core_index == core_index)
+                    .filter_map(|block| {
+                        hex::decode(&block.data).ok().map(|bytes| {
+                            json!({
+                                "start": block.start,
+                                "length": bytes.len(),
+                                "kind": block.kind,
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                return Err(DebugError::config(
+                    "requested range is not covered by one replay memory evidence block",
+                    json!({
+                        "core_index": core_index,
+                        "start": start,
+                        "length": length,
+                        "available": available,
+                    }),
+                ));
+            }
+            _ => {
+                return Err(DebugError::fixture(
+                    "multiple replay memory blocks cover the requested range",
+                    json!({"core_index": core_index, "start": start, "length": length}),
+                ));
+            }
+        };
+        let range = MemoryReadRange {
+            start,
+            length,
+            region: MemoryRegionInfo {
+                name: block.name.clone(),
+                kind: block.kind,
+                start: block.start,
+                length: block_length,
+                is_alias: block.is_alias,
+            },
+        };
+        validate_memory_read_range(&range).map_err(|problem| {
+            DebugError::fixture(
+                "replay memory range evidence is invalid",
+                json!({"core_index": core_index, "problem": problem}),
+            )
+        })?;
+        Ok(range)
+    }
+
+    fn read_memory(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        range: &MemoryReadRange,
+    ) -> Result<MemoryReadResult> {
+        self.ensure_session(session)?;
+        if !self.fixture.capabilities.halt
+            || !self.fixture.capabilities.run
+            || !self.fixture.capabilities.memory_read
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "replay fixture cannot perform a state-preserving memory read",
+                6,
+                json!({"required": ["halt", "run", "memory_read"]}),
+            ));
+        }
+        let planned = self.plan_memory_read(core_index, range.start, range.length)?;
+        if &planned != range {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "memory read range changed after planning",
+                6,
+                json!({"planned": planned, "received": range}),
+            ));
+        }
+        let core = self
+            .fixture
+            .memory_cores
+            .iter()
+            .find(|core| core.index == core_index)
+            .cloned()
+            .ok_or_else(|| {
+                DebugError::fixture(
+                    "replay fixture has no explicit memory core evidence for the requested core",
+                    json!({"core_index": core_index}),
+                )
+            })?;
+        validate_memory_core_observation(&self.fixture.target, &core).map_err(|problem| {
+            DebugError::fixture(
+                "replay memory core evidence is invalid",
+                json!({"core_index": core_index, "problem": problem}),
+            )
+        })?;
+        let block = self
+            .fixture
+            .memory_blocks
+            .iter()
+            .find(|block| {
+                block.core_index == core_index
+                    && block.start == range.region.start
+                    && block.kind == range.region.kind
+            })
+            .ok_or_else(|| {
+                DebugError::fixture(
+                    "planned replay memory block is no longer available",
+                    json!({"core_index": core_index, "range": range}),
+                )
+            })?;
+        let block_bytes = decode_memory_block(block)?;
+        let offset = usize::try_from(range.start.0 - block.start.0).map_err(|_| {
+            DebugError::fixture(
+                "replay memory block offset does not fit the host address space",
+                json!({"core_index": core_index, "range": range}),
+            )
+        })?;
+        let length = usize::try_from(range.length).expect("bounded memory length fits usize");
+        let bytes = block_bytes[offset..offset + length].to_vec();
+        Ok(MemoryReadResult {
+            core,
+            range: range.clone(),
+            bytes,
+        })
+    }
+
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()> {
         self.ensure_session(session)?;
         self.active_session_id = None;
@@ -639,6 +900,50 @@ impl DebugBackend for ReplayBackend {
         self.reset_performed = false;
         Ok(())
     }
+}
+
+fn decode_memory_block(block: &ReplayMemoryBlock) -> Result<Vec<u8>> {
+    if block
+        .name
+        .as_ref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(DebugError::fixture(
+            "replay memory block name must not be empty",
+            json!({"core_index": block.core_index, "start": block.start}),
+        ));
+    }
+    if block.data.is_empty() || !block.data.len().is_multiple_of(2) {
+        return Err(DebugError::fixture(
+            "replay memory block data must contain a non-empty even-length hexadecimal string",
+            json!({
+                "core_index": block.core_index,
+                "start": block.start,
+                "encoded_length": block.data.len(),
+            }),
+        ));
+    }
+    if block.data.len() as u64 > MAX_INLINE_MEMORY_READ_BYTES * 2 {
+        return Err(DebugError::fixture(
+            "replay memory block exceeds the bounded byte evidence limit",
+            json!({
+                "core_index": block.core_index,
+                "start": block.start,
+                "encoded_length": block.data.len(),
+                "maximum_bytes": MAX_INLINE_MEMORY_READ_BYTES,
+            }),
+        ));
+    }
+    hex::decode(&block.data).map_err(|error| {
+        DebugError::fixture(
+            "replay memory block data is not valid hexadecimal",
+            json!({
+                "core_index": block.core_index,
+                "start": block.start,
+                "parser_message": error.to_string(),
+            }),
+        )
+    })
 }
 
 fn select_replay_registers(
@@ -997,6 +1302,68 @@ mod tests {
         assert_eq!(error.code, ErrorCode::FixtureInvalid);
         assert_eq!(error.details["core_index"], 0);
         backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn memory_read_returns_an_exact_replay_subset_and_explicit_core_state() {
+        let fixture = fixture();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let range = backend
+            .plan_memory_read(0, Address(0x2000_7f04), 8)
+            .unwrap();
+        let session = backend.attach(&probe_id, &target).unwrap();
+
+        let result = backend.read_memory(&session, 0, &range).unwrap();
+
+        assert_eq!(result.range, range);
+        assert_eq!(result.range.region.kind, MemoryRegionKind::Ram);
+        assert_eq!(result.bytes, (4_u8..12).collect::<Vec<_>>());
+        assert_eq!(result.core.original_state, crate::model::CoreState::Halted);
+        assert_eq!(result.core.captured_state, crate::model::CoreState::Halted);
+        assert_eq!(result.core.state, crate::model::CoreState::Halted);
+        backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn memory_plan_rejects_ranges_crossing_replay_evidence_boundaries() {
+        let backend = ReplayBackend::new(fixture());
+
+        let error = backend
+            .plan_memory_read(0, Address(0x2000_7f18), 16)
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(error.details["start"], "0x20007F18");
+    }
+
+    #[test]
+    fn memory_capability_never_synthesizes_missing_replay_evidence() {
+        let mut fixture = fixture();
+        fixture.memory_cores.clear();
+        fixture.memory_blocks.clear();
+
+        let error = fixture.validate().unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FixtureInvalid);
+        assert_eq!(error.details["memory_core_count"], 0);
+        assert_eq!(error.details["memory_block_count"], 0);
+    }
+
+    #[test]
+    fn memory_fixture_rejects_oversized_blocks_before_hex_decoding() {
+        let mut fixture = fixture();
+        fixture.memory_blocks[0].data =
+            "00".repeat(crate::model::MAX_INLINE_MEMORY_READ_BYTES as usize + 1);
+
+        let error = fixture.validate().unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FixtureInvalid);
+        assert_eq!(
+            error.details["maximum_bytes"],
+            crate::model::MAX_INLINE_MEMORY_READ_BYTES
+        );
     }
 
     #[test]

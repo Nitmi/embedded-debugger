@@ -18,9 +18,10 @@ use crate::{
     model::{
         Address, ArtifactReference, DebugControlEffects, EvidenceBundle, FirmwareImageOptions,
         FirmwareSegmentInfo, FlashExecution, FlashExecutionBlocker, FlashExecutionReadiness,
-        FlashPlan, FlashPolicy, FlashRange, MAX_REGISTER_READS, OperationRecord, PlannedAction,
-        ProbeInfo, ProbeTestReport, RegisterReadReport, ResetCaptureReport, SnapshotCaptureReport,
-        validate_core_inventory, validate_post_flash_core_inventory,
+        FlashPlan, FlashPolicy, FlashRange, MAX_REGISTER_READS, MemoryReadReport, OperationRecord,
+        PlannedAction, ProbeInfo, ProbeTestReport, RegisterReadReport, ResetCaptureReport,
+        SnapshotCaptureReport, validate_core_inventory, validate_memory_core_observation,
+        validate_memory_read_range, validate_post_flash_core_inventory,
         validate_register_core_observation,
     },
 };
@@ -87,7 +88,7 @@ impl<B: DebugBackend> DebugService<B> {
         Ok(ProbeTestReport {
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, false, false),
+            effects: debug_control_effects(&self.backend, false, false, false),
             operations,
             complete: true,
         })
@@ -162,7 +163,7 @@ impl<B: DebugBackend> DebugService<B> {
             captured_at,
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, true, false),
+            effects: debug_control_effects(&self.backend, true, false, false),
             cores,
             operations: vec![
                 operation(1, "session.attach"),
@@ -252,7 +253,7 @@ impl<B: DebugBackend> DebugService<B> {
             captured_at,
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, true, true),
+            effects: debug_control_effects(&self.backend, true, true, false),
             cores,
             operations: vec![
                 operation(1, "session.attach"),
@@ -345,7 +346,7 @@ impl<B: DebugBackend> DebugService<B> {
             captured_at,
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, true, false),
+            effects: debug_control_effects(&self.backend, true, false, false),
             core,
             operations: vec![
                 operation(1, "session.attach"),
@@ -354,6 +355,136 @@ impl<B: DebugBackend> DebugService<B> {
                 operation(4, "registers.read"),
                 operation(5, "target.restore_original_core_state"),
                 operation(6, "session.disconnect"),
+            ],
+            complete: true,
+        })
+    }
+
+    pub fn read_memory(
+        &mut self,
+        probe_id: &str,
+        target: &str,
+        core_index: u32,
+        start: Address,
+        length: u64,
+    ) -> Result<MemoryReadReport> {
+        let target_info = self.backend.target().clone();
+        if !self.backend.matches_target(target) {
+            return Err(DebugError::unavailable(
+                ErrorCode::TargetUnavailable,
+                "requested target is not available from the selected backend",
+                json!({"requested": target, "available": target_info.name}),
+            ));
+        }
+        if core_index >= target_info.core_count {
+            return Err(DebugError::config(
+                "requested core index is outside the target core inventory",
+                json!({
+                    "core_index": core_index,
+                    "core_count": target_info.core_count,
+                    "target": target_info.name,
+                }),
+            ));
+        }
+        let range = self.backend.plan_memory_read(core_index, start, length)?;
+        if let Err(problem) = validate_memory_read_range(&range) {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned an invalid memory read plan",
+                6,
+                json!({"problem": problem, "range": range}),
+            ));
+        }
+
+        let capabilities = self.backend.capabilities();
+        let required_capabilities = [
+            ("halt", capabilities.halt),
+            ("run", capabilities.run),
+            ("memory_read", capabilities.memory_read),
+        ];
+        if let Some((capability, _)) = required_capabilities
+            .iter()
+            .find(|(_, available)| !available)
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "selected backend cannot perform a state-preserving memory read",
+                6,
+                json!({"backend": self.backend.name(), "capability": capability}),
+            ));
+        }
+
+        let probe = select_probe(&self.backend.list_probes()?, Some(probe_id))?;
+        let session = self.backend.attach(&probe.id, &target_info.name)?;
+        let read_result = self.backend.read_memory(&session, core_index, &range);
+        let captured_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let disconnect_result = self.backend.disconnect(&session);
+        let result = match (read_result, disconnect_result) {
+            (Err(error), Err(cleanup_error)) => {
+                return Err(with_cleanup_failure(error, cleanup_error));
+            }
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+            (Ok(result), Ok(())) => result,
+        };
+        if result.core.index != core_index {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned memory data for a different core",
+                6,
+                json!({
+                    "requested_core": core_index,
+                    "received_core": result.core.index,
+                }),
+            ));
+        }
+        if result.range != range {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned bytes for a different memory range",
+                6,
+                json!({"planned": range, "received": result.range}),
+            ));
+        }
+        if result.bytes.len() as u64 != range.length {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned an unexpected number of memory bytes",
+                6,
+                json!({
+                    "expected": range.length,
+                    "received": result.bytes.len(),
+                }),
+            ));
+        }
+        if let Err(problem) = validate_memory_core_observation(&target_info, &result.core) {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned an invalid memory core observation",
+                6,
+                json!({"problem": problem, "core": result.core}),
+            ));
+        }
+
+        Ok(MemoryReadReport {
+            read_id: format!("mem_{}", Uuid::new_v4().simple()),
+            captured_at,
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            session,
+            effects: debug_control_effects(&self.backend, true, false, true),
+            core: result.core,
+            range: result.range,
+            encoding: "hex".to_string(),
+            data: hex::encode(&result.bytes),
+            sha256: sha256_bytes(&result.bytes),
+            operations: vec![
+                operation(1, "memory.plan_read_range"),
+                operation(2, "session.attach"),
+                operation(3, "target.capture_original_core_state"),
+                operation(4, "target.halt_core_if_running"),
+                operation(5, "memory.read_exact"),
+                operation(6, "target.restore_original_core_state"),
+                operation(7, "session.disconnect"),
             ],
             complete: true,
         })
@@ -708,11 +839,13 @@ fn debug_control_effects<B: DebugBackend>(
     backend: &B,
     core_execution_state_restoration_verified: bool,
     reset_requested: bool,
+    memory_read_requested: bool,
 ) -> DebugControlEffects {
     let volatile_target_state_notes = backend.volatile_target_state_notes();
     DebugControlEffects {
         reset_requested,
         flash_operation_requested: false,
+        memory_read_requested,
         arbitrary_memory_write_requested: false,
         core_execution_state_restoration_verified,
         backend_may_modify_volatile_target_state: !volatile_target_state_notes.is_empty(),
@@ -1377,6 +1510,60 @@ mod tests {
         assert!(
             service
                 .read_registers(&probe_id, &target, 0, &["pc".to_string()])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn memory_read_is_exact_state_preserving_hashed_and_repeatable() {
+        let replay = fixture();
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let first = service
+            .read_memory(&probe_id, &target, 0, Address(0x2000_7f04), 8)
+            .unwrap();
+        let second = service
+            .read_memory(&probe_id, &target, 0, Address(0x2000_7f04), 8)
+            .unwrap();
+
+        assert!(first.complete);
+        assert!(second.complete);
+        assert_eq!(first.range.start, Address(0x2000_7f04));
+        assert_eq!(first.range.length, 8);
+        assert_eq!(first.range.region.kind, crate::model::MemoryRegionKind::Ram);
+        assert_eq!(first.core.original_state, CoreState::Halted);
+        assert_eq!(first.core.captured_state, CoreState::Halted);
+        assert_eq!(first.core.state, CoreState::Halted);
+        assert_eq!(first.encoding, "hex");
+        assert_eq!(first.data, "0405060708090a0b");
+        assert_eq!(first.sha256, sha256_bytes(&(4_u8..12).collect::<Vec<_>>()));
+        assert!(first.effects.memory_read_requested);
+        assert!(first.effects.core_execution_state_restoration_verified);
+        assert!(!first.effects.arbitrary_memory_write_requested);
+        assert_eq!(first.operations[4].operation, "memory.read_exact");
+        assert_eq!(
+            first.operations.last().unwrap().operation,
+            "session.disconnect"
+        );
+    }
+
+    #[test]
+    fn invalid_memory_range_is_rejected_before_a_session_is_opened() {
+        let replay = fixture();
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let error = service
+            .read_memory(&probe_id, &target, 0, Address(0x2000_7f18), 16)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+
+        assert!(
+            service
+                .read_memory(&probe_id, &target, 0, Address(0x2000_7f00), 4)
                 .is_ok()
         );
     }

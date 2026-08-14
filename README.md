@@ -76,6 +76,25 @@ the result is classified as `R1_REVERSIBLE_CONTROL` and includes `effects`.
 Halting can also interrupt an in-flight peripheral or log write; restoring the
 core state cannot retract bytes already emitted externally.
 
+Read a bounded byte range from target-described RAM or NVM while preserving the
+selected core's original state:
+
+```console
+cargo run -- --backend probe-rs memory read 0x20000000 64 \
+  --probe <vid:pid:serial> --target <exact-target> --core 0 --json
+```
+
+The exact inline limit is 4096 bytes. Planning completes before probe discovery
+or attach and accepts only one readable RAM or NVM region assigned to the
+selected core. Zero-length, overflowing, cross-region, ambiguous, Generic/MMIO,
+and larger requests return `CONFIG_INVALID`. The probe-rs backend uses exact
+byte reads rather than an alignment helper that may access bytes outside the
+requested range. Results include the target-described region, lowercase hex
+data, SHA-256, and `running`/`halted` capture and restoration states. This is an
+R1 one-shot observation: other cores and DMA remain live, and attach/halt can
+still alter the volatile state disclosed in `effects`. Replay requires explicit
+core-state and byte-block evidence; it never invents missing memory content.
+
 Exercise the target's accepted reset policy without flashing it:
 
 ```console
@@ -212,9 +231,11 @@ has now passed on ESP32-S3: exact-confirmation segmented programming, independen
 per-segment verification, preservation of every byte outside the image ranges,
 multi-core post-reset evidence, a full 16 MiB external readback, and serial
 heartbeat checks all succeeded. State-preserving live snapshots and system-reset
-snapshots also passed. OpenOCD, general ELF/HEX loading, RTT, persistent
-interactive debug sessions, memory commands, breakpoints, other physically
-accepted native segmented targets, and non-boot NVM writes are not yet exposed.
+snapshots also passed. Bounded state-preserving register and RAM/NVM reads passed
+on ESP32-S3 CPU0, including pre-attach MMIO and size rejection plus serial
+heartbeat recovery. OpenOCD, general ELF/HEX loading, RTT, persistent interactive
+debug sessions, memory writes, MMIO reads, breakpoints, other physically accepted
+native segmented targets, and non-boot NVM writes are not yet exposed.
 See `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 

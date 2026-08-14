@@ -5,6 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use crate::error::{DebugError, Result};
 
 pub const MAX_REGISTER_READS: usize = 64;
+pub const MAX_INLINE_MEMORY_READ_BYTES: u64 = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address(pub u64);
@@ -159,6 +160,47 @@ pub struct RegisterCoreObservation {
     pub state: CoreState,
     pub halt_reason: Option<String>,
     pub registers: Vec<RegisterReading>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryRegionKind {
+    Ram,
+    Nvm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRegionInfo {
+    pub name: Option<String>,
+    pub kind: MemoryRegionKind,
+    pub start: Address,
+    pub length: u64,
+    pub is_alias: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryReadRange {
+    pub start: Address,
+    pub length: u64,
+    pub region: MemoryRegionInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryCoreObservation {
+    pub index: u32,
+    pub name: String,
+    pub architecture: String,
+    pub original_state: CoreState,
+    pub captured_state: CoreState,
+    pub state: CoreState,
+    pub halt_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryReadResult {
+    pub core: MemoryCoreObservation,
+    pub range: MemoryReadRange,
+    pub bytes: Vec<u8>,
 }
 
 fn unknown_core_state() -> CoreState {
@@ -383,6 +425,8 @@ pub struct SessionInfo {
 pub struct DebugControlEffects {
     pub reset_requested: bool,
     pub flash_operation_requested: bool,
+    #[serde(default)]
+    pub memory_read_requested: bool,
     pub arbitrary_memory_write_requested: bool,
     pub core_execution_state_restoration_verified: bool,
     pub backend_may_modify_volatile_target_state: bool,
@@ -432,6 +476,94 @@ pub struct RegisterReadReport {
     pub core: RegisterCoreObservation,
     pub operations: Vec<OperationRecord>,
     pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryReadReport {
+    pub read_id: String,
+    pub captured_at: String,
+    pub risk: String,
+    pub session: SessionInfo,
+    pub effects: DebugControlEffects,
+    pub core: MemoryCoreObservation,
+    pub range: MemoryReadRange,
+    pub encoding: String,
+    pub data: String,
+    pub sha256: String,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
+pub fn validate_memory_read_range(range: &MemoryReadRange) -> std::result::Result<(), String> {
+    if range.length == 0 {
+        return Err("memory read length must be greater than zero".to_string());
+    }
+    if range.length > MAX_INLINE_MEMORY_READ_BYTES {
+        return Err(format!(
+            "memory read length {} exceeds the inline limit {MAX_INLINE_MEMORY_READ_BYTES}",
+            range.length
+        ));
+    }
+    let end = range
+        .start
+        .0
+        .checked_add(range.length)
+        .ok_or_else(|| "memory read range overflows the target address space".to_string())?;
+    if range.region.length == 0 {
+        return Err("memory region length must be greater than zero".to_string());
+    }
+    let region_end = range
+        .region
+        .start
+        .0
+        .checked_add(range.region.length)
+        .ok_or_else(|| "memory region overflows the target address space".to_string())?;
+    if range
+        .region
+        .name
+        .as_ref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err("memory region name must not be empty".to_string());
+    }
+    if range.start.0 < range.region.start.0 || end > region_end {
+        return Err("memory read range is not fully contained in its described region".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_memory_core_observation(
+    target: &TargetInfo,
+    core: &MemoryCoreObservation,
+) -> std::result::Result<(), String> {
+    if core.index >= target.core_count {
+        return Err(format!(
+            "core index {} is outside target core count {}",
+            core.index, target.core_count
+        ));
+    }
+    if core.name.trim().is_empty() || core.architecture.trim().is_empty() {
+        return Err(format!(
+            "core {} requires a name and architecture",
+            core.index
+        ));
+    }
+    if core.original_state == CoreState::Unknown {
+        return Err(format!("core {} has an unknown original state", core.index));
+    }
+    if core.captured_state != CoreState::Halted {
+        return Err(format!(
+            "core {} memory was not captured while halted",
+            core.index
+        ));
+    }
+    if core.state != core.original_state {
+        return Err(format!(
+            "core {} was restored as {:?}, expected {:?}",
+            core.index, core.state, core.original_state
+        ));
+    }
+    Ok(())
 }
 
 pub fn validate_register_core_observation(
@@ -910,6 +1042,57 @@ mod tests {
             validate_register_core_observation(&target, &core)
                 .unwrap_err()
                 .contains("does not fit")
+        );
+    }
+
+    #[test]
+    fn memory_observation_requires_a_bounded_contained_range_and_state_restoration() {
+        let target = TargetInfo {
+            name: "single".to_string(),
+            architecture: "armv7em".to_string(),
+            core_count: 1,
+        };
+        let mut range = MemoryReadRange {
+            start: Address(0x2000_0004),
+            length: 8,
+            region: MemoryRegionInfo {
+                name: Some("sram".to_string()),
+                kind: MemoryRegionKind::Ram,
+                start: Address(0x2000_0000),
+                length: 16,
+                is_alias: false,
+            },
+        };
+        let mut core = MemoryCoreObservation {
+            index: 0,
+            name: "core0".to_string(),
+            architecture: "armv7em".to_string(),
+            original_state: CoreState::Running,
+            captured_state: CoreState::Halted,
+            state: CoreState::Running,
+            halt_reason: Some("request".to_string()),
+        };
+
+        assert!(validate_memory_read_range(&range).is_ok());
+        assert!(validate_memory_core_observation(&target, &core).is_ok());
+
+        range.length = 13;
+        assert!(
+            validate_memory_read_range(&range)
+                .unwrap_err()
+                .contains("contained")
+        );
+        range.length = MAX_INLINE_MEMORY_READ_BYTES + 1;
+        assert!(
+            validate_memory_read_range(&range)
+                .unwrap_err()
+                .contains("inline limit")
+        );
+        core.state = CoreState::Halted;
+        assert!(
+            validate_memory_core_observation(&target, &core)
+                .unwrap_err()
+                .contains("restored")
         );
     }
 }

@@ -76,6 +76,23 @@ reading and `effects.core_execution_state_restoration_verified=true`. Replay
 requires explicit `register_cores` evidence for the selected core; it never
 synthesizes register IDs or widths from a legacy PC/SP snapshot.
 
+`memory read <address> <length> --probe <exact-selector> --target <exact-target>
+--core <index>` is an `R1_REVERSIBLE_CONTROL` one-shot observation. Address and
+length accept decimal or `0x`-prefixed values. Before probe discovery or attach,
+the backend requires a non-zero range of at most 4096 bytes fully contained in
+exactly one readable target-described RAM or NVM region assigned to the selected
+core. Overflowing, cross-region, ambiguous, Generic/MMIO, and larger ranges use
+`CONFIG_INVALID`. The probe-rs backend performs an exact byte read and does not
+use an aligned convenience API that could access bytes outside the request.
+The response contains the requested `range`, complete target `region` metadata,
+`encoding="hex"`, lowercase `data`, and SHA-256 over the returned bytes. It also
+distinguishes original, halted capture, and restored core states. A complete
+response requires exact range/core/byte-count agreement, verified state
+restoration, and disconnect. The read is not an atomic system snapshot: other
+cores, peripherals, and DMA are not halted. Replay requires matching
+`memory_cores` and hexadecimal `memory_blocks`; missing evidence is never
+synthesized.
+
 `snapshot reset-capture --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` reset-policy acceptance command. It requires reset,
 halt, run, and register-read capabilities; multi-core targets additionally
@@ -87,10 +104,11 @@ memory write. CPU0 is expected to run after the workflow. Secondary cores retain
 the running or halted state observed immediately after the target reset sequence.
 
 R1 debug control is not equivalent to side-effect-free target inspection.
-`probes test`, `registers read`, `snapshot capture`, and
+`probes test`, `registers read`, `memory read`, `snapshot capture`, and
 `snapshot reset-capture` return an
 `effects` object. It records
-whether the command requested reset, Flash, or arbitrary memory writes; whether
+whether the command requested reset, Flash, bounded memory read, or arbitrary
+memory writes; whether
 core execution-state restoration was verified; and any known backend-managed
 volatile target changes. probe-rs clears hardware breakpoints during attach and
 may invoke target-specific attach/halt sequences. The ESP32-S3 sequence disables
@@ -118,7 +136,8 @@ treating R1 as R0 read-only behavior.
 Addresses are JSON strings such as `"0x08000000"`, avoiding precision loss in
 JavaScript clients. Firmware and artifact content is identified with lowercase
 SHA-256 hex strings. Large binary content will be returned as bounded artifact
-references rather than unbounded inline data.
+references rather than unbounded inline data. The bounded `memory read` exception
+inlines at most 4096 bytes as lowercase hexadecimal and includes its SHA-256.
 
 The native accepted contract currently executes raw `.bin` firmware. A
 probe-rs BIN plan requires an explicit `--base-address`; Replay takes its

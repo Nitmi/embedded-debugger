@@ -112,6 +112,24 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   `2918`, demonstrating that execution-state restoration cannot make an
   interrupted external log write atomic. The command now reports that generic
   R1 effect explicitly. This accepts native ESP32-S3 register reads on `cpu0`.
+- Product-level `memory read` passed on ESP32-S3 `cpu0`. With a deliberately
+  invalid probe selector, `0x3FF00000 + 16` (Generic/MMIO) and
+  `0x3FC88000 + 4097` were both rejected as `CONFIG_INVALID`, proving region and
+  4096-byte limit checks completed before probe access. The exact RAM request
+  `0x3FCDB550 + 32` resolved to non-alias `SRAM1 Data bus`
+  (`0x3FC88000 + 425984`), returned SHA-256
+  `08262ab765506db7116f9592b9718e2522aca7915fcd5158e2338fea80afa2d6`,
+  and reported `running -> halted -> running`. The mapped NVM request
+  `0x42000000 + 32` resolved to alias `External instruction bus`
+  (`0x42000000 + 33554432`), returned SHA-256
+  `6e5c379f5b716afd7e4915e5881f62d44034c8b6ece90d8490df9f25cc6ce5af`,
+  and reported the same verified restoration and disconnect lifecycle. Read-only
+  `baud` monitors at 115200 with DTR/RTS false received consecutive heartbeats
+  `5803..5806` before and `5861..5863` after the reads; no bytes were sent. Logs
+  are under `target/hardware-acceptance/2026-08-14-esp32s3-memory-read`. This
+  accepts bounded native ESP32-S3 RAM/NVM reads on `cpu0`; it does not accept
+  Generic/MMIO reads, writes, unbounded output, or atomic capture against the
+  still-running secondary core and DMA.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.
@@ -190,4 +208,5 @@ The ESP32-S3 three-segment guarded write, per-segment and full-flash readback,
 unwritten-byte preservation, multi-core post-reset snapshot, evidence
 inspection, device-side checksum, and observable heartbeat checks passed. This
 completes native ESP-IDF segmented-flash acceptance for the ESP32-S3/native
-USB-JTAG fixture.
+USB-JTAG fixture. Bounded state-preserving register and RAM/NVM reads on CPU0
+also passed with pre-attach safety rejection and post-read heartbeat recovery.

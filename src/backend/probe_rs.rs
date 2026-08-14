@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, sync::Once, time::Duration};
 
 use probe_rs::{
-    CoreRegister, CoreStatus, HaltReason, Permissions, RegisterDataType, RegisterValue, Session,
-    Target,
+    CoreRegister, CoreStatus, HaltReason, MemoryInterface, Permissions, RegisterDataType,
+    RegisterValue, Session, Target,
     config::{NvmRegion, RawFlashAlgorithm, Registry, RegistryError},
     flashing::{DownloadOptions, FlashError, FlashProgress},
     probe::{
@@ -14,14 +14,17 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    backend::{DebugBackend, firmware_flash_report, validate_firmware_segments},
+    backend::{
+        DebugBackend, checked_memory_read_end, firmware_flash_report, validate_firmware_segments,
+    },
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreObservation, CoreSnapshot, CoreState, FirmwareImageOptions,
         FirmwareSegmentInfo, FlashLayout, FlashRange, FlashReport, MAX_REGISTER_READS,
-        PostFlashCoreObservation, ProbeInfo, RegisterCoreObservation, RegisterKind,
-        RegisterReading, SessionInfo, TargetInfo,
+        MemoryCoreObservation, MemoryReadRange, MemoryReadResult, MemoryRegionInfo,
+        MemoryRegionKind, PostFlashCoreObservation, ProbeInfo, RegisterCoreObservation,
+        RegisterKind, RegisterReading, SessionInfo, TargetInfo, validate_memory_read_range,
     },
 };
 
@@ -44,6 +47,13 @@ struct NativeSession {
     programmed: Option<ProgrammedImage>,
     reset_halted: bool,
     restore_before_disconnect: BTreeMap<usize, CoreState>,
+}
+
+struct StatePreservingCapture<T> {
+    original_state: CoreState,
+    captured_status: CoreStatus,
+    restored_state: CoreState,
+    value: T,
 }
 
 pub struct ProbeRsBackend {
@@ -71,6 +81,7 @@ impl ProbeRsBackend {
         let single_core = target.cores.len() == 1;
         let accepted_esp32s3_post_reset = target.name.eq_ignore_ascii_case("esp32s3");
         let accepted_esp32s3_segmented_flash = target.name.eq_ignore_ascii_case("esp32s3");
+        let accepted_esp32s3_memory_read = target.name.eq_ignore_ascii_case("esp32s3");
         let flash = !target.flash_algorithms.is_empty();
         let target_info = TargetInfo {
             name: target.name.clone(),
@@ -89,7 +100,7 @@ impl ProbeRsBackend {
             reset: single_core || accepted_esp32s3_post_reset,
             step: single_core,
             register_read: true,
-            memory_read: single_core,
+            memory_read: single_core || accepted_esp32s3_memory_read,
             memory_write: false,
             hardware_breakpoints: 0,
             rtt: false,
@@ -1014,8 +1025,8 @@ impl DebugBackend for ProbeRsBackend {
             ));
         }
 
-        let (selected, original_state) = {
-            let mut core = active.session.core(index).map_err(|error| match error {
+        let selected = {
+            let core = active.session.core(index).map_err(|error| match error {
                 probe_rs::Error::CoreDisabled(_) => DebugError::new(
                     ErrorCode::CapabilityUnavailable,
                     "requested target core is disabled",
@@ -1029,77 +1040,91 @@ impl DebugBackend for ProbeRsBackend {
                 .all_registers()
                 .copied()
                 .collect::<Vec<_>>();
-            let selected = select_probe_registers(&available, names, core_index)?;
-            let status = core
-                .status()
-                .map_err(|error| map_core_error("read original core state", error))?;
-            let state = live_core_state(index, status)
-                .map_err(|error| map_core_error("determine original core state", error))?;
-            (selected, state)
+            select_probe_registers(&available, names, core_index)?
         };
-        active
-            .restore_before_disconnect
-            .insert(index, original_state);
-
-        if original_state == CoreState::Running
-            && let Err(error) = active
-                .session
-                .core(index)
-                .and_then(|mut core| core.halt(CORE_OPERATION_TIMEOUT))
-        {
-            return Err(restore_after_capture_error(
-                active,
-                "halt core for register read",
-                error,
-            ));
-        }
-
-        let captured =
-            (|| -> std::result::Result<(CoreStatus, Vec<RegisterReading>), probe_rs::Error> {
-                let mut core = active.session.core(index)?;
-                let captured_status = core.status()?;
-                if live_core_state(index, captured_status)? != CoreState::Halted {
-                    return Err(probe_rs::Error::GenericCoreError(format!(
-                        "core {index} was not halted when registers were read"
-                    )));
-                }
-                let mut readings = Vec::with_capacity(selected.len());
-                for register in &selected {
-                    let value = core.read_core_reg::<RegisterValue>(register.id())?;
-                    readings.push(probe_register_reading(register, value));
-                }
-                Ok((captured_status, readings))
-            })();
-        let (captured_status, registers) = match captured {
-            Ok(captured) => captured,
-            Err(error) => {
-                return Err(restore_after_capture_error(
-                    active,
-                    "read selected core registers",
-                    error,
-                ));
+        let capture = state_preserving_core_capture(active, index, "register read", |core| {
+            let mut readings = Vec::with_capacity(selected.len());
+            for register in &selected {
+                let value = core.read_core_reg::<RegisterValue>(register.id())?;
+                readings.push(probe_register_reading(register, value));
             }
-        };
-
-        let restored_states = restore_pending_core_states(active)
-            .map_err(|error| map_core_error("restore core after register read", error))?;
-        let state = restored_states.get(&index).copied().ok_or_else(|| {
-            DebugError::new(
-                ErrorCode::Internal,
-                "core restoration result is missing the selected core",
-                10,
-                json!({"core_index": core_index}),
-            )
+            Ok(readings)
         })?;
         Ok(RegisterCoreObservation {
             index: core_index,
             name: core_name,
             architecture,
-            original_state,
+            original_state: capture.original_state,
             captured_state: CoreState::Halted,
-            state,
-            halt_reason: halt_reason(captured_status),
-            registers,
+            state: capture.restored_state,
+            halt_reason: halt_reason(capture.captured_status),
+            registers: capture.value,
+        })
+    }
+
+    fn plan_memory_read(
+        &self,
+        core_index: u32,
+        start: Address,
+        length: u64,
+    ) -> Result<MemoryReadRange> {
+        plan_probe_memory_read(&self.target, core_index, start, length)
+    }
+
+    fn read_memory(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        range: &MemoryReadRange,
+    ) -> Result<MemoryReadResult> {
+        let planned = self.plan_memory_read(core_index, range.start, range.length)?;
+        if &planned != range {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "memory read range changed after planning",
+                6,
+                json!({"planned": planned, "received": range}),
+            ));
+        }
+        let index = core_index as usize;
+        let (core_name, architecture) = self
+            .target
+            .cores
+            .get(index)
+            .map(|core| {
+                (
+                    core.name.clone(),
+                    format!("{:?}", core.core_type).to_ascii_lowercase(),
+                )
+            })
+            .ok_or_else(|| {
+                DebugError::config(
+                    "requested core index is outside the target core inventory",
+                    json!({
+                        "core_index": core_index,
+                        "core_count": self.target.cores.len(),
+                    }),
+                )
+            })?;
+        let byte_count = usize::try_from(range.length).expect("bounded memory length fits usize");
+        let active = self.ensure_session_mut(session)?;
+        let capture = state_preserving_core_capture(active, index, "memory read", |core| {
+            let mut bytes = vec![0_u8; byte_count];
+            core.read_8(range.start.0, &mut bytes)?;
+            Ok(bytes)
+        })?;
+        Ok(MemoryReadResult {
+            core: MemoryCoreObservation {
+                index: core_index,
+                name: core_name,
+                architecture,
+                original_state: capture.original_state,
+                captured_state: CoreState::Halted,
+                state: capture.restored_state,
+                halt_reason: halt_reason(capture.captured_status),
+            },
+            range: range.clone(),
+            bytes: capture.value,
         })
     }
 
@@ -1128,6 +1153,191 @@ impl DebugBackend for ProbeRsBackend {
         self.active.take();
         Ok(())
     }
+}
+
+fn state_preserving_core_capture<T>(
+    active: &mut NativeSession,
+    index: usize,
+    operation: &str,
+    capture: impl FnOnce(&mut probe_rs::Core<'_>) -> std::result::Result<T, probe_rs::Error>,
+) -> Result<StatePreservingCapture<T>> {
+    if active.reset_halted || !active.restore_before_disconnect.is_empty() {
+        return Err(DebugError::new(
+            ErrorCode::ProtocolError,
+            format!("cannot perform {operation} while core restoration is pending"),
+            6,
+            json!({"session_id": active.id, "core_index": index}),
+        ));
+    }
+
+    let original_state = {
+        let mut core = active.session.core(index).map_err(|error| match error {
+            probe_rs::Error::CoreDisabled(_) => DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "requested target core is disabled",
+                6,
+                json!({"core_index": index}),
+            ),
+            other => map_core_error(&format!("attach core for {operation}"), other),
+        })?;
+        let status = core
+            .status()
+            .map_err(|error| map_core_error("read original core state", error))?;
+        live_core_state(index, status)
+            .map_err(|error| map_core_error("determine original core state", error))?
+    };
+    active
+        .restore_before_disconnect
+        .insert(index, original_state);
+
+    if original_state == CoreState::Running
+        && let Err(error) = active
+            .session
+            .core(index)
+            .and_then(|mut core| core.halt(CORE_OPERATION_TIMEOUT))
+    {
+        return Err(restore_after_capture_error(
+            active,
+            &format!("halt core for {operation}"),
+            error,
+        ));
+    }
+
+    let captured = (|| -> std::result::Result<(CoreStatus, T), probe_rs::Error> {
+        let mut core = active.session.core(index)?;
+        let captured_status = core.status()?;
+        if live_core_state(index, captured_status)? != CoreState::Halted {
+            return Err(probe_rs::Error::GenericCoreError(format!(
+                "core {index} was not halted during {operation}"
+            )));
+        }
+        let value = capture(&mut core)?;
+        Ok((captured_status, value))
+    })();
+    let (captured_status, value) = match captured {
+        Ok(captured) => captured,
+        Err(error) => {
+            return Err(restore_after_capture_error(active, operation, error));
+        }
+    };
+
+    let restored_states = restore_pending_core_states(active)
+        .map_err(|error| map_core_error(&format!("restore core after {operation}"), error))?;
+    let restored_state = restored_states.get(&index).copied().ok_or_else(|| {
+        DebugError::new(
+            ErrorCode::Internal,
+            "core restoration result is missing the selected core",
+            10,
+            json!({"core_index": index}),
+        )
+    })?;
+    Ok(StatePreservingCapture {
+        original_state,
+        captured_status,
+        restored_state,
+        value,
+    })
+}
+
+fn plan_probe_memory_read(
+    target: &Target,
+    core_index: u32,
+    start: Address,
+    length: u64,
+) -> Result<MemoryReadRange> {
+    let core = target.cores.get(core_index as usize).ok_or_else(|| {
+        DebugError::config(
+            "requested core index is outside the target core inventory",
+            json!({
+                "core_index": core_index,
+                "core_count": target.cores.len(),
+                "target": target.name,
+            }),
+        )
+    })?;
+    let end = checked_memory_read_end(start, length)?;
+    let mut candidates = Vec::new();
+    for memory in &target.memory_map {
+        let region = if let Some(region) = memory.as_ram_region() {
+            if !region.is_readable() || !region.accessible_by(&core.name) {
+                continue;
+            }
+            Some((
+                MemoryRegionKind::Ram,
+                region.name.clone(),
+                region.range.clone(),
+                region.is_alias,
+            ))
+        } else if let Some(region) = memory.as_nvm_region() {
+            if !region.is_readable() || !region.accessible_by(&core.name) {
+                continue;
+            }
+            Some((
+                MemoryRegionKind::Nvm,
+                region.name.clone(),
+                region.range.clone(),
+                region.is_alias,
+            ))
+        } else {
+            None
+        };
+        let Some((kind, name, region_range, is_alias)) = region else {
+            continue;
+        };
+        if region_range.start <= start.0 && end <= region_range.end {
+            let Some(region_length) = region_range.end.checked_sub(region_range.start) else {
+                continue;
+            };
+            candidates.push(MemoryReadRange {
+                start,
+                length,
+                region: MemoryRegionInfo {
+                    name,
+                    kind,
+                    start: Address(region_range.start),
+                    length: region_length,
+                    is_alias,
+                },
+            });
+        }
+    }
+    let range = match candidates.as_slice() {
+        [range] => range.clone(),
+        [] => {
+            return Err(DebugError::config(
+                "memory reads must remain within one readable RAM or NVM region assigned to the selected core",
+                json!({
+                    "target": target.name,
+                    "core_index": core_index,
+                    "core_name": core.name,
+                    "start": start,
+                    "length": length,
+                    "generic_or_mmio_regions_allowed": false,
+                }),
+            ));
+        }
+        _ => {
+            return Err(DebugError::config(
+                "memory read range resolves to multiple target regions",
+                json!({
+                    "target": target.name,
+                    "core_index": core_index,
+                    "start": start,
+                    "length": length,
+                    "regions": candidates.iter().map(|range| &range.region).collect::<Vec<_>>(),
+                }),
+            ));
+        }
+    };
+    validate_memory_read_range(&range).map_err(|problem| {
+        DebugError::new(
+            ErrorCode::ProtocolError,
+            "probe-rs target returned an invalid memory region",
+            6,
+            json!({"target": target.name, "problem": problem, "range": range}),
+        )
+    })?;
+    Ok(range)
 }
 
 fn select_probe_registers(
@@ -1786,12 +1996,64 @@ mod tests {
         assert!(backend.capabilities().segmented_flash);
         assert!(backend.capabilities().multi_core_post_flash);
         assert!(backend.capabilities().reset);
+        assert!(backend.capabilities().memory_read);
         assert!(
             backend
                 .volatile_target_state_notes()
                 .iter()
                 .any(|note| note.contains("watchdogs"))
         );
+    }
+
+    #[test]
+    fn esp32s3_memory_plan_accepts_ram_and_nvm_but_rejects_generic_regions() {
+        let backend = ProbeRsBackend::new("esp32s3").unwrap();
+
+        let ram = backend
+            .plan_memory_read(0, Address(0x3fc8_8000), 16)
+            .unwrap();
+        let nvm = backend
+            .plan_memory_read(0, Address(0x4200_0000), 16)
+            .unwrap();
+        let generic = backend
+            .plan_memory_read(0, Address(0x3ff0_0000), 16)
+            .unwrap_err();
+
+        assert_eq!(ram.region.kind, MemoryRegionKind::Ram);
+        assert_eq!(nvm.region.kind, MemoryRegionKind::Nvm);
+        assert_eq!(generic.code, ErrorCode::ConfigInvalid);
+        assert_eq!(generic.details["generic_or_mmio_regions_allowed"], false);
+    }
+
+    #[test]
+    fn esp32s3_memory_plan_rejects_cross_region_unbounded_and_overflowing_reads() {
+        let backend = ProbeRsBackend::new("esp32s3").unwrap();
+
+        let crossing = backend
+            .plan_memory_read(0, Address(0x3fce_fff8), 16)
+            .unwrap_err();
+        let empty = backend
+            .plan_memory_read(0, Address(0x3fc8_8000), 0)
+            .unwrap_err();
+        let oversized = backend
+            .plan_memory_read(
+                0,
+                Address(0x3fc8_8000),
+                crate::model::MAX_INLINE_MEMORY_READ_BYTES + 1,
+            )
+            .unwrap_err();
+        let overflowing = backend
+            .plan_memory_read(0, Address(u64::MAX), 1)
+            .unwrap_err();
+
+        assert_eq!(crossing.code, ErrorCode::ConfigInvalid);
+        assert_eq!(empty.code, ErrorCode::ConfigInvalid);
+        assert_eq!(oversized.code, ErrorCode::ConfigInvalid);
+        assert_eq!(
+            oversized.details["maximum"],
+            crate::model::MAX_INLINE_MEMORY_READ_BYTES
+        );
+        assert_eq!(overflowing.code, ErrorCode::ConfigInvalid);
     }
 
     #[test]

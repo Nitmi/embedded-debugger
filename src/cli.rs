@@ -63,6 +63,10 @@ pub enum Command {
         #[command(subcommand)]
         command: RegisterCommand,
     },
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -199,6 +203,33 @@ pub struct RegisterReadSelection {
     pub core: u32,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum MemoryCommand {
+    Read(MemoryReadSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct MemoryReadSelection {
+    #[arg(value_name = "ADDRESS", value_parser = parse_address)]
+    pub address: Address,
+
+    #[arg(
+        value_name = "LENGTH",
+        value_parser = parse_length,
+        help = "exact byte count, limited to 4096; decimal or 0x-prefixed hexadecimal"
+    )]
+    pub length: u64,
+
+    #[arg(long, help = "exact probe selector from probes list")]
+    pub probe: String,
+
+    #[arg(long, help = "exact target name")]
+    pub target: String,
+
+    #[arg(long, default_value_t = 0, help = "zero-based target core index")]
+    pub core: u32,
+}
+
 #[derive(Debug)]
 pub struct CommandResult {
     pub operation: &'static str,
@@ -249,6 +280,9 @@ impl Cli {
             Command::Registers {
                 command: RegisterCommand::Read(_),
             } => "registers.read",
+            Command::Memory {
+                command: MemoryCommand::Read(_),
+            } => "memory.read",
         }
     }
 }
@@ -289,6 +323,9 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
         Command::Registers {
             command: RegisterCommand::Read(selection),
         } => read_registers(cli, selection),
+        Command::Memory {
+            command: MemoryCommand::Read(selection),
+        } => read_memory(cli, selection),
         Command::Probes {
             command: ProbeCommand::List,
         } => list_probes(cli),
@@ -657,6 +694,54 @@ fn read_registers(cli: &Cli, selection: &RegisterReadSelection) -> Result<Comman
     ))
 }
 
+fn read_memory(cli: &Cli, selection: &MemoryReadSelection) -> Result<CommandResult> {
+    let report = match cli.backend {
+        BackendArg::Replay => {
+            let mut service =
+                DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
+            service.read_memory(
+                &selection.probe,
+                &selection.target,
+                selection.core,
+                selection.address,
+                selection.length,
+            )?
+        }
+        BackendArg::ProbeRs => {
+            let backend = ProbeRsBackend::new(&selection.target)?;
+            let mut service = DebugService::new(backend);
+            service.read_memory(
+                &selection.probe,
+                &selection.target,
+                selection.core,
+                selection.address,
+                selection.length,
+            )?
+        }
+        BackendArg::Openocd => return Err(unsupported_openocd("memory_read")),
+    };
+    let human = format!(
+        "Read {} byte(s) from {} on core {} ({}, {})\nregion={:?} {} + {} bytes, alias={}\noriginal={:?}, captured={:?}, restored={:?}\nsha256={}\nhex={}\nRisk: {}\nEffects: {}",
+        report.range.length,
+        report.range.start,
+        report.core.index,
+        report.core.name,
+        report.core.architecture,
+        report.range.region.kind,
+        report.range.region.start,
+        report.range.region.length,
+        report.range.region.is_alias,
+        report.core.original_state,
+        report.core.captured_state,
+        report.core.state,
+        report.sha256,
+        report.data,
+        report.risk,
+        describe_debug_control_effects(&report.effects)
+    );
+    Ok(CommandResult::serializable("memory.read", &report, human))
+}
+
 fn describe_debug_control_effects(effects: &crate::model::DebugControlEffects) -> String {
     if effects.volatile_target_state_notes.is_empty() {
         return "no backend-managed volatile target changes declared".to_string();
@@ -697,6 +782,12 @@ fn required_native_target(selection: &FlashSelection) -> Result<&str> {
 
 fn parse_address(value: &str) -> std::result::Result<Address, String> {
     Address::parse(value).map_err(|error| error.message)
+}
+
+fn parse_length(value: &str) -> std::result::Result<u64, String> {
+    Address::parse(value)
+        .map(|parsed| parsed.0)
+        .map_err(|_| "length must be a decimal integer or a 0x-prefixed hexadecimal string".into())
 }
 
 fn unsupported_openocd(capability: &str) -> DebugError {

@@ -8,8 +8,9 @@ use crate::{
     firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreObservation, CoreSnapshot, FirmwareImageOptions, FlashLayout,
-        FlashReport, FlashSegmentReport, PostFlashCoreObservation, ProbeInfo,
-        RegisterCoreObservation, SessionInfo, TargetInfo,
+        FlashReport, FlashSegmentReport, MAX_INLINE_MEMORY_READ_BYTES, MemoryReadRange,
+        MemoryReadResult, PostFlashCoreObservation, ProbeInfo, RegisterCoreObservation,
+        SessionInfo, TargetInfo,
     },
 };
 
@@ -76,7 +77,44 @@ pub trait DebugBackend {
         core_index: u32,
         names: &[String],
     ) -> Result<RegisterCoreObservation>;
+    fn plan_memory_read(
+        &self,
+        core_index: u32,
+        start: Address,
+        length: u64,
+    ) -> Result<MemoryReadRange>;
+    fn read_memory(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        range: &MemoryReadRange,
+    ) -> Result<MemoryReadResult>;
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()>;
+}
+
+pub(crate) fn checked_memory_read_end(start: Address, length: u64) -> Result<u64> {
+    if length == 0 {
+        return Err(DebugError::config(
+            "memory read length must be greater than zero",
+            serde_json::json!({"start": start, "length": length}),
+        ));
+    }
+    if length > MAX_INLINE_MEMORY_READ_BYTES {
+        return Err(DebugError::config(
+            "memory read exceeds the bounded inline result limit",
+            serde_json::json!({
+                "start": start,
+                "length": length,
+                "maximum": MAX_INLINE_MEMORY_READ_BYTES,
+            }),
+        ));
+    }
+    start.0.checked_add(length).ok_or_else(|| {
+        DebugError::config(
+            "memory read range overflows the target address space",
+            serde_json::json!({"start": start, "length": length}),
+        )
+    })
 }
 
 pub(crate) fn validate_firmware_segments(segments: &[FirmwareSegment]) -> Result<u64> {

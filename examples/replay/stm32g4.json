@@ -97,6 +97,27 @@
       ]
     }
   ],
+  "memory_cores": [
+    {
+      "index": 0,
+      "name": "core0",
+      "architecture": "armv7em",
+      "original_state": "halted",
+      "captured_state": "halted",
+      "state": "halted",
+      "halt_reason": "breakpoint"
+    }
+  ],
+  "memory_blocks": [
+    {
+      "core_index": 0,
+      "name": "replay_sram",
+      "kind": "ram",
+      "start": "0x20007F00",
+      "data": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "is_alias": false
+    }
+  ],
   "flash": {
     "base_address": "0x08000000",
     "erase_ranges": [
