@@ -75,10 +75,30 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   `676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`.
   Physical planning normalized it into bootloader (`0x0 + 21056`), partition
   table (`0x8000 + 3072`), and application (`0x10000 + 95136`), affecting
-  `0x0 + 196608` bytes. After multi-core acceptance, plan digest
-  `68a51ded5c38bef239f295a3d932c6c57eb6f5f24a6fbc881cb39b9bdefb6170`
-  reports only `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED`. No ESP32-S3 erase or
-  program operation has been requested or executed.
+  `0x0 + 196608` bytes.
+- The exact confirmed ESP32-S3 plan
+  `90098bb194bdf83175c68f854434ac21fbe89b5b5eaee9f8735037423375b482`
+  programmed and independently verified all three segments, 119,264 bytes in
+  total. It then reset the system, captured both cores, restored `cpu0` to
+  running and `cpu1` to its reset breakpoint, disconnected, and published an
+  eight-operation evidence bundle. Evidence SHA-256 is
+  `d4f1b5fcb47abfb7a6cca51b08889130063061b3cbcffcd0383328fa99750509`;
+  `snapshot inspect` accepted the complete bundle.
+- An external espflash read recovered the complete 16 MiB after programming.
+  Its SHA-256 is
+  `a12e4d9b521d7fae51ef1c8f98ff4afd17c35ad36abe2a01c10d13bcd5c19439`
+  and MD5 is `6924f783c06605ea55b7bb26a0f8ed2d`; a separate device-side full-flash
+  checksum returned the same MD5. The three programmed ranges matched their
+  planned hashes. The three preserved gaps (`0x5240 + 11712`,
+  `0x8C00 + 29696`, and `0x273A0 + 35936`) matched their write-before hashes.
+  Every byte from `0x30000` through the end of flash also matched the backup;
+  that 16,580,608-byte region retained SHA-256
+  `02a9e262a65e4b73eab6eba9e0157b251c9ba64ec5e759d40eeec276e081d4ec`.
+- A 12-second `baud` monitor at 115200 with DTR/RTS false received 12 consecutive
+  heartbeat records (`24..35`) and the expected blue/red/green RGB cycle. After
+  an independent live snapshot restored `cpu0` from halted to running, a second
+  five-second monitor received heartbeats `65..69`. No serial bytes were sent.
+  Recovery was not required. This accepts native ESP32-S3 `segmented_flash`.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.
@@ -152,3 +172,9 @@ runtime checks passed. The cross-page case also passed across two adjacent
 but their final byte content is identical to the write-before baselines. The
 physical unplugged-probe case also passed, completing this checklist for the
 nRF52840/J-Link fixture.
+
+The ESP32-S3 three-segment guarded write, per-segment and full-flash readback,
+unwritten-byte preservation, multi-core post-reset snapshot, evidence
+inspection, device-side checksum, and observable heartbeat checks passed. This
+completes native ESP-IDF segmented-flash acceptance for the ESP32-S3/native
+USB-JTAG fixture.

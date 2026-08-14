@@ -158,12 +158,10 @@ multi-core evidence path with an ESP32-S3 fixture.
 
 Native execution remains target-gated. A probe-rs target must explicitly
 advertise `segmented_flash` only after physical acceptance, and multi-core
-targets also require a complete post-flash reset/snapshot/resume policy. The
-ESP32-S3 system-reset and multi-core restoration policy has passed physical
-acceptance, but segmented flash has not. Its current plan therefore reports only
-`SEGMENTED_FLASH_ACCEPTANCE_REQUIRED`; even the correct digest is rejected after
-probe enumeration but before target attach, evidence reservation, erase,
-program, or reset.
+targets also require a complete post-flash reset/snapshot/resume policy.
+ESP32-S3 has passed both gates on native USB-JTAG: its normalized ESP-IDF plan is
+executable after exact digest confirmation. Other targets continue to report
+explicit blockers until their own physical acceptance is complete.
 
 ## Design constraints
 
@@ -190,14 +188,13 @@ probe removal returns stable unavailable errors without selecting another
 connected probe or creating evidence. ESP-IDF ELF normalization, segmented
 staging, per-segment verification, and single- and multi-core post-flash
 evidence reporting now pass end-to-end Replay coverage. Native ESP execution
-remains intentionally target-gated pending physical segmented-flash acceptance.
-State-preserving live snapshots and system-reset snapshots have passed on
-ESP32-S3. After reset, `cpu0` is sampled while halted and resumed; `cpu1` is
-available at its reset breakpoint and remains halted. A subsequent independent
-live snapshot verified those final states.
-OpenOCD, general ELF/HEX loading, physically accepted native ESP-IDF execution,
-RTT, persistent interactive debug sessions, physically accepted native
-segmented flash, and non-boot NVM writes are not yet exposed.
+has now passed on ESP32-S3: exact-confirmation segmented programming, independent
+per-segment verification, preservation of every byte outside the image ranges,
+multi-core post-reset evidence, a full 16 MiB external readback, and serial
+heartbeat checks all succeeded. State-preserving live snapshots and system-reset
+snapshots also passed. OpenOCD, general ELF/HEX loading, RTT, persistent
+interactive debug sessions, other physically accepted native segmented targets,
+and non-boot NVM writes are not yet exposed.
 See `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 

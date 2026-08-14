@@ -148,6 +148,7 @@ aggregate verification state differ from the confirmed firmware manifest.
 
 `capabilities.segmented_flash` and `capabilities.multi_core_post_flash` are
 false by default and may be advertised only after target-specific acceptance.
+The native probe-rs ESP32-S3 target has passed both acceptance gates.
 A normalized plan reports
 `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` when that capability is absent. Multi-core
 targets report `MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED` until their backend can

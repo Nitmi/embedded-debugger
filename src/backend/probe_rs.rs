@@ -68,6 +68,7 @@ impl ProbeRsBackend {
 
         let single_core = target.cores.len() == 1;
         let accepted_esp32s3_post_reset = target.name.eq_ignore_ascii_case("esp32s3");
+        let accepted_esp32s3_segmented_flash = target.name.eq_ignore_ascii_case("esp32s3");
         let flash = !target.flash_algorithms.is_empty();
         let target_info = TargetInfo {
             name: target.name.clone(),
@@ -76,8 +77,8 @@ impl ProbeRsBackend {
         };
         let capabilities = Capabilities {
             flash,
-            // Advertise only after target-specific segmented execution acceptance.
-            segmented_flash: false,
+            // ESP32-S3 segmented programming passed target-specific acceptance.
+            segmented_flash: accepted_esp32s3_segmented_flash,
             // ESP32-S3 reset and per-core restoration passed target-specific acceptance.
             multi_core_post_flash: accepted_esp32s3_post_reset,
             verify: flash,
@@ -1537,7 +1538,7 @@ mod tests {
 
         assert_eq!(backend.target().name, "esp32s3");
         assert_eq!(backend.target().core_count, 2);
-        assert!(!backend.capabilities().segmented_flash);
+        assert!(backend.capabilities().segmented_flash);
         assert!(backend.capabilities().multi_core_post_flash);
         assert!(backend.capabilities().reset);
         assert!(

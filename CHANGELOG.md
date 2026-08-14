@@ -19,15 +19,15 @@ All notable changes to this project will be documented in this file.
   payload hash validation, one-transaction backend commit, manifest-consistent
   flash reports, and per-segment evidence. A single-core ESP32-C3 Replay fixture
   exercises the complete plan/execute/verify/reset/evidence path.
-- Explicit `segmented_flash` target capability. Native targets remain disabled
-  until target-specific physical acceptance is complete.
+- Explicit `segmented_flash` target capability. ESP32-S3 passed target-specific
+  physical acceptance; other native targets remain disabled until qualified.
 - Multi-core post-flash evidence inventories with exact core indexes, explicit
   disabled-core reasons, halted capture, per-core expected-final-state
   validation, backward-compatible running defaults and single-core views, and
   Replay success/failure coverage.
 - Explicit `multi_core_post_flash` capability and pre-mutation native reset
   gating. ESP32-S3 system reset and per-core restoration passed physical
-  acceptance; segmented flash remains independently gated.
+  acceptance.
 - Replay execution, verification, reset, snapshot capture, and atomic evidence
   publication.
 - Native probe discovery through probe-rs 0.32.
@@ -55,14 +55,14 @@ All notable changes to this project will be documented in this file.
 ### Known limitations
 
 - OpenOCD and MCP adapters are not implemented.
-- Raw BIN is the only native physically accepted firmware format. probe-rs
-  requires an explicit base address; Replay uses the fixture address unless the
-  same address is supplied. ESP-IDF ELF requires explicit format and flash
-  capacity inputs, and native execution remains target-gated. General ELF and
-  Intel HEX are not accepted.
-- Native flashing is limited to readable boot NVM on single-core targets. RTT,
-  arbitrary memory/register commands, breakpoints, and persistent sessions are
-  not implemented.
+- Native raw BIN requires an explicit base address; Replay uses the fixture
+  address unless the same address is supplied. ESP-IDF ELF requires explicit
+  format and flash capacity inputs and is physically accepted only on ESP32-S3.
+  General ELF and Intel HEX are not accepted.
+- Native flashing is limited to readable boot NVM. Multi-core segmented
+  execution is physically accepted only on ESP32-S3. RTT, arbitrary
+  memory/register commands, breakpoints, and persistent sessions are not
+  implemented.
 - Native attach/disconnect is verified on nRF52840/J-Link and ESP32-S3/native
   USB-JTAG. nRF52840 single-page guarded write acceptance passed, including
   exact confirmation, read-back, page preservation, post-reset snapshot,
@@ -70,6 +70,6 @@ All notable changes to this project will be documented in this file.
   passed. Physical probe removal consistently returns `PROBE_UNAVAILABLE`
   without falling back to another connected probe. ESP32-S3 live and system
   reset snapshots passed with `cpu0` restored to running and reset-accessible
-  `cpu1` preserved as halted. ESP32-S3 guarded flash execution now awaits only
-  physical segmented-flash acceptance; planning and shared staging/verification
-  mechanisms are implemented.
+  `cpu1` preserved as halted. Its guarded three-segment ESP-IDF execution also
+  passed exact confirmation, read-back, complete outside-range preservation,
+  evidence, and heartbeat runtime checks.
