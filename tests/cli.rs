@@ -1,4 +1,8 @@
-use std::fs;
+use std::{
+    fs,
+    io::{BufRead, BufReader, Write},
+    process::{Command as ProcessCommand, Stdio},
+};
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -8,6 +12,213 @@ mod support;
 
 fn fixture() -> &'static str {
     "examples/replay/stm32g4.json"
+}
+
+#[test]
+fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
+        .args([
+            "--fixture",
+            fixture(),
+            "session",
+            "serve",
+            "--target",
+            "STM32G431CBTx",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "open",
+            "operation": "session.open",
+            "probe": "replay:stlink-v3:0039002A3432510433343034",
+            "target": "STM32G431CBTx",
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let opened = read_jsonl_response(&mut stdout);
+    let session_id = opened["data"]["session"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(opened["request_id"], "open");
+    assert_eq!(opened["data"]["state"], "open");
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "premature-shutdown",
+            "operation": "server.shutdown",
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let premature_shutdown = read_jsonl_response(&mut stdout);
+    assert_eq!(premature_shutdown["ok"], false);
+    assert_eq!(
+        premature_shutdown["error"]["details"]["required_operation"],
+        "session.close"
+    );
+
+    for (request_id, operation, expected_state) in [
+        ("run", "core.run", "running"),
+        ("halt", "core.halt", "halted"),
+        ("status", "core.status", "halted"),
+    ] {
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({
+                "schema_version": "1.0",
+                "request_id": request_id,
+                "operation": operation,
+                "session_id": session_id,
+                "core": 0,
+            })
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+        let response = read_jsonl_response(&mut stdout);
+        assert_eq!(response["request_id"], request_id);
+        assert_eq!(response["data"]["state_scope"], "active_session");
+        assert_eq!(response["data"]["core"]["state"], expected_state);
+    }
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "session-status",
+            "operation": "session.status",
+            "session_id": session_id,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let status = read_jsonl_response(&mut stdout);
+    assert_eq!(status["data"]["state"], "open");
+    assert_eq!(status["data"]["observed_core_indexes"][0], 0);
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "close",
+            "operation": "session.close",
+            "session_id": session_id,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let closed = read_jsonl_response(&mut stdout);
+    assert_eq!(closed["data"]["state"], "closed");
+    assert_eq!(
+        closed["data"]["final_core_observations"][0]["state"],
+        "running"
+    );
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "shutdown",
+            "operation": "server.shutdown",
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let shutdown = read_jsonl_response(&mut stdout);
+    assert_eq!(shutdown["data"]["shutdown"], true);
+    drop(stdin);
+
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn replay_session_server_safely_closes_an_active_session_on_eof() {
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
+        .args([
+            "--fixture",
+            fixture(),
+            "session",
+            "serve",
+            "--target",
+            "STM32G431CBTx",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "open",
+            "operation": "session.open",
+            "probe": "replay:stlink-v3:0039002A3432510433343034",
+            "target": "STM32G431CBTx",
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let opened = read_jsonl_response(&mut stdout);
+    let session_id = opened["data"]["session"]["session_id"].as_str().unwrap();
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "halt",
+            "operation": "core.halt",
+            "session_id": session_id,
+            "core": 0,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let halted = read_jsonl_response(&mut stdout);
+    assert_eq!(halted["data"]["core"]["state"], "halted");
+
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("session transport ended; safely closed"));
+    assert!(stderr.contains("run_observed_cores_before_disconnect"));
+}
+
+fn read_jsonl_response(reader: &mut impl BufRead) -> Value {
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(
+        !line.is_empty(),
+        "session server closed stdout unexpectedly"
+    );
+    serde_json::from_str(&line).unwrap()
 }
 
 #[test]

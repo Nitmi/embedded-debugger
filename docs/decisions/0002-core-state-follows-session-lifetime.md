@@ -33,10 +33,9 @@ acceptable implementation of persistent control.
    service/backend instance.
 5. Native probe-rs does not advertise it until a backend/target pair passes both
    running-origin and halted-origin teardown acceptance.
-6. Persistent native observation and halt/run will use a long-running local
-   service that owns a leased probe-rs or OpenOCD/GDB session. CLI, Skill, and
-   MCP adapters will all address the same lease through the shared service
-   contract.
+6. Persistent native observation and halt/run use the long-running local
+   `session serve` owner introduced by ADR-0003. Future CLI, Skill, and MCP
+   adapters will all address the same lease through that shared contract.
 
 ## Consequences
 

@@ -71,7 +71,11 @@ pub trait DebugBackend {
         session: &SessionInfo,
     ) -> Result<Vec<PostFlashCoreObservation>>;
     fn capture_live_snapshot(&mut self, session: &SessionInfo) -> Result<Vec<CoreObservation>>;
-    fn control_core(
+    /// Observe or change execution state while `session` remains active.
+    ///
+    /// Callers that disconnect immediately must separately require an explicit
+    /// post-disconnect state guarantee from the backend capability matrix.
+    fn control_core_in_session(
         &mut self,
         session: &SessionInfo,
         core_index: u32,

@@ -2,13 +2,27 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use embedded_debugger::{
-    cli::{Cli, execute},
+    cli::{Cli, execute, serve_session_stdio},
     envelope::{ErrorEnvelope, SuccessEnvelope},
 };
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let operation = cli.operation_name();
+    if cli.is_session_server() {
+        return match serve_session_stdio(&cli) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let envelope = ErrorEnvelope::new(operation, &error);
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&envelope)
+                        .expect("session startup error envelope always serializes")
+                );
+                ExitCode::from(u8::try_from(error.exit_code).unwrap_or(10))
+            }
+        };
+    }
     match execute(&cli) {
         Ok(result) => {
             if cli.json {

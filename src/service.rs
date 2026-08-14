@@ -355,7 +355,9 @@ impl<B: DebugBackend> DebugService<B> {
 
         let probe = select_probe(&self.backend.list_probes()?, Some(probe_id))?;
         let session = self.backend.attach(&probe.id, &target_info.name)?;
-        let control_result = self.backend.control_core(&session, core_index, action);
+        let control_result = self
+            .backend
+            .control_core_in_session(&session, core_index, action);
         let disconnect_result = self.backend.disconnect(&session);
         let core = match (control_result, disconnect_result) {
             (Err(error), Err(cleanup_error)) => {
@@ -1214,7 +1216,7 @@ pub fn inspect_evidence(path: &Path) -> Result<EvidenceBundle> {
     Ok(bundle)
 }
 
-fn select_probe(probes: &[ProbeInfo], requested: Option<&str>) -> Result<ProbeInfo> {
+pub(crate) fn select_probe(probes: &[ProbeInfo], requested: Option<&str>) -> Result<ProbeInfo> {
     if let Some(id) = requested {
         let matches = probes
             .iter()

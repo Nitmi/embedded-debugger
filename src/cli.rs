@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{io, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -15,6 +15,7 @@ use crate::{
     firmware::{FirmwareFormat, FirmwareInputOptions, parse_esp_flash_size},
     model::{Address, CoreExecutionAction, FlashRange},
     service::{DebugService, inspect_evidence},
+    session,
 };
 
 #[derive(Debug, Parser)]
@@ -71,6 +72,21 @@ pub enum Command {
         #[command(subcommand)]
         command: CoreCommand,
     },
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCommand {
+    Serve(SessionServeSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct SessionServeSelection {
+    #[arg(long, help = "exact target name that this JSONL server is bound to")]
+    pub target: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -315,8 +331,42 @@ impl Cli {
             Command::Core {
                 command: CoreCommand::Run(_),
             } => "core.run",
+            Command::Session { .. } => "session.serve",
         }
     }
+
+    pub fn is_session_server(&self) -> bool {
+        matches!(self.command, Command::Session { .. })
+    }
+}
+
+pub fn serve_session_stdio(cli: &Cli) -> Result<()> {
+    let Command::Session {
+        command: SessionCommand::Serve(selection),
+    } = &cli.command
+    else {
+        return Err(DebugError::new(
+            crate::error::ErrorCode::ProtocolError,
+            "requested command is not the session JSONL server",
+            6,
+            json!({"operation": cli.operation_name()}),
+        ));
+    };
+
+    match cli.backend {
+        BackendArg::Replay => {
+            serve_session_backend(ReplayBackend::from_path(replay_fixture_path(cli)?)?)
+        }
+        BackendArg::ProbeRs => serve_session_backend(ProbeRsBackend::new(&selection.target)?),
+        BackendArg::Openocd => Err(unsupported_openocd("persistent_session")),
+    }
+}
+
+fn serve_session_backend<B: DebugBackend>(backend: B) -> Result<()> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+    session::serve_jsonl(backend, stdin.lock(), stdout.lock(), stderr.lock())
 }
 
 pub fn execute(cli: &Cli) -> Result<CommandResult> {
@@ -359,6 +409,12 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
             command: MemoryCommand::Read(selection),
         } => read_memory(cli, selection),
         Command::Core { command } => control_core(cli, command),
+        Command::Session { .. } => Err(DebugError::new(
+            crate::error::ErrorCode::ProtocolError,
+            "session serve is a streaming command and must own stdin/stdout",
+            6,
+            json!({"operation": "session.serve"}),
+        )),
         Command::Probes {
             command: ProbeCommand::List,
         } => list_probes(cli),

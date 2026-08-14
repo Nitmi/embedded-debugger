@@ -118,8 +118,21 @@ currently advertises the underlying in-session read/halt/run capabilities but
 sets this guarantee to false, so these commands return `CAPABILITY_UNAVAILABLE`
 before probe selection. probe-rs 0.32 deconfigures cores when a `Session` is
 dropped; this resumes a halted Xtensa core and disables halting debug on
-Cortex-M. Persistent native observation and control therefore belong in a
-future long-running session service, not a short-lived CLI process.
+Cortex-M. Persistent native observation and control therefore use the
+foreground JSONL session service rather than a short-lived CLI process:
+
+```console
+cargo run -- --backend probe-rs session serve --target esp32s3
+```
+
+Write one compact JSON request per stdin line. Start with `session.open` and an
+exact probe/target, then use the returned `session_id` for `session.status`,
+`core.status`, `core.halt`, `core.run`, and `session.close`. Finish with
+`server.shutdown`. Responses are one versioned JSON object per stdout line;
+diagnostics stay on stderr. Core responses are explicitly scoped to the active
+session. Close and stdin EOF run every observed core before disconnecting, so a
+normal client exit does not leave the target paused. See
+[`docs/contracts.md`](docs/contracts.md) for the wire contract.
 
 Exercise the target's accepted reset policy without flashing it:
 

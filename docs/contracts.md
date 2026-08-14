@@ -261,6 +261,47 @@ resume, and session disconnect all completed. New evidence includes the plan
 identity, confirmation digest, write/erase ranges, policy, flash report, and
 ordered operations.
 
+## Persistent session JSONL
+
+`session serve --target <exact-target>` is a foreground stdio service. It emits
+JSONL regardless of the global `--json` flag: each non-empty stdin line is one
+request and each request receives exactly one stdout line. Diagnostics stay on
+stderr. A request line is limited to 64 KiB and `request_id` to 128 bytes.
+Malformed lines return `PROTOCOL_ERROR` without terminating the server.
+
+Open one exact probe/target lease:
+
+```json
+{"schema_version":"1.0","request_id":"req-open","operation":"session.open","probe":"303a:1001:E0:72:A1:D4:1F:DC","target":"esp32s3"}
+```
+
+The response adds `request_id` to the normal versioned result envelope and
+returns `data.session.session_id`, `state="open"`,
+`transport="stdio_jsonl"`, and
+`close_policy="run_observed_cores_before_disconnect"`. Only one session may be
+open. Target matching is exact; later operations must echo the opaque session
+ID so stale or foreign clients cannot control the current lease.
+
+```json
+{"schema_version":"1.0","request_id":"req-halt","operation":"core.halt","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-status","operation":"core.status","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-run","operation":"core.run","session_id":"ses_<opaque>","core":0}
+```
+
+In-session core responses report `state_scope="active_session"`. They require
+`core_status` plus the action capability, but deliberately do not require
+`post_disconnect_core_state`: their state guarantee ends when the lease closes
+or the process terminates. This is distinct from one-shot `core` commands,
+which retain the detach-safe capability gate.
+
+`session.status` reports the active identity, open timestamp, close policy, and
+observed core indexes. `session.close` first issues an idempotent run for every
+observed core, verifies those states, disconnects, and reports the final core
+observations. `server.shutdown` succeeds only after the active session has been
+closed. EOF and transport failures invoke the same best-effort close path and
+record cleanup on stderr; an OS-level hard kill or power loss cannot receive a
+response and still relies on backend teardown behavior.
+
 General ELF and Intel HEX loading are not yet part of this contract. ESP-IDF
 application ELF normalization is the only format-aware path; execution is
 available only to backends and targets whose capability matrix satisfies the

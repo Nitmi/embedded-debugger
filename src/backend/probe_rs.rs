@@ -996,7 +996,7 @@ impl DebugBackend for ProbeRsBackend {
         Ok(observations)
     }
 
-    fn control_core(
+    fn control_core_in_session(
         &mut self,
         session: &SessionInfo,
         core_index: u32,
@@ -1010,18 +1010,6 @@ impl DebugBackend for ProbeRsBackend {
                 json!({
                     "action": action,
                     "capability": "core_status",
-                    "target": self.target_info.name,
-                }),
-            ));
-        }
-        if !self.capabilities.post_disconnect_core_state {
-            return Err(DebugError::new(
-                ErrorCode::CapabilityUnavailable,
-                "probe-rs cannot guarantee the reported core state after this one-shot session disconnects",
-                6,
-                json!({
-                    "action": action,
-                    "capability": "post_disconnect_core_state",
                     "target": self.target_info.name,
                 }),
             ));

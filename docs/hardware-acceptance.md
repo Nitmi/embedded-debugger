@@ -157,8 +157,28 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   followed status/halt/run and live-snapshot/register/memory rejections from the
   rebuilt binary. No bytes were sent and recovery was not required. Logs
   are under `target/hardware-acceptance/2026-08-14-esp32s3-core-control`.
-  Persistent native observation and halt/run require a future long-running
-  session owner.
+  The missing long-running owner was implemented and accepted in the next
+  exercise.
+- The foreground `session serve` JSONL owner passed native ESP32-S3 acceptance
+  on exact probe `303a:1001:E0:72:A1:D4:1F:DC`. A read-only 115200-baud baseline
+  produced heartbeats `13273..13276`. Within one probe-rs session, `core.halt`
+  reported CPU0 `running -> halted`; a four-second `baud` monitor then received
+  zero bytes, and a later in-session `core.status` still reported halted.
+  `core.run` reported `halted -> running`; the next monitor received resumed
+  UART activity including heartbeat `13349` (with partial ANSI prefixes caused
+  by halting during an external log write). `session.close` explicitly verified
+  CPU0 `running -> running`, disconnected, and the post-close monitor received
+  clean heartbeats `13354..13356`.
+- The unexpected-client-exit path was exercised separately: after another
+  `running -> halted`, stdin was closed without `core.run` or `session.close`.
+  The service logged that it safely closed the active session using
+  `run_observed_cores_before_disconnect`, exited with code 0, and the following
+  monitor received heartbeats `13411..13413`. All monitors used DTR/RTS=false
+  and transmitted no serial bytes. Artifacts are under
+  `target/hardware-acceptance/2026-08-14-esp32s3-persistent-session`. This
+  accepts native persistent CPU0 status/halt/run, explicit close, and stdio EOF
+  cleanup. It does not yet accept idle expiry, multi-client arbitration, hard
+  process termination, or CPU1 control.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.

@@ -784,7 +784,7 @@ impl DebugBackend for ReplayBackend {
         Ok(observations)
     }
 
-    fn control_core(
+    fn control_core_in_session(
         &mut self,
         session: &SessionInfo,
         core_index: u32,
@@ -797,9 +797,6 @@ impl DebugBackend for ReplayBackend {
             }
             CoreExecutionAction::Halt if !self.fixture.capabilities.halt => Some("halt"),
             CoreExecutionAction::Run if !self.fixture.capabilities.run => Some("run"),
-            _ if !self.fixture.capabilities.post_disconnect_core_state => {
-                Some("post_disconnect_core_state")
-            }
             _ if !self.fixture.capabilities.core_status => Some("core_status"),
             _ => None,
         };
@@ -1514,16 +1511,16 @@ mod tests {
         let session = backend.attach(&probe_id, &target).unwrap();
 
         let initial = backend
-            .control_core(&session, 0, CoreExecutionAction::Status)
+            .control_core_in_session(&session, 0, CoreExecutionAction::Status)
             .unwrap();
         let running = backend
-            .control_core(&session, 0, CoreExecutionAction::Run)
+            .control_core_in_session(&session, 0, CoreExecutionAction::Run)
             .unwrap();
         let running_again = backend
-            .control_core(&session, 0, CoreExecutionAction::Run)
+            .control_core_in_session(&session, 0, CoreExecutionAction::Run)
             .unwrap();
         let halted = backend
-            .control_core(&session, 0, CoreExecutionAction::Halt)
+            .control_core_in_session(&session, 0, CoreExecutionAction::Halt)
             .unwrap();
 
         assert_eq!(initial.state, CoreState::Halted);
@@ -1551,7 +1548,7 @@ mod tests {
         let session = backend.attach(&probe_id, &target).unwrap();
 
         let error = backend
-            .control_core(&session, 0, CoreExecutionAction::Run)
+            .control_core_in_session(&session, 0, CoreExecutionAction::Run)
             .unwrap_err();
 
         assert_eq!(error.code, ErrorCode::FixtureInvalid);
