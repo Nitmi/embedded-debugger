@@ -46,12 +46,18 @@ All notable changes to this project will be documented in this file.
   pre-attach readable RAM/NVM containment checks, Generic/MMIO and cross-region
   rejection, target region metadata, hexadecimal data and SHA-256, explicit
   Replay core/byte evidence, and probe-rs byte reads that do not widen the
-  requested address range. ESP32-S3 CPU0 RAM and mapped NVM passed physical
-  acceptance with serial heartbeat recovery.
+  requested address range. ESP32-S3 CPU0 RAM and mapped NVM passed
+  running-origin physical exercises with serial heartbeat recovery.
 - Non-flashing `snapshot reset-capture` with structured reset effects, complete
   per-core post-reset observations, verified restoration, and disconnect.
 - Structured R1 `effects` disclosure for backend-managed volatile target state,
-  including probe-rs hardware-breakpoint clearing and ESP32-S3 watchdog changes.
+  including probe-rs hardware-breakpoint clearing, ESP32-S3 watchdog changes,
+  and the possibility that session teardown resumes a previously halted core.
+- Versioned `core status`, `core halt`, and `core run` reports with explicit
+  original/final states, idempotent Replay transitions, state continuity within
+  one Replay service instance, and intentional-final-state effects. The separate
+  `post_disconnect_core_state` capability prevents a one-shot command from
+  claiming a state that probe-rs session teardown can change.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
   unwritten sector bytes, independent read-back verification, reset-and-halt,
   PC/SP/LR snapshot, resume, and disconnect.
@@ -74,13 +80,20 @@ All notable changes to this project will be documented in this file.
   memory writes, Generic/MMIO reads, register writes, breakpoints, and persistent
   sessions are not implemented. Memory reads are one-shot, limited to 4096 bytes,
   and do not freeze other cores or DMA.
+- Native probe-rs one-shot live snapshot, register read, memory read, core
+  status, core halt, and core run are exposed only as explicit
+  `CAPABILITY_UNAVAILABLE` results. probe-rs 0.32 teardown resumes halted Xtensa
+  cores and disables Cortex-M halting debug, so detach-safe observation and
+  durable control require a future long-running session owner.
 - Native attach/disconnect is verified on nRF52840/J-Link and ESP32-S3/native
   USB-JTAG. nRF52840 single-page guarded write acceptance passed, including
   exact confirmation, read-back, page preservation, post-reset snapshot,
   evidence, backup, and runtime checks. The two-page cross-sector case also
   passed. Physical probe removal consistently returns `PROBE_UNAVAILABLE`
-  without falling back to another connected probe. ESP32-S3 live and system
-  reset snapshots passed with `cpu0` restored to running and reset-accessible
-  `cpu1` preserved as halted. Its guarded three-segment ESP-IDF execution also
-  passed exact confirmation, read-back, complete outside-range preservation,
-  evidence, and heartbeat runtime checks.
+  without falling back to another connected probe. ESP32-S3 running-origin live
+  snapshots passed, while its accepted system-reset workflow left `cpu0`
+  running and was independently observed to leave reset-accessible `cpu1`
+  halted. The live one-shot path is now gated because halted-origin teardown is
+  not safe. Its guarded three-segment ESP-IDF execution also passed exact
+  confirmation, read-back, complete outside-range preservation, evidence, and
+  heartbeat runtime checks.

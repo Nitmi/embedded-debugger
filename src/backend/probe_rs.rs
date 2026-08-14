@@ -20,11 +20,12 @@ use crate::{
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
-        Address, Capabilities, CoreObservation, CoreSnapshot, CoreState, FirmwareImageOptions,
-        FirmwareSegmentInfo, FlashLayout, FlashRange, FlashReport, MAX_REGISTER_READS,
-        MemoryCoreObservation, MemoryReadRange, MemoryReadResult, MemoryRegionInfo,
-        MemoryRegionKind, PostFlashCoreObservation, ProbeInfo, RegisterCoreObservation,
-        RegisterKind, RegisterReading, SessionInfo, TargetInfo, validate_memory_read_range,
+        Address, Capabilities, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
+        CoreSnapshot, CoreState, FirmwareImageOptions, FirmwareSegmentInfo, FlashLayout,
+        FlashRange, FlashReport, MAX_REGISTER_READS, MemoryCoreObservation, MemoryReadRange,
+        MemoryReadResult, MemoryRegionInfo, MemoryRegionKind, PostFlashCoreObservation, ProbeInfo,
+        RegisterCoreObservation, RegisterKind, RegisterReading, SessionInfo, TargetInfo,
+        validate_memory_read_range,
     },
 };
 
@@ -99,6 +100,10 @@ impl ProbeRsBackend {
             run: true,
             reset: single_core || accepted_esp32s3_post_reset,
             step: single_core,
+            core_status: true,
+            // A probe-rs Session may alter execution state while it is dropped. In
+            // particular, Xtensa leave_debug_mode resumes a halted core.
+            post_disconnect_core_state: false,
             register_read: true,
             memory_read: single_core || accepted_esp32s3_memory_read,
             memory_write: false,
@@ -203,6 +208,8 @@ impl DebugBackend for ProbeRsBackend {
             "probe-rs target attach/halt sequences may modify volatile target control state"
                 .to_string(),
             "halting a running core can interrupt in-flight peripheral activity and produce partial external I/O"
+                .to_string(),
+            "probe-rs session teardown can resume a core that was halted before attach"
                 .to_string(),
         ];
         if self.target_info.name.eq_ignore_ascii_case("esp32s3") {
@@ -987,6 +994,124 @@ impl DebugBackend for ProbeRsBackend {
                 .expect("every available core has a restored state");
         }
         Ok(observations)
+    }
+
+    fn control_core(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        action: CoreExecutionAction,
+    ) -> Result<CoreExecutionObservation> {
+        if !self.capabilities.core_status {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "probe-rs cannot observe execution state for the selected target",
+                6,
+                json!({
+                    "action": action,
+                    "capability": "core_status",
+                    "target": self.target_info.name,
+                }),
+            ));
+        }
+        if !self.capabilities.post_disconnect_core_state {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "probe-rs cannot guarantee the reported core state after this one-shot session disconnects",
+                6,
+                json!({
+                    "action": action,
+                    "capability": "post_disconnect_core_state",
+                    "target": self.target_info.name,
+                }),
+            ));
+        }
+        let index = core_index as usize;
+        let (core_name, architecture) = self
+            .target
+            .cores
+            .get(index)
+            .map(|core| {
+                (
+                    core.name.clone(),
+                    format!("{:?}", core.core_type).to_ascii_lowercase(),
+                )
+            })
+            .ok_or_else(|| {
+                DebugError::config(
+                    "requested core index is outside the target core inventory",
+                    json!({
+                        "core_index": core_index,
+                        "core_count": self.target.cores.len(),
+                    }),
+                )
+            })?;
+        let active = self.ensure_session_mut(session)?;
+        if active.reset_halted || !active.restore_before_disconnect.is_empty() {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "cannot control a core while restoration is pending",
+                6,
+                json!({"session_id": session.session_id, "core_index": core_index}),
+            ));
+        }
+        let mut core = active.session.core(index).map_err(|error| match error {
+            probe_rs::Error::CoreDisabled(_) => DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "requested target core is disabled",
+                6,
+                json!({"core_index": core_index}),
+            ),
+            other => map_core_error("attach core for execution control", other),
+        })?;
+        let original_status = core
+            .status()
+            .map_err(|error| map_core_error("read original core state", error))?;
+        let original_state = live_core_state(index, original_status)
+            .map_err(|error| map_core_error("determine original core state", error))?;
+        match (action, original_state) {
+            (CoreExecutionAction::Halt, CoreState::Running) => core
+                .halt(CORE_OPERATION_TIMEOUT)
+                .map(|_| ())
+                .map_err(|error| map_core_error("halt selected core", error))?,
+            (CoreExecutionAction::Run, CoreState::Halted) => core
+                .run()
+                .map_err(|error| map_core_error("run selected core", error))?,
+            _ => {}
+        }
+        let final_status = core
+            .status()
+            .map_err(|error| map_core_error("verify final core state", error))?;
+        let state = live_core_state(index, final_status)
+            .map_err(|error| map_core_error("determine final core state", error))?;
+        let expected = match action {
+            CoreExecutionAction::Status => original_state,
+            CoreExecutionAction::Halt => CoreState::Halted,
+            CoreExecutionAction::Run => CoreState::Running,
+        };
+        if state != expected {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "selected core did not reach the requested execution state",
+                6,
+                json!({
+                    "core_index": core_index,
+                    "action": action,
+                    "expected": expected,
+                    "observed": state,
+                }),
+            ));
+        }
+        Ok(CoreExecutionObservation {
+            index: core_index,
+            name: core_name,
+            architecture,
+            action,
+            original_state,
+            state,
+            state_changed: original_state != state,
+            halt_reason: halt_reason(final_status),
+        })
     }
 
     fn read_registers(
@@ -1997,6 +2122,14 @@ mod tests {
         assert!(backend.capabilities().multi_core_post_flash);
         assert!(backend.capabilities().reset);
         assert!(backend.capabilities().memory_read);
+        assert!(backend.capabilities().core_status);
+        assert!(!backend.capabilities().post_disconnect_core_state);
+        assert!(
+            backend
+                .volatile_target_state_notes()
+                .iter()
+                .any(|note| note.contains("halted before attach"))
+        );
         assert!(
             backend
                 .volatile_target_state_notes()

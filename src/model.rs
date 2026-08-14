@@ -116,6 +116,10 @@ pub struct Capabilities {
     pub run: bool,
     pub reset: bool,
     pub step: bool,
+    #[serde(default)]
+    pub core_status: bool,
+    #[serde(default)]
+    pub post_disconnect_core_state: bool,
     pub register_read: bool,
     pub memory_read: bool,
     pub memory_write: bool,
@@ -130,6 +134,14 @@ pub enum CoreState {
     Running,
     Halted,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreExecutionAction {
+    Status,
+    Halt,
+    Run,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +213,18 @@ pub struct MemoryReadResult {
     pub core: MemoryCoreObservation,
     pub range: MemoryReadRange,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreExecutionObservation {
+    pub index: u32,
+    pub name: String,
+    pub architecture: String,
+    pub action: CoreExecutionAction,
+    pub original_state: CoreState,
+    pub state: CoreState,
+    pub state_changed: bool,
+    pub halt_reason: Option<String>,
 }
 
 fn unknown_core_state() -> CoreState {
@@ -427,6 +451,8 @@ pub struct DebugControlEffects {
     pub flash_operation_requested: bool,
     #[serde(default)]
     pub memory_read_requested: bool,
+    #[serde(default)]
+    pub intentional_final_core_state_change_requested: bool,
     pub arbitrary_memory_write_requested: bool,
     pub core_execution_state_restoration_verified: bool,
     pub backend_may_modify_volatile_target_state: bool,
@@ -492,6 +518,67 @@ pub struct MemoryReadReport {
     pub sha256: String,
     pub operations: Vec<OperationRecord>,
     pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreControlReport {
+    pub control_id: String,
+    pub observed_at: String,
+    pub risk: String,
+    pub session: SessionInfo,
+    pub effects: DebugControlEffects,
+    pub core: CoreExecutionObservation,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
+pub fn validate_core_execution_observation(
+    target: &TargetInfo,
+    core: &CoreExecutionObservation,
+) -> std::result::Result<(), String> {
+    if core.index >= target.core_count {
+        return Err(format!(
+            "core index {} is outside target core count {}",
+            core.index, target.core_count
+        ));
+    }
+    if core.name.trim().is_empty() || core.architecture.trim().is_empty() {
+        return Err(format!(
+            "core {} requires a name and architecture",
+            core.index
+        ));
+    }
+    if core.original_state == CoreState::Unknown || core.state == CoreState::Unknown {
+        return Err(format!("core {} contains an unknown state", core.index));
+    }
+    if core.state_changed != (core.original_state != core.state) {
+        return Err(format!(
+            "core {} state_changed does not match its state transition",
+            core.index
+        ));
+    }
+    match core.action {
+        CoreExecutionAction::Status if core.state != core.original_state => {
+            return Err(format!(
+                "core {} status observation changed execution state",
+                core.index
+            ));
+        }
+        CoreExecutionAction::Halt if core.state != CoreState::Halted => {
+            return Err(format!("core {} did not finish halted", core.index));
+        }
+        CoreExecutionAction::Run if core.state != CoreState::Running => {
+            return Err(format!("core {} did not finish running", core.index));
+        }
+        _ => {}
+    }
+    if core.state == CoreState::Running && core.halt_reason.is_some() {
+        return Err(format!(
+            "core {} is running but still contains a halt reason",
+            core.index
+        ));
+    }
+    Ok(())
 }
 
 pub fn validate_memory_read_range(range: &MemoryReadRange) -> std::result::Result<(), String> {
@@ -1093,6 +1180,42 @@ mod tests {
             validate_memory_core_observation(&target, &core)
                 .unwrap_err()
                 .contains("restored")
+        );
+    }
+
+    #[test]
+    fn core_execution_observation_enforces_action_state_and_change_semantics() {
+        let target = TargetInfo {
+            name: "single".to_string(),
+            architecture: "armv7em".to_string(),
+            core_count: 1,
+        };
+        let mut observation = CoreExecutionObservation {
+            index: 0,
+            name: "core0".to_string(),
+            architecture: "armv7em".to_string(),
+            action: CoreExecutionAction::Status,
+            original_state: CoreState::Halted,
+            state: CoreState::Halted,
+            state_changed: false,
+            halt_reason: Some("breakpoint".to_string()),
+        };
+
+        assert!(validate_core_execution_observation(&target, &observation).is_ok());
+
+        observation.state_changed = true;
+        assert!(
+            validate_core_execution_observation(&target, &observation)
+                .unwrap_err()
+                .contains("state_changed")
+        );
+        observation.action = CoreExecutionAction::Run;
+        observation.state = CoreState::Running;
+        observation.halt_reason = Some("stale".to_string());
+        assert!(
+            validate_core_execution_observation(&target, &observation)
+                .unwrap_err()
+                .contains("halt reason")
         );
     }
 }

@@ -136,7 +136,7 @@ fn replay_snapshot_capture_reports_named_cores_and_restoration() {
     );
     assert_eq!(
         result["data"]["operations"][5]["operation"],
-        "session.disconnect"
+        "session.disconnect_preserving_core_state"
     );
 }
 
@@ -230,7 +230,7 @@ fn replay_register_read_reports_metadata_and_restored_state() {
     );
     assert_eq!(
         result["data"]["operations"][5]["operation"],
-        "session.disconnect"
+        "session.disconnect_preserving_core_state"
     );
 }
 
@@ -309,7 +309,7 @@ fn replay_memory_read_reports_exact_bytes_region_hash_and_restored_state() {
     );
     assert_eq!(
         result["data"]["operations"][6]["operation"],
-        "session.disconnect"
+        "session.disconnect_preserving_core_state"
     );
 }
 
@@ -341,6 +341,184 @@ fn replay_memory_read_returns_a_stable_boundary_error() {
     assert_eq!(result["operation"], "memory.read");
     assert_eq!(result["error"]["code"], "CONFIG_INVALID");
     assert_eq!(result["error"]["details"]["start"], "0x20007F18");
+}
+
+#[test]
+fn replay_core_status_reports_state_without_requesting_a_final_change() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "core",
+            "status",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--core",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "core.status");
+    assert_eq!(result["data"]["risk"], "R1_REVERSIBLE_CONTROL");
+    assert_eq!(result["data"]["core"]["action"], "status");
+    assert_eq!(result["data"]["core"]["original_state"], "halted");
+    assert_eq!(result["data"]["core"]["state"], "halted");
+    assert_eq!(result["data"]["core"]["state_changed"], false);
+    assert_eq!(
+        result["data"]["effects"]["intentional_final_core_state_change_requested"],
+        false
+    );
+    assert_eq!(
+        result["data"]["operations"][2]["operation"],
+        "session.disconnect_preserving_core_state"
+    );
+}
+
+#[test]
+fn replay_core_run_reports_an_intentional_verified_state_change() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "core",
+            "run",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "core.run");
+    assert_eq!(result["data"]["core"]["action"], "run");
+    assert_eq!(result["data"]["core"]["original_state"], "halted");
+    assert_eq!(result["data"]["core"]["state"], "running");
+    assert_eq!(result["data"]["core"]["state_changed"], true);
+    assert_eq!(result["data"]["core"]["halt_reason"], Value::Null);
+    assert_eq!(
+        result["data"]["effects"]["intentional_final_core_state_change_requested"],
+        true
+    );
+    assert_eq!(
+        result["data"]["effects"]["core_execution_state_restoration_verified"],
+        false
+    );
+    assert_eq!(
+        result["data"]["operations"][4]["operation"],
+        "session.disconnect_preserving_core_state"
+    );
+}
+
+#[test]
+fn core_control_rejects_an_invalid_index_before_probe_selection() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "core",
+            "status",
+            "--probe",
+            "deliberately-invalid",
+            "--target",
+            "STM32G431CBTx",
+            "--core",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["operation"], "core.status");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["core_count"], 1);
+}
+
+#[test]
+fn native_one_shot_core_state_is_gated_before_probe_selection() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--backend",
+            "probe-rs",
+            "core",
+            "status",
+            "--probe",
+            "deliberately-invalid",
+            "--target",
+            "esp32s3",
+            "--core",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .code(6)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["operation"], "core.status");
+    assert_eq!(result["error"]["code"], "CAPABILITY_UNAVAILABLE");
+    assert_eq!(
+        result["error"]["details"]["capability"],
+        "post_disconnect_core_state"
+    );
+    assert_eq!(result["error"]["details"]["backend"], "probe-rs");
+}
+
+#[test]
+fn native_state_preserving_snapshot_is_gated_before_probe_selection() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--backend",
+            "probe-rs",
+            "snapshot",
+            "capture",
+            "--probe",
+            "deliberately-invalid",
+            "--target",
+            "esp32s3",
+            "--json",
+        ])
+        .assert()
+        .code(6)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["operation"], "snapshot.capture");
+    assert_eq!(result["error"]["code"], "CAPABILITY_UNAVAILABLE");
+    assert_eq!(
+        result["error"]["details"]["capability"],
+        "post_disconnect_core_state"
+    );
+    assert_eq!(result["error"]["details"]["backend"], "probe-rs");
 }
 
 #[test]

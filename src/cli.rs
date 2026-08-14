@@ -13,7 +13,7 @@ use crate::{
     doctor,
     error::{DebugError, Result},
     firmware::{FirmwareFormat, FirmwareInputOptions, parse_esp_flash_size},
-    model::{Address, FlashRange},
+    model::{Address, CoreExecutionAction, FlashRange},
     service::{DebugService, inspect_evidence},
 };
 
@@ -66,6 +66,10 @@ pub enum Command {
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
+    },
+    Core {
+        #[command(subcommand)]
+        command: CoreCommand,
     },
 }
 
@@ -230,6 +234,25 @@ pub struct MemoryReadSelection {
     pub core: u32,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum CoreCommand {
+    Status(CoreSelection),
+    Halt(CoreSelection),
+    Run(CoreSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct CoreSelection {
+    #[arg(long, help = "exact probe selector from probes list")]
+    pub probe: String,
+
+    #[arg(long, help = "exact target name")]
+    pub target: String,
+
+    #[arg(long, default_value_t = 0, help = "zero-based target core index")]
+    pub core: u32,
+}
+
 #[derive(Debug)]
 pub struct CommandResult {
     pub operation: &'static str,
@@ -283,6 +306,15 @@ impl Cli {
             Command::Memory {
                 command: MemoryCommand::Read(_),
             } => "memory.read",
+            Command::Core {
+                command: CoreCommand::Status(_),
+            } => "core.status",
+            Command::Core {
+                command: CoreCommand::Halt(_),
+            } => "core.halt",
+            Command::Core {
+                command: CoreCommand::Run(_),
+            } => "core.run",
         }
     }
 }
@@ -326,6 +358,7 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
         Command::Memory {
             command: MemoryCommand::Read(selection),
         } => read_memory(cli, selection),
+        Command::Core { command } => control_core(cli, command),
         Command::Probes {
             command: ProbeCommand::List,
         } => list_probes(cli),
@@ -740,6 +773,46 @@ fn read_memory(cli: &Cli, selection: &MemoryReadSelection) -> Result<CommandResu
         describe_debug_control_effects(&report.effects)
     );
     Ok(CommandResult::serializable("memory.read", &report, human))
+}
+
+fn control_core(cli: &Cli, command: &CoreCommand) -> Result<CommandResult> {
+    let (action, selection) = match command {
+        CoreCommand::Status(selection) => (CoreExecutionAction::Status, selection),
+        CoreCommand::Halt(selection) => (CoreExecutionAction::Halt, selection),
+        CoreCommand::Run(selection) => (CoreExecutionAction::Run, selection),
+    };
+    let report = match cli.backend {
+        BackendArg::Replay => {
+            let mut service =
+                DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
+            service.control_core(&selection.probe, &selection.target, selection.core, action)?
+        }
+        BackendArg::ProbeRs => {
+            let backend = ProbeRsBackend::new(&selection.target)?;
+            let mut service = DebugService::new(backend);
+            service.control_core(&selection.probe, &selection.target, selection.core, action)?
+        }
+        BackendArg::Openocd => return Err(unsupported_openocd("core_control")),
+    };
+    let human = format!(
+        "Core {} ({}, {}) {:?}\noriginal={:?}, final={:?}, changed={}, halt_reason={}\nRisk: {}\nEffects: {}",
+        report.core.index,
+        report.core.name,
+        report.core.architecture,
+        report.core.action,
+        report.core.original_state,
+        report.core.state,
+        report.core.state_changed,
+        report.core.halt_reason.as_deref().unwrap_or("none"),
+        report.risk,
+        describe_debug_control_effects(&report.effects)
+    );
+    let operation = match action {
+        CoreExecutionAction::Status => "core.status",
+        CoreExecutionAction::Halt => "core.halt",
+        CoreExecutionAction::Run => "core.run",
+    };
+    Ok(CommandResult::serializable(operation, &report, human))
 }
 
 fn describe_debug_control_effects(effects: &crate::model::DebugControlEffects) -> String {

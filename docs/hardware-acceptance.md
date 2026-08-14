@@ -42,9 +42,10 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   capabilities.
 - ESP32-S3: native USB-JTAG `303a:1001:E0:72:A1:D4:1F:DC`, detected target
   `esp32s3`. Product-level `probes test` completed attach and disconnect.
-  Before reset acceptance, state-preserving `snapshot capture` completed
-  repeatedly with `cpu0` as `running -> halted -> running` and `cpu1` explicitly
-  unavailable. A standalone probe-rs system reset then completed successfully.
+  Before reset acceptance, the candidate `snapshot capture` completed repeated
+  running-origin exercises with `cpu0` as `running -> halted -> running` and
+  `cpu1` explicitly unavailable. A standalone probe-rs system reset then
+  completed successfully.
   After reset, `cpu1` became accessible at its natural ROM breakpoint instead of
   remaining disabled.
 - Product-level `snapshot reset-capture` then completed a non-flashing five-step
@@ -55,14 +56,15 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   preserved in its declared `halted` state. The response reported
   `reset_requested=true`, `flash_operation_requested=false`, and verified core
   restoration.
-- A subsequent independent live snapshot proved the states survived disconnect:
-  `cpu0` entered as running and returned to running at `PC=0x420969FE`,
-  `SP=0x3FCDB5D0`, `LR=0x4203DAF8`; `cpu1` entered halted and returned halted at
+- A subsequent independent live snapshot observed that the reset workflow's
+  states survived its disconnect: `cpu0` entered running at `PC=0x420969FE`,
+  `SP=0x3FCDB5D0`, `LR=0x4203DAF8`, while `cpu1` entered halted at
   `PC=0x400003C0`. This accepts native ESP32-S3 `reset` and
-  `multi_core_post_flash`. It does not claim all volatile target state is
-  unchanged: probe-rs clears hardware breakpoints on attach, and its ESP32-S3
-  sequence disables the super, timer-group 0/1, and RTC watchdogs. Structured
-  `effects` reports these R1 side effects.
+  `multi_core_post_flash`; it does not qualify the independent live snapshot's
+  own later detach as state preserving. It also does not claim all volatile
+  target state is unchanged: probe-rs clears hardware breakpoints on attach,
+  and its ESP32-S3 sequence disables the super, timer-group 0/1, and RTC
+  watchdogs. Structured `effects` reports these R1 side effects.
 - The complete 16 MiB ESP32-S3 flash was backed up before any candidate write.
   The local file is exactly 16,777,216 bytes with SHA-256
   `676e986b86f781db5ccd1abe3ff42bb446acc6c041bfbef59cba48ea7ef8f373`
@@ -99,7 +101,7 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   an independent live snapshot restored `cpu0` from halted to running, a second
   five-second monitor received heartbeats `65..69`. No serial bytes were sent.
   Recovery was not required. This accepts native ESP32-S3 `segmented_flash`.
-- Product-level `registers read` passed on ESP32-S3 `cpu0`. An explicit
+- The pre-gate candidate `registers read` passed on ESP32-S3 `cpu0`. An explicit
   `pc sp lr a2 ps` request resolved the Xtensa `lr` alias to canonical `a0`,
   captured all five 32-bit values while halted, and reported
   `running -> halted -> running`. Omitting names then captured the complete
@@ -111,9 +113,11 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   post-halt sample contained partial ANSI/log prefixes followed by heartbeat
   `2918`, demonstrating that execution-state restoration cannot make an
   interrupted external log write atomic. The command now reports that generic
-  R1 effect explicitly. This accepts native ESP32-S3 register reads on `cpu0`.
-- Product-level `memory read` passed on ESP32-S3 `cpu0`. With a deliberately
-  invalid probe selector, `0x3FF00000 + 16` (Generic/MMIO) and
+  R1 effect explicitly. This accepts the in-session register implementation and
+  running-origin path on ESP32-S3 CPU0, but not the general one-shot product
+  capability for an initially halted core.
+- The pre-gate candidate `memory read` passed on ESP32-S3 `cpu0`. With a
+  deliberately invalid probe selector, `0x3FF00000 + 16` (Generic/MMIO) and
   `0x3FC88000 + 4097` were both rejected as `CONFIG_INVALID`, proving region and
   4096-byte limit checks completed before probe access. The exact RAM request
   `0x3FCDB550 + 32` resolved to non-alias `SRAM1 Data bus`
@@ -127,9 +131,34 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   `baud` monitors at 115200 with DTR/RTS false received consecutive heartbeats
   `5803..5806` before and `5861..5863` after the reads; no bytes were sent. Logs
   are under `target/hardware-acceptance/2026-08-14-esp32s3-memory-read`. This
-  accepts bounded native ESP32-S3 RAM/NVM reads on `cpu0`; it does not accept
+  accepts the bounded in-session RAM/NVM implementation and running-origin path
+  on ESP32-S3 CPU0; it does not accept the general one-shot product capability,
   Generic/MMIO reads, writes, unbounded output, or atomic capture against the
   still-running secondary core and DMA.
+- A candidate one-shot `core halt` was deliberately rejected during ESP32-S3
+  acceptance. With CPU0 heartbeats `8458..8461` as the baseline, probe-rs
+  reported `running -> halted` and halt reason `request` while the session was
+  alive. An independent `core status` immediately after disconnect reported
+  CPU0 running, and serial heartbeats continued at `8513..8515`. Source review
+  confirmed that probe-rs 0.32 `Session::drop` calls `debug_core_stop` and the
+  Xtensa implementation's `leave_debug_mode` resumes a stopped core. Cortex-M
+  teardown also clears halting debug, so this is not safe to infer from
+  architecture or backend name.
+- The resulting `post_disconnect_core_state` capability is false for native
+  probe-rs and true for deterministic Replay. Native one-shot live snapshot,
+  register read, memory read, status, halt, and run now return
+  `CAPABILITY_UNAVAILABLE` before probe selection, including with a deliberately
+  invalid selector. Invalid memory ranges continue to fail even earlier as
+  `CONFIG_INVALID`. A running-state exploratory status reported CPU0
+  `running -> running`; it does not qualify the command for an initially halted
+  core. Read-only monitors with DTR/RTS false observed heartbeats
+  `8846..8849`, `8878..8881`, `8914..8917`, `9946..9949`, and
+  `11311..11314` across the final gate checks. The last two samples respectively
+  followed status/halt/run and live-snapshot/register/memory rejections from the
+  rebuilt binary. No bytes were sent and recovery was not required. Logs
+  are under `target/hardware-acceptance/2026-08-14-esp32s3-core-control`.
+  Persistent native observation and halt/run require a future long-running
+  session owner.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.
@@ -208,5 +237,7 @@ The ESP32-S3 three-segment guarded write, per-segment and full-flash readback,
 unwritten-byte preservation, multi-core post-reset snapshot, evidence
 inspection, device-side checksum, and observable heartbeat checks passed. This
 completes native ESP-IDF segmented-flash acceptance for the ESP32-S3/native
-USB-JTAG fixture. Bounded state-preserving register and RAM/NVM reads on CPU0
-also passed with pre-attach safety rejection and post-read heartbeat recovery.
+USB-JTAG fixture. Bounded register and RAM/NVM reads on CPU0 passed only as
+running-origin implementation exercises with pre-attach safety rejection and
+post-read heartbeat recovery. They are now capability-gated for native one-shot
+use until halted-origin teardown can be guaranteed.

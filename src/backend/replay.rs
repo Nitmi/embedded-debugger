@@ -12,11 +12,12 @@ use crate::{
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
-        Address, Capabilities, CoreObservation, CoreSnapshot, FirmwareSegmentInfo, FlashLayout,
-        FlashRange, FlashReport, MAX_INLINE_MEMORY_READ_BYTES, MAX_REGISTER_READS,
-        MemoryCoreObservation, MemoryReadRange, MemoryReadResult, MemoryRegionInfo,
-        MemoryRegionKind, PostFlashCoreObservation, ProbeInfo, RegisterCoreObservation,
-        RegisterReading, SessionInfo, TargetInfo, validate_core_inventory,
+        Address, Capabilities, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
+        CoreSnapshot, CoreState, FirmwareSegmentInfo, FlashLayout, FlashRange, FlashReport,
+        MAX_INLINE_MEMORY_READ_BYTES, MAX_REGISTER_READS, MemoryCoreObservation, MemoryReadRange,
+        MemoryReadResult, MemoryRegionInfo, MemoryRegionKind, PostFlashCoreObservation, ProbeInfo,
+        RegisterCoreObservation, RegisterReading, SessionInfo, TargetInfo,
+        validate_core_execution_observation, validate_core_inventory,
         validate_memory_core_observation, validate_memory_read_range,
         validate_post_flash_core_inventory, validate_register_core_observation,
     },
@@ -44,6 +45,15 @@ pub struct ReplayMemoryBlock {
     pub is_alias: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayCoreState {
+    pub index: u32,
+    pub name: String,
+    pub architecture: String,
+    pub state: CoreState,
+    pub halt_reason: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -66,6 +76,8 @@ pub struct ReplayFixture {
     pub memory_cores: Vec<MemoryCoreObservation>,
     #[serde(default)]
     pub memory_blocks: Vec<ReplayMemoryBlock>,
+    #[serde(default)]
+    pub control_cores: Vec<ReplayCoreState>,
     pub flash: ReplayFlashBehavior,
 }
 
@@ -199,6 +211,43 @@ impl ReplayFixture {
                 ));
             }
         }
+        let mut control_core_indexes = std::collections::BTreeSet::new();
+        for core in &self.control_cores {
+            if !control_core_indexes.insert(core.index) {
+                return Err(DebugError::fixture(
+                    "replay execution-control evidence contains a duplicate core index",
+                    json!({"core_index": core.index}),
+                ));
+            }
+            let observation = CoreExecutionObservation {
+                index: core.index,
+                name: core.name.clone(),
+                architecture: core.architecture.clone(),
+                action: CoreExecutionAction::Status,
+                original_state: core.state,
+                state: core.state,
+                state_changed: false,
+                halt_reason: core.halt_reason.clone(),
+            };
+            if let Err(problem) = validate_core_execution_observation(&self.target, &observation) {
+                return Err(DebugError::fixture(
+                    "replay execution-control evidence is invalid",
+                    json!({"core_index": core.index, "problem": problem}),
+                ));
+            }
+        }
+        if self.capabilities.core_status && self.control_cores.is_empty() {
+            return Err(DebugError::fixture(
+                "core status capability requires explicit execution-control evidence",
+                json!({"control_core_count": 0}),
+            ));
+        }
+        if self.capabilities.post_disconnect_core_state && !self.capabilities.core_status {
+            return Err(DebugError::fixture(
+                "post-disconnect core-state guarantees require core status support",
+                json!({"capability": "core_status"}),
+            ));
+        }
         let mut memory_core_indexes = std::collections::BTreeSet::new();
         for core in &self.memory_cores {
             if !memory_core_indexes.insert(core.index) {
@@ -279,6 +328,7 @@ impl ReplayFixture {
 
 pub struct ReplayBackend {
     fixture: ReplayFixture,
+    control_cores: Vec<ReplayCoreState>,
     active_session_id: Option<String>,
     programmed: Option<(String, Vec<FirmwareSegmentInfo>)>,
     reset_performed: bool,
@@ -290,8 +340,10 @@ impl ReplayBackend {
     }
 
     pub fn new(fixture: ReplayFixture) -> Self {
+        let control_cores = fixture.control_cores.clone();
         Self {
             fixture,
+            control_cores,
             active_session_id: None,
             programmed: None,
             reset_performed: false,
@@ -597,11 +649,21 @@ impl DebugBackend for ReplayBackend {
 
     fn snapshot(&mut self, session: &SessionInfo) -> Result<CoreSnapshot> {
         self.ensure_session(session)?;
-        Ok(if self.reset_performed {
+        let mut snapshot = if self.reset_performed {
             self.fixture.after_reset_core.clone()
         } else {
             self.fixture.initial_core.clone()
-        })
+        };
+        if let Some(control) = self.control_cores.iter().find(|control| control.index == 0) {
+            snapshot.captured_state = CoreState::Halted;
+            snapshot.state = control.state;
+            snapshot.halt_reason = if control.state == CoreState::Running {
+                Some("request".to_string())
+            } else {
+                control.halt_reason.clone()
+            };
+        }
+        Ok(snapshot)
     }
 
     fn capture_post_flash_snapshot(
@@ -625,24 +687,45 @@ impl DebugBackend for ReplayBackend {
                 json!({"capability": "multi_core_post_flash"}),
             ));
         }
-        if !self.fixture.post_flash_cores.is_empty() {
-            return Ok(self.fixture.post_flash_cores.clone());
+        let observations = if !self.fixture.post_flash_cores.is_empty() {
+            self.fixture.post_flash_cores.clone()
+        } else {
+            if self.fixture.target.core_count != 1 {
+                return Err(DebugError::fixture(
+                    "multi-core replay post-flash snapshots require explicit evidence",
+                    json!({"core_count": self.fixture.target.core_count}),
+                ));
+            }
+            vec![PostFlashCoreObservation {
+                index: 0,
+                name: "core0".to_string(),
+                architecture: self.fixture.target.architecture.clone(),
+                available: true,
+                expected_final_state: Some(CoreState::Running),
+                snapshot: Some(self.fixture.after_reset_core.clone()),
+                unavailable_reason: None,
+            }]
+        };
+        for observation in observations.iter().filter(|core| core.available) {
+            let Some(control) = self
+                .control_cores
+                .iter_mut()
+                .find(|control| control.index == observation.index)
+            else {
+                continue;
+            };
+            let snapshot = observation
+                .snapshot
+                .as_ref()
+                .expect("available replay post-flash cores contain snapshots");
+            control.state = snapshot.state;
+            control.halt_reason = if snapshot.state == CoreState::Halted {
+                snapshot.halt_reason.clone()
+            } else {
+                None
+            };
         }
-        if self.fixture.target.core_count != 1 {
-            return Err(DebugError::fixture(
-                "multi-core replay post-flash snapshots require explicit evidence",
-                json!({"core_count": self.fixture.target.core_count}),
-            ));
-        }
-        Ok(vec![PostFlashCoreObservation {
-            index: 0,
-            name: "core0".to_string(),
-            architecture: self.fixture.target.architecture.clone(),
-            available: true,
-            expected_final_state: Some(crate::model::CoreState::Running),
-            snapshot: Some(self.fixture.after_reset_core.clone()),
-            unavailable_reason: None,
-        }])
+        Ok(observations)
     }
 
     fn capture_live_snapshot(&mut self, session: &SessionInfo) -> Result<Vec<CoreObservation>> {
@@ -658,31 +741,121 @@ impl DebugBackend for ReplayBackend {
                 json!({"required": ["halt", "run", "register_read"]}),
             ));
         }
-        if !self.fixture.live_cores.is_empty() {
-            return Ok(self.fixture.live_cores.clone());
+        let mut observations = if !self.fixture.live_cores.is_empty() {
+            self.fixture.live_cores.clone()
+        } else {
+            if self.fixture.target.core_count != 1 {
+                return Err(DebugError::fixture(
+                    "multi-core replay snapshots require explicit live_cores evidence",
+                    json!({"core_count": self.fixture.target.core_count}),
+                ));
+            }
+            vec![CoreObservation {
+                index: 0,
+                name: "core0".to_string(),
+                architecture: self.fixture.target.architecture.clone(),
+                available: true,
+                original_state: Some(self.fixture.initial_core.state),
+                snapshot: Some(self.fixture.initial_core.clone()),
+                unavailable_reason: None,
+            }]
+        };
+        for observation in observations.iter_mut().filter(|core| core.available) {
+            let Some(control) = self
+                .control_cores
+                .iter()
+                .find(|control| control.index == observation.index)
+            else {
+                continue;
+            };
+            observation.original_state = Some(control.state);
+            let snapshot = observation
+                .snapshot
+                .as_mut()
+                .expect("available replay cores contain snapshots");
+            snapshot.captured_state = CoreState::Halted;
+            snapshot.state = control.state;
+            snapshot.halt_reason = if control.state == CoreState::Running {
+                Some("request".to_string())
+            } else {
+                control.halt_reason.clone()
+            };
         }
-        if self.fixture.target.core_count != 1 {
-            return Err(DebugError::fixture(
-                "multi-core replay snapshots require explicit live_cores evidence",
-                json!({"core_count": self.fixture.target.core_count}),
+        Ok(observations)
+    }
+
+    fn control_core(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        action: CoreExecutionAction,
+    ) -> Result<CoreExecutionObservation> {
+        self.ensure_session(session)?;
+        let capability = match action {
+            CoreExecutionAction::Status if !self.fixture.capabilities.core_status => {
+                Some("core_status")
+            }
+            CoreExecutionAction::Halt if !self.fixture.capabilities.halt => Some("halt"),
+            CoreExecutionAction::Run if !self.fixture.capabilities.run => Some("run"),
+            _ if !self.fixture.capabilities.post_disconnect_core_state => {
+                Some("post_disconnect_core_state")
+            }
+            _ if !self.fixture.capabilities.core_status => Some("core_status"),
+            _ => None,
+        };
+        if let Some(capability) = capability {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "replay fixture cannot perform the requested core control action",
+                6,
+                json!({"action": action, "capability": capability}),
             ));
         }
-        let original_state = self.fixture.initial_core.state;
-        let mut snapshot = self.fixture.initial_core.clone();
-        snapshot.captured_state = crate::model::CoreState::Halted;
-        snapshot.state = original_state;
-        if original_state == crate::model::CoreState::Running {
-            snapshot.halt_reason = Some("request".to_string());
-        }
-        Ok(vec![CoreObservation {
-            index: 0,
-            name: "core0".to_string(),
-            architecture: self.fixture.target.architecture.clone(),
-            available: true,
-            original_state: Some(original_state),
-            snapshot: Some(snapshot),
-            unavailable_reason: None,
-        }])
+        let position = self
+            .control_cores
+            .iter()
+            .position(|core| core.index == core_index)
+            .ok_or_else(|| {
+                DebugError::fixture(
+                    "replay fixture has no explicit execution-control evidence for the requested core",
+                    json!({"core_index": core_index}),
+                )
+            })?;
+        let core = &self.control_cores[position];
+        let original_state = core.state;
+        let (state, halt_reason) = match action {
+            CoreExecutionAction::Status => (core.state, core.halt_reason.clone()),
+            CoreExecutionAction::Halt => (
+                CoreState::Halted,
+                if original_state == CoreState::Running {
+                    Some("request".to_string())
+                } else {
+                    core.halt_reason.clone()
+                },
+            ),
+            CoreExecutionAction::Run => (CoreState::Running, None),
+        };
+        let observation = CoreExecutionObservation {
+            index: core.index,
+            name: core.name.clone(),
+            architecture: core.architecture.clone(),
+            action,
+            original_state,
+            state,
+            state_changed: original_state != state,
+            halt_reason: halt_reason.clone(),
+        };
+        validate_core_execution_observation(&self.fixture.target, &observation).map_err(
+            |problem| {
+                DebugError::fixture(
+                    "replay execution-control evidence is invalid",
+                    json!({"core_index": core_index, "problem": problem}),
+                )
+            },
+        )?;
+        self.control_cores[position].state = state;
+        self.control_cores[position].halt_reason = halt_reason;
+        Ok(observation)
     }
 
     fn read_registers(
@@ -716,6 +889,20 @@ impl DebugBackend for ReplayBackend {
                     json!({"core_index": core_index}),
                 )
             })?;
+        if let Some(control) = self
+            .control_cores
+            .iter()
+            .find(|control| control.index == core_index)
+        {
+            core.original_state = control.state;
+            core.captured_state = CoreState::Halted;
+            core.state = control.state;
+            core.halt_reason = if control.state == CoreState::Running {
+                Some("request".to_string())
+            } else {
+                control.halt_reason.clone()
+            };
+        }
         core.registers = select_replay_registers(&core.registers, names, core_index)?;
         validate_register_core_observation(&self.fixture.target, &core).map_err(|problem| {
             DebugError::fixture(
@@ -844,7 +1031,7 @@ impl DebugBackend for ReplayBackend {
                 json!({"planned": planned, "received": range}),
             ));
         }
-        let core = self
+        let mut core = self
             .fixture
             .memory_cores
             .iter()
@@ -856,6 +1043,20 @@ impl DebugBackend for ReplayBackend {
                     json!({"core_index": core_index}),
                 )
             })?;
+        if let Some(control) = self
+            .control_cores
+            .iter()
+            .find(|control| control.index == core_index)
+        {
+            core.original_state = control.state;
+            core.captured_state = CoreState::Halted;
+            core.state = control.state;
+            core.halt_reason = if control.state == CoreState::Running {
+                Some("request".to_string())
+            } else {
+                control.halt_reason.clone()
+            };
+        }
         validate_memory_core_observation(&self.fixture.target, &core).map_err(|problem| {
             DebugError::fixture(
                 "replay memory core evidence is invalid",
@@ -1302,6 +1503,97 @@ mod tests {
         assert_eq!(error.code, ErrorCode::FixtureInvalid);
         assert_eq!(error.details["core_index"], 0);
         backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn core_control_is_stateful_and_idempotent() {
+        let fixture = fixture();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+
+        let initial = backend
+            .control_core(&session, 0, CoreExecutionAction::Status)
+            .unwrap();
+        let running = backend
+            .control_core(&session, 0, CoreExecutionAction::Run)
+            .unwrap();
+        let running_again = backend
+            .control_core(&session, 0, CoreExecutionAction::Run)
+            .unwrap();
+        let halted = backend
+            .control_core(&session, 0, CoreExecutionAction::Halt)
+            .unwrap();
+
+        assert_eq!(initial.state, CoreState::Halted);
+        assert!(!initial.state_changed);
+        assert_eq!(running.original_state, CoreState::Halted);
+        assert_eq!(running.state, CoreState::Running);
+        assert!(running.state_changed);
+        assert_eq!(running.halt_reason, None);
+        assert_eq!(running_again.original_state, CoreState::Running);
+        assert!(!running_again.state_changed);
+        assert_eq!(halted.original_state, CoreState::Running);
+        assert_eq!(halted.state, CoreState::Halted);
+        assert!(halted.state_changed);
+        assert_eq!(halted.halt_reason.as_deref(), Some("request"));
+        backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn invalid_core_control_evidence_does_not_mutate_replay_state() {
+        let mut fixture = fixture();
+        fixture.control_cores[0].name.clear();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+
+        let error = backend
+            .control_core(&session, 0, CoreExecutionAction::Run)
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FixtureInvalid);
+        assert_eq!(backend.control_cores[0].state, CoreState::Halted);
+        backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn core_status_capability_requires_explicit_replay_evidence() {
+        let mut fixture = fixture();
+        fixture.control_cores.clear();
+
+        let error = fixture.validate().unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FixtureInvalid);
+        assert_eq!(error.details["control_core_count"], 0);
+    }
+
+    #[test]
+    fn post_disconnect_core_state_requires_status_support() {
+        let mut fixture = fixture();
+        fixture.capabilities.core_status = false;
+
+        let error = fixture.validate().unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FixtureInvalid);
+        assert_eq!(error.details["capability"], "core_status");
+    }
+
+    #[test]
+    fn legacy_fixture_defaults_new_core_state_capabilities_to_false() {
+        let mut value = serde_json::to_value(fixture()).unwrap();
+        let capabilities = value["capabilities"].as_object_mut().unwrap();
+        capabilities.remove("core_status");
+        capabilities.remove("post_disconnect_core_state");
+        value.as_object_mut().unwrap().remove("control_cores");
+
+        let fixture: ReplayFixture = serde_json::from_value(value).unwrap();
+
+        assert!(!fixture.capabilities.core_status);
+        assert!(!fixture.capabilities.post_disconnect_core_state);
+        fixture.validate().unwrap();
     }
 
     #[test]

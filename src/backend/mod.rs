@@ -7,10 +7,10 @@ use crate::{
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
-        Address, Capabilities, CoreObservation, CoreSnapshot, FirmwareImageOptions, FlashLayout,
-        FlashReport, FlashSegmentReport, MAX_INLINE_MEMORY_READ_BYTES, MemoryReadRange,
-        MemoryReadResult, PostFlashCoreObservation, ProbeInfo, RegisterCoreObservation,
-        SessionInfo, TargetInfo,
+        Address, Capabilities, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
+        CoreSnapshot, FirmwareImageOptions, FlashLayout, FlashReport, FlashSegmentReport,
+        MAX_INLINE_MEMORY_READ_BYTES, MemoryReadRange, MemoryReadResult, PostFlashCoreObservation,
+        ProbeInfo, RegisterCoreObservation, SessionInfo, TargetInfo,
     },
 };
 
@@ -71,6 +71,12 @@ pub trait DebugBackend {
         session: &SessionInfo,
     ) -> Result<Vec<PostFlashCoreObservation>>;
     fn capture_live_snapshot(&mut self, session: &SessionInfo) -> Result<Vec<CoreObservation>>;
+    fn control_core(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        action: CoreExecutionAction,
+    ) -> Result<CoreExecutionObservation>;
     fn read_registers(
         &mut self,
         session: &SessionInfo,

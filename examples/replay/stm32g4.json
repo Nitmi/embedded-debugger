@@ -24,6 +24,8 @@
     "run": true,
     "reset": true,
     "step": true,
+    "core_status": true,
+    "post_disconnect_core_state": true,
     "register_read": true,
     "memory_read": true,
     "memory_write": false,
@@ -116,6 +118,15 @@
       "start": "0x20007F00",
       "data": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
       "is_alias": false
+    }
+  ],
+  "control_cores": [
+    {
+      "index": 0,
+      "name": "core0",
+      "architecture": "armv7em",
+      "state": "halted",
+      "halt_reason": "breakpoint"
     }
   ],
   "flash": {

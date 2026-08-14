@@ -36,14 +36,17 @@ cargo run -- --backend probe-rs probes test \
 ```
 
 The command performs one attach/disconnect lifecycle and reports the target's
-conservative capability matrix as `R1_REVERSIBLE_CONTROL`.
+conservative capability matrix as `R1_REVERSIBLE_CONTROL`. probe-rs teardown
+can resume a core that was halted before attach, so callers must not treat this
+diagnostic as state preserving.
 
 Capture PC, SP, and LR from every enabled core while preserving each core's
 original running or halted state:
 
 ```console
-cargo run -- --backend probe-rs snapshot capture \
-  --probe <vid:pid:serial> --target <exact-target> --json
+cargo run -- --fixture examples/replay/stm32g4.json snapshot capture \
+  --probe replay:stlink-v3:0039002A3432510433343034 \
+  --target STM32G431CBTx --json
 ```
 
 This `R1_REVERSIBLE_CONTROL` command names every described core, explicitly
@@ -56,12 +59,25 @@ breakpoints on attach, and some target debug sequences change control
 registers. On ESP32-S3, the current probe-rs sequence disables multiple
 watchdogs during attach/halt. This is why the command is R1 rather than R0.
 
+The versioned core-state contract is available through `core status`,
+`core halt`, and `core run`. A successful response guarantees that
+`data.core.state` still describes the target after the one-shot debug session
+has disconnected; `data.core.original_state`, `state_changed`, and
+`effects.intentional_final_core_state_change_requested` make the transition
+explicit. This guarantee is advertised separately as
+`capabilities.post_disconnect_core_state`.
+
+Replay implements and tests all three actions, including repeatable idempotent
+halt/run and state continuity across later snapshot, register, and memory
+operations within one service/backend instance.
+
 Read a bounded set of registers from one core while preserving that core's
 original running or halted state:
 
 ```console
-cargo run -- --backend probe-rs registers read pc sp lr \
-  --probe <vid:pid:serial> --target <exact-target> --core 0 --json
+cargo run -- --fixture examples/replay/stm32g4.json registers read pc sp lr \
+  --probe replay:stlink-v3:0039002A3432510433343034 \
+  --target STM32G431CBTx --core 0 --json
 ```
 
 Names and architecture-defined aliases are matched case-insensitively. Omitting
@@ -80,8 +96,9 @@ Read a bounded byte range from target-described RAM or NVM while preserving the
 selected core's original state:
 
 ```console
-cargo run -- --backend probe-rs memory read 0x20000000 64 \
-  --probe <vid:pid:serial> --target <exact-target> --core 0 --json
+cargo run -- --fixture examples/replay/stm32g4.json memory read 0x20007F00 32 \
+  --probe replay:stlink-v3:0039002A3432510433343034 \
+  --target STM32G431CBTx --core 0 --json
 ```
 
 The exact inline limit is 4096 bytes. Planning completes before probe discovery
@@ -94,6 +111,15 @@ data, SHA-256, and `running`/`halted` capture and restoration states. This is an
 R1 one-shot observation: other cores and DMA remain live, and attach/halt can
 still alter the volatile state disclosed in `effects`. Replay requires explicit
 core-state and byte-block evidence; it never invents missing memory content.
+
+All successful one-shot core-state, live snapshot, register-read, and
+memory-read reports require `post_disconnect_core_state=true`. Native probe-rs
+currently advertises the underlying in-session read/halt/run capabilities but
+sets this guarantee to false, so these commands return `CAPABILITY_UNAVAILABLE`
+before probe selection. probe-rs 0.32 deconfigures cores when a `Session` is
+dropped; this resumes a halted Xtensa core and disables halting debug on
+Cortex-M. Persistent native observation and control therefore belong in a
+future long-running session service, not a short-lived CLI process.
 
 Exercise the target's accepted reset policy without flashing it:
 
@@ -211,8 +237,9 @@ explicit blockers until their own physical acceptance is complete.
 - Replay fixtures are validated and cannot silently opt into unsupported behavior.
 - A complete evidence bundle means the debug session was also disconnected.
 
-See [docs/contracts.md](docs/contracts.md) and
-[docs/decisions/0001-cli-first-control-plane.md](docs/decisions/0001-cli-first-control-plane.md).
+See [docs/contracts.md](docs/contracts.md),
+[ADR-0001](docs/decisions/0001-cli-first-control-plane.md), and
+[ADR-0002](docs/decisions/0002-core-state-follows-session-lifetime.md).
 
 ## Current status
 
@@ -230,12 +257,16 @@ evidence reporting now pass end-to-end Replay coverage. Native ESP execution
 has now passed on ESP32-S3: exact-confirmation segmented programming, independent
 per-segment verification, preservation of every byte outside the image ranges,
 multi-core post-reset evidence, a full 16 MiB external readback, and serial
-heartbeat checks all succeeded. State-preserving live snapshots and system-reset
-snapshots also passed. Bounded state-preserving register and RAM/NVM reads passed
-on ESP32-S3 CPU0, including pre-attach MMIO and size rejection plus serial
-heartbeat recovery. OpenOCD, general ELF/HEX loading, RTT, persistent interactive
+heartbeat checks all succeeded. System-reset snapshots also passed. Live
+snapshots and bounded register and RAM/NVM reads passed running-origin ESP32-S3
+exercises, including pre-attach MMIO and size rejection plus serial heartbeat
+recovery, but are now native capability-gated because halted-origin teardown is
+not state preserving. OpenOCD, general ELF/HEX loading, RTT, persistent interactive
 debug sessions, memory writes, MMIO reads, breakpoints, other physically accepted
 native segmented targets, and non-boot NVM writes are not yet exposed.
+The core status/halt/run contract is complete in Replay, but all native one-shot
+commands that promise a final core state remain capability-gated because
+probe-rs cannot guarantee every reported execution state across session teardown.
 See `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 

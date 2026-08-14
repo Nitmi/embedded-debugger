@@ -16,13 +16,14 @@ use crate::{
     error::{DebugError, ErrorCode, Result},
     firmware::{self, FirmwareFormat, FirmwareInputOptions},
     model::{
-        Address, ArtifactReference, DebugControlEffects, EvidenceBundle, FirmwareImageOptions,
-        FirmwareSegmentInfo, FlashExecution, FlashExecutionBlocker, FlashExecutionReadiness,
-        FlashPlan, FlashPolicy, FlashRange, MAX_REGISTER_READS, MemoryReadReport, OperationRecord,
-        PlannedAction, ProbeInfo, ProbeTestReport, RegisterReadReport, ResetCaptureReport,
-        SnapshotCaptureReport, validate_core_inventory, validate_memory_core_observation,
-        validate_memory_read_range, validate_post_flash_core_inventory,
-        validate_register_core_observation,
+        Address, ArtifactReference, CoreControlReport, CoreExecutionAction, DebugControlEffects,
+        EvidenceBundle, FirmwareImageOptions, FirmwareSegmentInfo, FlashExecution,
+        FlashExecutionBlocker, FlashExecutionReadiness, FlashPlan, FlashPolicy, FlashRange,
+        MAX_REGISTER_READS, MemoryReadReport, OperationRecord, PlannedAction, ProbeInfo,
+        ProbeTestReport, RegisterReadReport, ResetCaptureReport, SnapshotCaptureReport,
+        validate_core_execution_observation, validate_core_inventory,
+        validate_memory_core_observation, validate_memory_read_range,
+        validate_post_flash_core_inventory, validate_register_core_observation,
     },
 };
 
@@ -88,7 +89,7 @@ impl<B: DebugBackend> DebugService<B> {
         Ok(ProbeTestReport {
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, false, false, false),
+            effects: debug_control_effects(&self.backend, DebugControlEffectRequest::default()),
             operations,
             complete: true,
         })
@@ -112,6 +113,10 @@ impl<B: DebugBackend> DebugService<B> {
             ("halt", capabilities.halt),
             ("run", capabilities.run),
             ("register_read", capabilities.register_read),
+            (
+                "post_disconnect_core_state",
+                capabilities.post_disconnect_core_state,
+            ),
         ];
         if let Some((capability, _)) = required_capabilities
             .iter()
@@ -163,7 +168,13 @@ impl<B: DebugBackend> DebugService<B> {
             captured_at,
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, true, false, false),
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    core_execution_state_restoration_verified: true,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
             cores,
             operations: vec![
                 operation(1, "session.attach"),
@@ -171,7 +182,7 @@ impl<B: DebugBackend> DebugService<B> {
                 operation(3, "target.halt_running_cores"),
                 operation(4, "snapshot.capture_all_cores"),
                 operation(5, "target.restore_original_core_states"),
-                operation(6, "session.disconnect"),
+                operation(6, "session.disconnect_preserving_core_state"),
             ],
             complete: true,
         })
@@ -253,7 +264,14 @@ impl<B: DebugBackend> DebugService<B> {
             captured_at,
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, true, true, false),
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    core_execution_state_restoration_verified: true,
+                    reset_requested: true,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
             cores,
             operations: vec![
                 operation(1, "session.attach"),
@@ -262,6 +280,150 @@ impl<B: DebugBackend> DebugService<B> {
                 operation(4, "target.restore_expected_post_reset_states"),
                 operation(5, "session.disconnect"),
             ],
+            complete: true,
+        })
+    }
+
+    pub fn control_core(
+        &mut self,
+        probe_id: &str,
+        target: &str,
+        core_index: u32,
+        action: CoreExecutionAction,
+    ) -> Result<CoreControlReport> {
+        let target_info = self.backend.target().clone();
+        if !self.backend.matches_target(target) {
+            return Err(DebugError::unavailable(
+                ErrorCode::TargetUnavailable,
+                "requested target is not available from the selected backend",
+                json!({"requested": target, "available": target_info.name}),
+            ));
+        }
+        if core_index >= target_info.core_count {
+            return Err(DebugError::config(
+                "requested core index is outside the target core inventory",
+                json!({
+                    "core_index": core_index,
+                    "core_count": target_info.core_count,
+                    "target": target_info.name,
+                }),
+            ));
+        }
+        let capabilities = self.backend.capabilities();
+        let required_capability = match action {
+            CoreExecutionAction::Status => {
+                if !capabilities.core_status {
+                    Some("core_status")
+                } else {
+                    (!capabilities.post_disconnect_core_state)
+                        .then_some("post_disconnect_core_state")
+                }
+            }
+            CoreExecutionAction::Halt => {
+                if !capabilities.core_status {
+                    Some("core_status")
+                } else if !capabilities.halt {
+                    Some("halt")
+                } else {
+                    (!capabilities.post_disconnect_core_state)
+                        .then_some("post_disconnect_core_state")
+                }
+            }
+            CoreExecutionAction::Run => {
+                if !capabilities.core_status {
+                    Some("core_status")
+                } else if !capabilities.run {
+                    Some("run")
+                } else {
+                    (!capabilities.post_disconnect_core_state)
+                        .then_some("post_disconnect_core_state")
+                }
+            }
+        };
+        if let Some(capability) = required_capability {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "selected backend cannot perform the requested core control action",
+                6,
+                json!({
+                    "backend": self.backend.name(),
+                    "action": action,
+                    "capability": capability,
+                }),
+            ));
+        }
+
+        let probe = select_probe(&self.backend.list_probes()?, Some(probe_id))?;
+        let session = self.backend.attach(&probe.id, &target_info.name)?;
+        let control_result = self.backend.control_core(&session, core_index, action);
+        let disconnect_result = self.backend.disconnect(&session);
+        let core = match (control_result, disconnect_result) {
+            (Err(error), Err(cleanup_error)) => {
+                return Err(with_cleanup_failure(error, cleanup_error));
+            }
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+            (Ok(core), Ok(())) => core,
+        };
+        let observed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        if core.index != core_index || core.action != action {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned a different core control observation than requested",
+                6,
+                json!({
+                    "requested_core": core_index,
+                    "received_core": core.index,
+                    "requested_action": action,
+                    "received_action": core.action,
+                }),
+            ));
+        }
+        if let Err(problem) = validate_core_execution_observation(&target_info, &core) {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned an invalid core control observation",
+                6,
+                json!({"problem": problem, "core": core}),
+            ));
+        }
+        let operations = match action {
+            CoreExecutionAction::Status => vec![
+                operation(1, "session.attach"),
+                operation(2, "core.read_execution_state"),
+                operation(3, "session.disconnect_preserving_core_state"),
+            ],
+            CoreExecutionAction::Halt => vec![
+                operation(1, "session.attach"),
+                operation(2, "core.read_original_execution_state"),
+                operation(3, "core.halt_if_running"),
+                operation(4, "core.verify_halted_before_disconnect"),
+                operation(5, "session.disconnect_preserving_core_state"),
+            ],
+            CoreExecutionAction::Run => vec![
+                operation(1, "session.attach"),
+                operation(2, "core.read_original_execution_state"),
+                operation(3, "core.run_if_halted"),
+                operation(4, "core.verify_running_before_disconnect"),
+                operation(5, "session.disconnect_preserving_core_state"),
+            ],
+        };
+
+        Ok(CoreControlReport {
+            control_id: format!("ctl_{}", Uuid::new_v4().simple()),
+            observed_at,
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            session,
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    intentional_final_core_state_change_requested: action
+                        != CoreExecutionAction::Status,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
+            core,
+            operations,
             complete: true,
         })
     }
@@ -298,6 +460,10 @@ impl<B: DebugBackend> DebugService<B> {
             ("halt", capabilities.halt),
             ("run", capabilities.run),
             ("register_read", capabilities.register_read),
+            (
+                "post_disconnect_core_state",
+                capabilities.post_disconnect_core_state,
+            ),
         ];
         if let Some((capability, _)) = required_capabilities
             .iter()
@@ -346,7 +512,13 @@ impl<B: DebugBackend> DebugService<B> {
             captured_at,
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, true, false, false),
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    core_execution_state_restoration_verified: true,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
             core,
             operations: vec![
                 operation(1, "session.attach"),
@@ -354,7 +526,7 @@ impl<B: DebugBackend> DebugService<B> {
                 operation(3, "target.halt_core_if_running"),
                 operation(4, "registers.read"),
                 operation(5, "target.restore_original_core_state"),
-                operation(6, "session.disconnect"),
+                operation(6, "session.disconnect_preserving_core_state"),
             ],
             complete: true,
         })
@@ -401,6 +573,10 @@ impl<B: DebugBackend> DebugService<B> {
             ("halt", capabilities.halt),
             ("run", capabilities.run),
             ("memory_read", capabilities.memory_read),
+            (
+                "post_disconnect_core_state",
+                capabilities.post_disconnect_core_state,
+            ),
         ];
         if let Some((capability, _)) = required_capabilities
             .iter()
@@ -471,7 +647,14 @@ impl<B: DebugBackend> DebugService<B> {
             captured_at,
             risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session,
-            effects: debug_control_effects(&self.backend, true, false, true),
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    core_execution_state_restoration_verified: true,
+                    memory_read_requested: true,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
             core: result.core,
             range: result.range,
             encoding: "hex".to_string(),
@@ -484,7 +667,7 @@ impl<B: DebugBackend> DebugService<B> {
                 operation(4, "target.halt_core_if_running"),
                 operation(5, "memory.read_exact"),
                 operation(6, "target.restore_original_core_state"),
-                operation(7, "session.disconnect"),
+                operation(7, "session.disconnect_preserving_core_state"),
             ],
             complete: true,
         })
@@ -835,19 +1018,28 @@ fn validate_register_request(names: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn debug_control_effects<B: DebugBackend>(
-    backend: &B,
+#[derive(Default)]
+struct DebugControlEffectRequest {
     core_execution_state_restoration_verified: bool,
     reset_requested: bool,
     memory_read_requested: bool,
+    intentional_final_core_state_change_requested: bool,
+}
+
+fn debug_control_effects<B: DebugBackend>(
+    backend: &B,
+    request: DebugControlEffectRequest,
 ) -> DebugControlEffects {
     let volatile_target_state_notes = backend.volatile_target_state_notes();
     DebugControlEffects {
-        reset_requested,
+        reset_requested: request.reset_requested,
         flash_operation_requested: false,
-        memory_read_requested,
+        memory_read_requested: request.memory_read_requested,
+        intentional_final_core_state_change_requested: request
+            .intentional_final_core_state_change_requested,
         arbitrary_memory_write_requested: false,
-        core_execution_state_restoration_verified,
+        core_execution_state_restoration_verified: request
+            .core_execution_state_restoration_verified,
         backend_may_modify_volatile_target_state: !volatile_target_state_notes.is_empty(),
         volatile_target_state_notes,
     }
@@ -1414,6 +1606,8 @@ mod tests {
         let mut replay = fixture();
         replay.initial_core.captured_state = crate::model::CoreState::Running;
         replay.initial_core.state = crate::model::CoreState::Running;
+        replay.control_cores[0].state = crate::model::CoreState::Running;
+        replay.control_cores[0].halt_reason = None;
         let probe_id = replay.probe.id.clone();
         let target = replay.target.name.clone();
         let mut service = DebugService::new(ReplayBackend::new(replay));
@@ -1444,7 +1638,7 @@ mod tests {
         );
         assert_eq!(
             first.operations.last().unwrap().operation,
-            "session.disconnect"
+            "session.disconnect_preserving_core_state"
         );
     }
 
@@ -1490,7 +1684,7 @@ mod tests {
         assert_eq!(first.operations[3].operation, "registers.read");
         assert_eq!(
             first.operations.last().unwrap().operation,
-            "session.disconnect"
+            "session.disconnect_preserving_core_state"
         );
     }
 
@@ -1545,7 +1739,7 @@ mod tests {
         assert_eq!(first.operations[4].operation, "memory.read_exact");
         assert_eq!(
             first.operations.last().unwrap().operation,
-            "session.disconnect"
+            "session.disconnect_preserving_core_state"
         );
     }
 
@@ -1564,6 +1758,179 @@ mod tests {
         assert!(
             service
                 .read_memory(&probe_id, &target, 0, Address(0x2000_7f00), 4)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn core_control_persists_verified_state_across_one_shot_sessions() {
+        let replay = fixture();
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let initial = service
+            .control_core(&probe_id, &target, 0, CoreExecutionAction::Status)
+            .unwrap();
+        let run = service
+            .control_core(&probe_id, &target, 0, CoreExecutionAction::Run)
+            .unwrap();
+        let running = service
+            .control_core(&probe_id, &target, 0, CoreExecutionAction::Status)
+            .unwrap();
+        let snapshot_while_running = service.capture_snapshot(&probe_id, &target).unwrap();
+        let registers_while_running = service
+            .read_registers(&probe_id, &target, 0, &["pc".to_string()])
+            .unwrap();
+        let memory_while_running = service
+            .read_memory(&probe_id, &target, 0, Address(0x2000_7f00), 4)
+            .unwrap();
+        let halt = service
+            .control_core(&probe_id, &target, 0, CoreExecutionAction::Halt)
+            .unwrap();
+        let halted = service
+            .control_core(&probe_id, &target, 0, CoreExecutionAction::Status)
+            .unwrap();
+
+        assert_eq!(initial.core.state, CoreState::Halted);
+        assert!(!initial.core.state_changed);
+        assert_eq!(initial.operations.len(), 3);
+        assert!(
+            !initial
+                .effects
+                .intentional_final_core_state_change_requested
+        );
+        assert_eq!(run.core.original_state, CoreState::Halted);
+        assert_eq!(run.core.state, CoreState::Running);
+        assert!(run.core.state_changed);
+        assert_eq!(
+            run.operations[3].operation,
+            "core.verify_running_before_disconnect"
+        );
+        assert!(run.effects.intentional_final_core_state_change_requested);
+        assert!(!run.effects.core_execution_state_restoration_verified);
+        assert_eq!(running.core.state, CoreState::Running);
+        assert_eq!(
+            snapshot_while_running.cores[0].original_state,
+            Some(CoreState::Running)
+        );
+        assert_eq!(
+            snapshot_while_running.cores[0]
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .state,
+            CoreState::Running
+        );
+        assert_eq!(
+            registers_while_running.core.original_state,
+            CoreState::Running
+        );
+        assert_eq!(registers_while_running.core.state, CoreState::Running);
+        assert_eq!(memory_while_running.core.original_state, CoreState::Running);
+        assert_eq!(memory_while_running.core.state, CoreState::Running);
+        assert_eq!(halt.core.original_state, CoreState::Running);
+        assert_eq!(halt.core.state, CoreState::Halted);
+        assert!(halt.core.state_changed);
+        assert_eq!(
+            halt.operations[3].operation,
+            "core.verify_halted_before_disconnect"
+        );
+        assert!(halt.effects.intentional_final_core_state_change_requested);
+        assert_eq!(
+            halt.operations.last().unwrap().operation,
+            "session.disconnect_preserving_core_state"
+        );
+        assert_eq!(halted.core.state, CoreState::Halted);
+        assert_eq!(
+            halted.operations.last().unwrap().operation,
+            "session.disconnect_preserving_core_state"
+        );
+    }
+
+    #[test]
+    fn missing_post_disconnect_core_state_is_rejected_before_probe_selection() {
+        let mut replay = fixture();
+        replay.capabilities.post_disconnect_core_state = false;
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let error = service
+            .control_core(
+                "deliberately-invalid",
+                &target,
+                0,
+                CoreExecutionAction::Halt,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(error.details["capability"], "post_disconnect_core_state");
+        assert_eq!(error.details["action"], "halt");
+
+        let status_error = service
+            .control_core(
+                "deliberately-invalid",
+                &target,
+                0,
+                CoreExecutionAction::Status,
+            )
+            .unwrap_err();
+        assert_eq!(status_error.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(
+            status_error.details["capability"],
+            "post_disconnect_core_state"
+        );
+
+        let snapshot_error = service
+            .capture_snapshot("deliberately-invalid", &target)
+            .unwrap_err();
+        assert_eq!(snapshot_error.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(
+            snapshot_error.details["capability"],
+            "post_disconnect_core_state"
+        );
+
+        let register_error = service
+            .read_registers("deliberately-invalid", &target, 0, &["pc".to_string()])
+            .unwrap_err();
+        assert_eq!(register_error.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(
+            register_error.details["capability"],
+            "post_disconnect_core_state"
+        );
+
+        let memory_error = service
+            .read_memory("deliberately-invalid", &target, 0, Address(0x2000_7f00), 4)
+            .unwrap_err();
+        assert_eq!(memory_error.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(
+            memory_error.details["capability"],
+            "post_disconnect_core_state"
+        );
+
+        let invalid_memory_error = service
+            .read_memory("deliberately-invalid", &target, 0, Address(0x2000_7f18), 16)
+            .unwrap_err();
+        assert_eq!(invalid_memory_error.code, ErrorCode::ConfigInvalid);
+    }
+
+    #[test]
+    fn invalid_core_control_index_is_rejected_before_a_session_is_opened() {
+        let replay = fixture();
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let error = service
+            .control_core(&probe_id, &target, 1, CoreExecutionAction::Status)
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(error.details["core_count"], 1);
+        assert!(
+            service
+                .control_core(&probe_id, &target, 0, CoreExecutionAction::Status)
                 .is_ok()
         );
     }

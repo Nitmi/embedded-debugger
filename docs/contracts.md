@@ -48,6 +48,8 @@ snapshot, or arbitrary user memory access. Backend attach sequences may still
 access volatile target control state as disclosed by `effects`. A successful
 result contains the session identity, conservative capability matrix, ordered
 `session.attach` and `session.disconnect` records, and `complete=true`.
+It does not guarantee preservation of a pre-existing halted state; probe-rs
+teardown may resume that core and discloses this in `effects`.
 
 `snapshot capture --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` one-shot observation. It attaches to the exact target,
@@ -57,7 +59,9 @@ running, and disconnects. Disabled cores remain in the ordered core inventory
 with `available=false` and an `unavailable_reason`; at least one core must be
 available. The response distinguishes `original_state`, `captured_state`, and
 the final restored `state`. It does not request reset, erase, program, arbitrary
-memory write, or a persistent debug session.
+memory write, or a persistent debug session. A successful response requires
+`post_disconnect_core_state=true`; otherwise the command fails before probe
+selection.
 
 `registers read [name...] --probe <exact-selector> --target <exact-target>
 --core <index>` is an `R1_REVERSIBLE_CONTROL` one-shot observation. It validates
@@ -74,7 +78,8 @@ restored `state`. Unknown or ambiguous names use `CONFIG_INVALID` with the
 available canonical names. A successful response always has at least one
 reading and `effects.core_execution_state_restoration_verified=true`. Replay
 requires explicit `register_cores` evidence for the selected core; it never
-synthesizes register IDs or widths from a legacy PC/SP snapshot.
+synthesizes register IDs or widths from a legacy PC/SP snapshot. A successful
+response also requires `post_disconnect_core_state=true` before probe selection.
 
 `memory read <address> <length> --probe <exact-selector> --target <exact-target>
 --core <index>` is an `R1_REVERSIBLE_CONTROL` one-shot observation. Address and
@@ -91,7 +96,33 @@ response requires exact range/core/byte-count agreement, verified state
 restoration, and disconnect. The read is not an atomic system snapshot: other
 cores, peripherals, and DMA are not halted. Replay requires matching
 `memory_cores` and hexadecimal `memory_blocks`; missing evidence is never
-synthesized.
+synthesized. A successful response also requires
+`post_disconnect_core_state=true` before probe selection; malformed ranges are
+still rejected before this capability check.
+
+`core status|halt|run --probe <exact-selector> --target <exact-target> --core
+<index>` uses one versioned core-state contract. `original_state` is the state
+observed after attach, `state` is the state guaranteed after disconnect, and
+`state_changed` must exactly match their difference. Status cannot change the
+state. Halt must finish halted and run must finish running; repeating either
+action is valid and reports `state_changed=false`. Halted observations may
+include a normalized `halt_reason`, while running observations must not.
+Halt/run set `effects.intentional_final_core_state_change_requested=true`.
+
+A backend must advertise both `core_status` and
+`post_disconnect_core_state` before any core-state command may select or attach
+a probe. Halt and run additionally require their matching capabilities.
+`core_status` alone means the backend can observe state while a session is
+alive; it is deliberately insufficient for a process that immediately tears
+that session down. Replay provides explicit `control_cores` evidence and
+preserves transitions across later operations within one service/backend
+instance. The same post-disconnect capability is required by live snapshot,
+register-read, and memory-read commands because they also report a final
+restored state. Native probe-rs currently sets it false: probe-rs 0.32 session
+teardown resumes a halted Xtensa core and disables Cortex-M halting debug.
+Native observation and control will be enabled through a long-running leased
+session, or after a backend/target pair proves the post-disconnect guarantee.
+Missing guarantees return `CAPABILITY_UNAVAILABLE` before probe discovery.
 
 `snapshot reset-capture --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` reset-policy acceptance command. It requires reset,
@@ -112,10 +143,11 @@ memory writes; whether
 core execution-state restoration was verified; and any known backend-managed
 volatile target changes. probe-rs clears hardware breakpoints during attach and
 may invoke target-specific attach/halt sequences. The ESP32-S3 sequence disables
-several watchdogs. Halting a running core can also interrupt in-flight peripheral
-activity or produce partial external I/O; restoration cannot undo bytes or
-physical actions already emitted. Agents must surface these notes instead of
-treating R1 as R0 read-only behavior.
+several watchdogs, and session teardown can resume a core that was halted before
+attach. Halting a running core can also interrupt in-flight peripheral activity
+or produce partial external I/O; restoration cannot undo bytes or physical
+actions already emitted. Agents must surface these notes instead of treating R1
+as R0 read-only behavior.
 
 ## Exit codes
 
@@ -126,7 +158,7 @@ treating R1 as R0 read-only behavior.
 | 3 | Verification or assertion failed |
 | 4 | Probe or target unavailable |
 | 5 | Timeout |
-| 6 | Backend protocol failure |
+| 6 | Backend capability unavailable or protocol failure |
 | 7 | Configuration, fixture, or input error |
 | 8 | OS or transport permission denied |
 | 10 | Internal invariant or I/O failure |
