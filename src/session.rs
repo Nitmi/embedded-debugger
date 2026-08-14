@@ -13,23 +13,32 @@ use crate::{
     backend::DebugBackend,
     error::{DebugError, ErrorCode, Result},
     model::{
-        CoreExecutionAction, CoreExecutionObservation, SessionInfo,
-        validate_core_execution_observation,
+        Address, CoreExecutionAction, CoreExecutionObservation, DebugControlEffects,
+        MemoryCoreObservation, MemoryReadRange, OperationRecord, RegisterCoreObservation,
+        SessionInfo, validate_core_execution_observation, validate_memory_core_observation,
+        validate_memory_read_range, validate_register_core_observation,
     },
-    service::select_probe,
+    service::{
+        DebugControlEffectRequest, debug_control_effects, select_probe, sha256_bytes,
+        validate_register_request,
+    },
 };
 
 const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const CLOSE_POLICY: &str = "run_observed_cores_before_disconnect";
 const SESSION_STATE_WARNING: &str = "Core state is guaranteed only while this debug session remains open; closing the session or terminating the process may change target state.";
+const HALT_SIDE_EFFECT_WARNING: &str = "Halting a running core may interrupt in-flight peripheral or external I/O; resuming later cannot roll back effects already emitted.";
+const READ_SIDE_EFFECT_WARNING: &str = "The read may briefly halt a running core; external I/O, peripherals, other cores, and DMA are not rolled back or made atomic.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionOpenReport {
     pub transport: &'static str,
     pub state: &'static str,
     pub opened_at: String,
+    pub risk: String,
     pub session: SessionInfo,
+    pub effects: DebugControlEffects,
     pub close_policy: &'static str,
 }
 
@@ -47,7 +56,40 @@ pub struct SessionCoreControlReport {
     pub observed_at: String,
     pub state_scope: &'static str,
     pub session_id: String,
+    pub risk: String,
+    pub effects: DebugControlEffects,
     pub core: CoreExecutionObservation,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionRegisterReadReport {
+    pub read_id: String,
+    pub captured_at: String,
+    pub state_scope: &'static str,
+    pub session_id: String,
+    pub risk: String,
+    pub effects: DebugControlEffects,
+    pub core: RegisterCoreObservation,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionMemoryReadReport {
+    pub read_id: String,
+    pub captured_at: String,
+    pub state_scope: &'static str,
+    pub session_id: String,
+    pub risk: String,
+    pub effects: DebugControlEffects,
+    pub core: MemoryCoreObservation,
+    pub range: MemoryReadRange,
+    pub encoding: String,
+    pub data: String,
+    pub sha256: String,
+    pub operations: Vec<OperationRecord>,
     pub complete: bool,
 }
 
@@ -56,7 +98,10 @@ pub struct SessionCloseReport {
     pub state: &'static str,
     pub session_id: String,
     pub close_policy: &'static str,
+    pub risk: String,
+    pub effects: DebugControlEffects,
     pub final_core_observations: Vec<CoreExecutionObservation>,
+    pub operations: Vec<OperationRecord>,
     pub disconnected: bool,
     pub complete: bool,
 }
@@ -141,7 +186,9 @@ impl<B: DebugBackend> SessionService<B> {
             transport: "stdio_jsonl",
             state: "open",
             opened_at: opened_at.clone(),
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
             session: session.clone(),
+            effects: debug_control_effects(&self.backend, DebugControlEffectRequest::default()),
             close_policy: CLOSE_POLICY,
         };
         self.active = Some(ActiveSession {
@@ -170,33 +217,177 @@ impl<B: DebugBackend> SessionService<B> {
         action: CoreExecutionAction,
     ) -> Result<SessionCoreControlReport> {
         let session = self.require_session(session_id)?.info.clone();
-        if core_index >= session.target.core_count {
-            return Err(DebugError::config(
-                "requested core index is outside the target core inventory",
-                json!({
-                    "core_index": core_index,
-                    "core_count": session.target.core_count,
-                    "target": session.target.name,
-                }),
-            ));
-        }
+        validate_session_core_index(&session, core_index)?;
         require_core_action_capability(self.backend.capabilities(), self.backend.name(), action)?;
 
         let core = self
             .backend
             .control_core_in_session(&session, core_index, action)?;
         validate_control_observation(&session, core_index, action, &core)?;
-        self.active
-            .as_mut()
-            .expect("active session was validated")
-            .observed_cores
-            .insert(core_index);
+        self.track_observed_core(core_index);
 
         Ok(SessionCoreControlReport {
             observed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             state_scope: "active_session",
             session_id: session.session_id,
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    intentional_final_core_state_change_requested: action
+                        != CoreExecutionAction::Status,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
             core,
+            operations: in_session_core_operations(action),
+            complete: true,
+        })
+    }
+
+    pub fn read_registers(
+        &mut self,
+        session_id: &str,
+        core_index: u32,
+        names: &[String],
+    ) -> Result<SessionRegisterReadReport> {
+        let session = self.require_session(session_id)?.info.clone();
+        validate_session_core_index(&session, core_index)?;
+        validate_register_request(names)?;
+        require_capabilities(
+            self.backend.name(),
+            "registers.read",
+            &[
+                ("halt", self.backend.capabilities().halt),
+                ("run", self.backend.capabilities().run),
+                ("register_read", self.backend.capabilities().register_read),
+            ],
+        )?;
+
+        let core = self.backend.read_registers(&session, core_index, names)?;
+        if core.index != core_index {
+            return Err(protocol_error(
+                "backend returned register data for a different core",
+                json!({"requested_core": core_index, "received_core": core.index}),
+            ));
+        }
+        validate_register_core_observation(&session.target, &core).map_err(|problem| {
+            protocol_error(
+                "backend returned an invalid in-session register observation",
+                json!({"problem": problem, "core": core}),
+            )
+        })?;
+        self.track_observed_core(core_index);
+
+        Ok(SessionRegisterReadReport {
+            read_id: format!("reg_{}", Uuid::new_v4().simple()),
+            captured_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            state_scope: "active_session",
+            session_id: session.session_id,
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    core_execution_state_restoration_verified: true,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
+            core,
+            operations: vec![
+                session_operation(1, "target.capture_original_core_state"),
+                session_operation(2, "target.halt_core_if_running"),
+                session_operation(3, "registers.read"),
+                session_operation(4, "target.restore_original_core_state"),
+            ],
+            complete: true,
+        })
+    }
+
+    pub fn read_memory(
+        &mut self,
+        session_id: &str,
+        core_index: u32,
+        start: Address,
+        length: u64,
+    ) -> Result<SessionMemoryReadReport> {
+        let session = self.require_session(session_id)?.info.clone();
+        validate_session_core_index(&session, core_index)?;
+        let range = self.backend.plan_memory_read(core_index, start, length)?;
+        validate_memory_read_range(&range).map_err(|problem| {
+            protocol_error(
+                "backend returned an invalid in-session memory read plan",
+                json!({"problem": problem, "range": range}),
+            )
+        })?;
+        require_capabilities(
+            self.backend.name(),
+            "memory.read",
+            &[
+                ("halt", self.backend.capabilities().halt),
+                ("run", self.backend.capabilities().run),
+                ("memory_read", self.backend.capabilities().memory_read),
+            ],
+        )?;
+
+        let result = self.backend.read_memory(&session, core_index, &range)?;
+        if result.core.index != core_index {
+            return Err(protocol_error(
+                "backend returned memory data for a different core",
+                json!({
+                    "requested_core": core_index,
+                    "received_core": result.core.index,
+                }),
+            ));
+        }
+        if result.range != range {
+            return Err(protocol_error(
+                "backend returned bytes for a different memory range",
+                json!({"planned": range, "received": result.range}),
+            ));
+        }
+        if result.bytes.len() as u64 != range.length {
+            return Err(protocol_error(
+                "backend returned an unexpected number of memory bytes",
+                json!({
+                    "expected": range.length,
+                    "received": result.bytes.len(),
+                }),
+            ));
+        }
+        validate_memory_core_observation(&session.target, &result.core).map_err(|problem| {
+            protocol_error(
+                "backend returned an invalid in-session memory core observation",
+                json!({"problem": problem, "core": result.core}),
+            )
+        })?;
+        self.track_observed_core(core_index);
+
+        Ok(SessionMemoryReadReport {
+            read_id: format!("mem_{}", Uuid::new_v4().simple()),
+            captured_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            state_scope: "active_session",
+            session_id: session.session_id,
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    core_execution_state_restoration_verified: true,
+                    memory_read_requested: true,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
+            core: result.core,
+            range: result.range,
+            encoding: "hex".to_string(),
+            data: hex::encode(&result.bytes),
+            sha256: sha256_bytes(&result.bytes),
+            operations: vec![
+                session_operation(1, "memory.plan_read_range"),
+                session_operation(2, "target.capture_original_core_state"),
+                session_operation(3, "target.halt_core_if_running"),
+                session_operation(4, "memory.read_exact"),
+                session_operation(5, "target.restore_original_core_state"),
+            ],
             complete: true,
         })
     }
@@ -205,10 +396,11 @@ impl<B: DebugBackend> SessionService<B> {
         let active = self.require_session(session_id)?;
         let session = active.info.clone();
         let observed_cores = active.observed_cores.iter().copied().collect::<Vec<_>>();
+        let observed_core_count = observed_cores.len();
 
         let mut final_core_observations = Vec::with_capacity(observed_cores.len());
         let mut resume_failures = Vec::new();
-        for core_index in observed_cores {
+        for core_index in observed_cores.iter().copied() {
             match self.backend.control_core_in_session(
                 &session,
                 core_index,
@@ -232,12 +424,32 @@ impl<B: DebugBackend> SessionService<B> {
             self.active = None;
         }
 
+        let effects = debug_control_effects(
+            &self.backend,
+            DebugControlEffectRequest {
+                intentional_final_core_state_change_requested: observed_core_count != 0,
+                ..DebugControlEffectRequest::default()
+            },
+        );
+        let mut operations = final_core_observations
+            .iter()
+            .enumerate()
+            .map(|(index, _)| session_operation(index as u32 + 1, "core.run_observed_and_verify"))
+            .collect::<Vec<_>>();
+        operations.push(session_operation(
+            operations.len() as u32 + 1,
+            "session.disconnect",
+        ));
+
         match (resume_failures.is_empty(), disconnect_result) {
             (true, Ok(())) => Ok(SessionCloseReport {
                 state: "closed",
                 session_id: session.session_id,
                 close_policy: CLOSE_POLICY,
+                risk: "R1_REVERSIBLE_CONTROL".to_string(),
+                effects,
                 final_core_observations,
+                operations,
                 disconnected: true,
                 complete: true,
             }),
@@ -279,6 +491,14 @@ impl<B: DebugBackend> SessionService<B> {
 
     pub fn has_active_session(&self) -> bool {
         self.active.is_some()
+    }
+
+    fn track_observed_core(&mut self, core_index: u32) {
+        self.active
+            .as_mut()
+            .expect("active session was validated")
+            .observed_cores
+            .insert(core_index);
     }
 
     fn require_session(&self, session_id: &str) -> Result<&ActiveSession> {
@@ -338,6 +558,22 @@ enum SessionOperation {
         #[serde(default)]
         core: u32,
     },
+    #[serde(rename = "registers.read")]
+    RegistersRead {
+        session_id: String,
+        #[serde(default)]
+        core: u32,
+        #[serde(default)]
+        names: Vec<String>,
+    },
+    #[serde(rename = "memory.read")]
+    MemoryRead {
+        session_id: String,
+        #[serde(default)]
+        core: u32,
+        address: Address,
+        length: u64,
+    },
     #[serde(rename = "session.close")]
     Close { session_id: String },
     #[serde(rename = "server.shutdown")]
@@ -352,6 +588,8 @@ impl SessionOperation {
             Self::CoreStatus { .. } => "core.status",
             Self::CoreHalt { .. } => "core.halt",
             Self::CoreRun { .. } => "core.run",
+            Self::RegistersRead { .. } => "registers.read",
+            Self::MemoryRead { .. } => "memory.read",
             Self::Close { .. } => "session.close",
             Self::Shutdown => "server.shutdown",
         }
@@ -539,7 +777,10 @@ fn handle_request<B: DebugBackend>(
                 CoreExecutionAction::Halt,
             )?)
             .expect("session core report always serializes"),
-            vec![SESSION_STATE_WARNING.to_string()],
+            vec![
+                SESSION_STATE_WARNING.to_string(),
+                HALT_SIDE_EFFECT_WARNING.to_string(),
+            ],
             false,
         ),
         SessionOperation::CoreRun { session_id, core } => (
@@ -550,6 +791,33 @@ fn handle_request<B: DebugBackend>(
             )?)
             .expect("session core report always serializes"),
             vec![SESSION_STATE_WARNING.to_string()],
+            false,
+        ),
+        SessionOperation::RegistersRead {
+            session_id,
+            core,
+            names,
+        } => (
+            serde_json::to_value(service.read_registers(session_id, *core, names)?)
+                .expect("session register report always serializes"),
+            vec![
+                SESSION_STATE_WARNING.to_string(),
+                READ_SIDE_EFFECT_WARNING.to_string(),
+            ],
+            false,
+        ),
+        SessionOperation::MemoryRead {
+            session_id,
+            core,
+            address,
+            length,
+        } => (
+            serde_json::to_value(service.read_memory(session_id, *core, *address, *length)?)
+                .expect("session memory report always serializes"),
+            vec![
+                SESSION_STATE_WARNING.to_string(),
+                READ_SIDE_EFFECT_WARNING.to_string(),
+            ],
             false,
         ),
         SessionOperation::Close { session_id } => (
@@ -701,6 +969,62 @@ fn require_core_action_capability(
     Ok(())
 }
 
+fn require_capabilities(backend: &str, operation: &str, required: &[(&str, bool)]) -> Result<()> {
+    if let Some((capability, _)) = required.iter().find(|(_, available)| !available) {
+        return Err(DebugError::new(
+            ErrorCode::CapabilityUnavailable,
+            "selected backend cannot perform the requested in-session operation",
+            6,
+            json!({
+                "backend": backend,
+                "operation": operation,
+                "capability": capability,
+            }),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_session_core_index(session: &SessionInfo, core_index: u32) -> Result<()> {
+    if core_index >= session.target.core_count {
+        return Err(DebugError::config(
+            "requested core index is outside the target core inventory",
+            json!({
+                "core_index": core_index,
+                "core_count": session.target.core_count,
+                "target": session.target.name,
+            }),
+        ));
+    }
+    Ok(())
+}
+
+fn in_session_core_operations(action: CoreExecutionAction) -> Vec<OperationRecord> {
+    match action {
+        CoreExecutionAction::Status => {
+            vec![session_operation(1, "core.read_execution_state")]
+        }
+        CoreExecutionAction::Halt => vec![
+            session_operation(1, "core.read_original_execution_state"),
+            session_operation(2, "core.halt_if_running"),
+            session_operation(3, "core.verify_halted"),
+        ],
+        CoreExecutionAction::Run => vec![
+            session_operation(1, "core.read_original_execution_state"),
+            session_operation(2, "core.run_if_halted"),
+            session_operation(3, "core.verify_running"),
+        ],
+    }
+}
+
+fn session_operation(sequence: u32, operation: &str) -> OperationRecord {
+    OperationRecord {
+        sequence,
+        operation: operation.to_string(),
+        ok: true,
+    }
+}
+
 fn validate_control_observation(
     session: &SessionInfo,
     core_index: u32,
@@ -840,6 +1164,89 @@ mod tests {
 
         assert_eq!(halted.core.state, CoreState::Halted);
         service.close(&opened.session.session_id).unwrap();
+    }
+
+    #[test]
+    fn persistent_reads_preserve_running_and_halted_session_state() {
+        let mut fixture = ReplayFixture::load(Path::new("examples/replay/stm32g4.json")).unwrap();
+        fixture.capabilities.post_disconnect_core_state = false;
+        let mut service = SessionService::new(ReplayBackend::new(fixture));
+        let opened = service
+            .open("replay:stlink-v3:0039002A3432510433343034", "STM32G431CBTx")
+            .unwrap();
+        let session_id = opened.session.session_id;
+
+        service
+            .control_core(&session_id, 0, CoreExecutionAction::Run)
+            .unwrap();
+        let running_registers = service
+            .read_registers(&session_id, 0, &["pc".to_string(), "sp".to_string()])
+            .unwrap();
+        let running_memory = service
+            .read_memory(&session_id, 0, Address(0x2000_7f04), 8)
+            .unwrap();
+
+        assert_eq!(running_registers.core.original_state, CoreState::Running);
+        assert_eq!(running_registers.core.state, CoreState::Running);
+        assert!(
+            running_registers
+                .effects
+                .core_execution_state_restoration_verified
+        );
+        assert_eq!(running_memory.core.original_state, CoreState::Running);
+        assert_eq!(running_memory.core.state, CoreState::Running);
+        assert_eq!(running_memory.data, "0405060708090a0b");
+        assert!(running_memory.effects.memory_read_requested);
+
+        service
+            .control_core(&session_id, 0, CoreExecutionAction::Halt)
+            .unwrap();
+        let halted_registers = service
+            .read_registers(&session_id, 0, &["pc".to_string()])
+            .unwrap();
+        let halted_memory = service
+            .read_memory(&session_id, 0, Address(0x2000_7f04), 8)
+            .unwrap();
+        let halted_status = service
+            .control_core(&session_id, 0, CoreExecutionAction::Status)
+            .unwrap();
+
+        assert_eq!(halted_registers.core.original_state, CoreState::Halted);
+        assert_eq!(halted_registers.core.state, CoreState::Halted);
+        assert_eq!(halted_memory.core.original_state, CoreState::Halted);
+        assert_eq!(halted_memory.core.state, CoreState::Halted);
+        assert_eq!(halted_status.core.state, CoreState::Halted);
+
+        let closed = service.close(&session_id).unwrap();
+        assert_eq!(closed.final_core_observations[0].state, CoreState::Running);
+        assert!(closed.effects.intentional_final_core_state_change_requested);
+    }
+
+    #[test]
+    fn invalid_persistent_read_requests_do_not_touch_core_state() {
+        let mut service = service();
+        let opened = service
+            .open("replay:stlink-v3:0039002A3432510433343034", "STM32G431CBTx")
+            .unwrap();
+        let session_id = opened.session.session_id;
+
+        let duplicate = service
+            .read_registers(&session_id, 0, &["pc".to_string(), "PC".to_string()])
+            .unwrap_err();
+        let outside = service
+            .read_memory(&session_id, 0, Address(0x2000_7f18), 16)
+            .unwrap_err();
+
+        assert_eq!(duplicate.code, ErrorCode::ConfigInvalid);
+        assert_eq!(outside.code, ErrorCode::ConfigInvalid);
+        assert!(
+            service
+                .status(&session_id)
+                .unwrap()
+                .observed_core_indexes
+                .is_empty()
+        );
+        service.close(&session_id).unwrap();
     }
 
     #[test]

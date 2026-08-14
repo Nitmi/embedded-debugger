@@ -101,6 +101,59 @@ fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
         "{}",
         serde_json::json!({
             "schema_version": "1.0",
+            "request_id": "registers",
+            "operation": "registers.read",
+            "session_id": session_id,
+            "core": 0,
+            "names": ["pc", "sp"],
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let registers = read_jsonl_response(&mut stdout);
+    assert_eq!(registers["operation"], "registers.read");
+    assert_eq!(registers["data"]["state_scope"], "active_session");
+    assert_eq!(registers["data"]["core"]["original_state"], "halted");
+    assert_eq!(registers["data"]["core"]["state"], "halted");
+    assert_eq!(
+        registers["data"]["effects"]["core_execution_state_restoration_verified"],
+        true
+    );
+    assert_eq!(
+        registers["data"]["core"]["registers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "memory",
+            "operation": "memory.read",
+            "session_id": session_id,
+            "core": 0,
+            "address": "0x20007F04",
+            "length": 8,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let memory = read_jsonl_response(&mut stdout);
+    assert_eq!(memory["operation"], "memory.read");
+    assert_eq!(memory["data"]["core"]["original_state"], "halted");
+    assert_eq!(memory["data"]["core"]["state"], "halted");
+    assert_eq!(memory["data"]["data"], "0405060708090a0b");
+    assert_eq!(memory["data"]["effects"]["memory_read_requested"], true);
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
             "request_id": "session-status",
             "operation": "session.status",
             "session_id": session_id,

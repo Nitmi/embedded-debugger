@@ -990,7 +990,7 @@ impl<B: DebugBackend> DebugService<B> {
     }
 }
 
-fn validate_register_request(names: &[String]) -> Result<()> {
+pub(crate) fn validate_register_request(names: &[String]) -> Result<()> {
     if names.len() > MAX_REGISTER_READS {
         return Err(DebugError::config(
             "too many register names were requested",
@@ -1021,14 +1021,14 @@ fn validate_register_request(names: &[String]) -> Result<()> {
 }
 
 #[derive(Default)]
-struct DebugControlEffectRequest {
-    core_execution_state_restoration_verified: bool,
-    reset_requested: bool,
-    memory_read_requested: bool,
-    intentional_final_core_state_change_requested: bool,
+pub(crate) struct DebugControlEffectRequest {
+    pub core_execution_state_restoration_verified: bool,
+    pub reset_requested: bool,
+    pub memory_read_requested: bool,
+    pub intentional_final_core_state_change_requested: bool,
 }
 
-fn debug_control_effects<B: DebugBackend>(
+pub(crate) fn debug_control_effects<B: DebugBackend>(
     backend: &B,
     request: DebugControlEffectRequest,
 ) -> DebugControlEffects {
@@ -1409,7 +1409,7 @@ fn with_cleanup_failure(mut primary: DebugError, cleanup: DebugError) -> DebugEr
     primary
 }
 
-fn sha256_bytes(bytes: &[u8]) -> String {
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 

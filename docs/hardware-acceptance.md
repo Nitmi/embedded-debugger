@@ -179,6 +179,27 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   accepts native persistent CPU0 status/halt/run, explicit close, and stdio EOF
   cleanup. It does not yet accept idle expiry, multi-client arbitration, hard
   process termination, or CPU1 control.
+- The same persistent owner now accepts bounded register and memory reads on
+  ESP32-S3 CPU0. A read-only serial baseline produced heartbeats
+  `15797..15800`. While CPU0 was running, `registers.read` returned
+  `pc/sp/lr/a2/ps` and `memory.read` returned 32 mapped-NVM bytes at
+  `0x42000000` with SHA-256
+  `6e5c379f5b716afd7e4915e5881f62d44034c8b6ece90d8490df9f25cc6ce5af`;
+  both reported `running -> halted -> running`, and the next monitor produced
+  heartbeats `15870..15873`. After an explicit halt, the same reads reported
+  `halted -> halted`, a four-second monitor received zero bytes, and a later
+  status still reported halted. Closing the lease then explicitly verified
+  `halted -> running` before disconnecting.
+- A monitor adjacent to that halt/close boundary contained a partial UART log
+  record, as expected when an external write is interrupted. A delayed
+  seven-second read-only monitor then received complete heartbeats
+  `15995..15998` after one residual partial line. All serial events record
+  DTR/RTS=false and no transmitted bytes; both probes were accessible after the
+  lease closed. Artifacts are under
+  `target/hardware-acceptance/2026-08-14-esp32s3-persistent-reads`. This accepts
+  running- and halted-origin persistent reads and explicit close recovery for
+  CPU0, not cross-core/peripheral atomicity or a durable halted state after the
+  lease ends.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.

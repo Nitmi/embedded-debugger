@@ -25,9 +25,10 @@ tool call recreates the teardown race and makes state continuity ambiguous.
    rejected while a lease is active. `server.shutdown` requires an explicit
    `session.close` first.
 5. In-session `core.status`, `core.halt`, and `core.run` use the backend's
-   explicit `control_core_in_session` boundary and report
-   `state_scope="active_session"`.
-   They do not claim a post-disconnect guarantee.
+   explicit `control_core_in_session` boundary. In-session `registers.read` and
+   `memory.read` reuse the bounded read contracts while the same backend
+   session remains alive. Every result reports `state_scope="active_session"`
+   and does not claim a post-disconnect guarantee.
 6. `session.close` explicitly runs every core observed by the service before
    disconnecting (`run_observed_cores_before_disconnect`). EOF and transport
    errors use the same best-effort cleanup path. If cleanup fails, the response
@@ -46,5 +47,8 @@ tool call recreates the teardown race and makes state continuity ambiguous.
 - Closing a session has an explicit running-state policy. A future backend may
   add a capability-qualified restore policy, but it must not silently claim that
   `Session::drop` preserves a halted state.
+- Register and memory reads restore the original core state before returning,
+  but remain R1 operations: transient halt/attach effects and non-atomic
+  external I/O are exposed through structured effects and ordered operations.
 - The JSONL transport is easy to launch from an Agent and easy to replace with
   MCP stdio or a local authenticated socket without changing domain operations.

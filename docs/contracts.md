@@ -286,6 +286,8 @@ ID so stale or foreign clients cannot control the current lease.
 {"schema_version":"1.0","request_id":"req-halt","operation":"core.halt","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-status","operation":"core.status","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-run","operation":"core.run","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-registers","operation":"registers.read","session_id":"ses_<opaque>","core":0,"names":["pc","sp","lr"]}
+{"schema_version":"1.0","request_id":"req-memory","operation":"memory.read","session_id":"ses_<opaque>","core":0,"address":"0x42000000","length":32}
 ```
 
 In-session core responses report `state_scope="active_session"`. They require
@@ -294,12 +296,26 @@ In-session core responses report `state_scope="active_session"`. They require
 or the process terminates. This is distinct from one-shot `core` commands,
 which retain the detach-safe capability gate.
 
+`registers.read` accepts at most 64 unique register names. An empty `names`
+array requests the backend's complete supported register set. `memory.read`
+uses the canonical hexadecimal `address` string and a numeric `length`; the
+request must be 1..4096 bytes and wholly contained in one readable RAM or NVM
+region for the selected core. Range, overflow, overlap, MMIO, and size errors
+are rejected before any target-core read or state change. Both operations
+capture the original core state, halt only when needed, perform the bounded
+read, and restore that state before replying. Their reports include
+`risk="R1_REVERSIBLE_CONTROL"`,
+structured `effects`, ordered `operations`, `complete=true`, and
+`state_scope="active_session"`; they do not claim atomicity for peripherals,
+DMA, other cores, or external UART writes.
+
 `session.status` reports the active identity, open timestamp, close policy, and
 observed core indexes. `session.close` first issues an idempotent run for every
-observed core, verifies those states, disconnects, and reports the final core
-observations. `server.shutdown` succeeds only after the active session has been
-closed. EOF and transport failures invoke the same best-effort close path and
-record cleanup on stderr; an OS-level hard kill or power loss cannot receive a
+observed or read core, verifies those states, disconnects, and reports the
+final core observations plus structured effects and operations.
+`server.shutdown` succeeds only after the active session has been closed. EOF
+and transport failures invoke the same best-effort close path and record
+cleanup on stderr; an OS-level hard kill or power loss cannot receive a
 response and still relies on backend teardown behavior.
 
 General ELF and Intel HEX loading are not yet part of this contract. ESP-IDF

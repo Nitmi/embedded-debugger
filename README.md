@@ -127,11 +127,21 @@ cargo run -- --backend probe-rs session serve --target esp32s3
 
 Write one compact JSON request per stdin line. Start with `session.open` and an
 exact probe/target, then use the returned `session_id` for `session.status`,
-`core.status`, `core.halt`, `core.run`, and `session.close`. Finish with
-`server.shutdown`. Responses are one versioned JSON object per stdout line;
-diagnostics stay on stderr. Core responses are explicitly scoped to the active
-session. Close and stdin EOF run every observed core before disconnecting, so a
-normal client exit does not leave the target paused. See
+`core.status`, `core.halt`, `core.run`, `registers.read`, `memory.read`, and
+`session.close`. For example:
+
+```json
+{"schema_version":"1.0","request_id":"req-registers","operation":"registers.read","session_id":"ses_<opaque>","core":0,"names":["pc","sp","lr"]}
+{"schema_version":"1.0","request_id":"req-memory","operation":"memory.read","session_id":"ses_<opaque>","core":0,"address":"0x42000000","length":32}
+```
+
+Both reads preserve the core's running or halted state within the active lease
+and return structured R1 `effects` plus ordered operations. Memory reads keep
+the same target-region and 4096-byte bounds as the one-shot command. Finish
+with `server.shutdown`. Responses are one versioned JSON object per stdout
+line; diagnostics stay on stderr. Core responses are explicitly scoped to the
+active session. Close and stdin EOF run every observed core before
+disconnecting, so a normal client exit does not leave the target paused. See
 [`docs/contracts.md`](docs/contracts.md) for the wire contract.
 
 Exercise the target's accepted reset policy without flashing it:
