@@ -101,6 +101,29 @@ fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
         "{}",
         serde_json::json!({
             "schema_version": "1.0",
+            "request_id": "step",
+            "operation": "core.step",
+            "session_id": session_id,
+            "core": 0,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let step = read_jsonl_response(&mut stdout);
+    assert_eq!(step["operation"], "core.step");
+    assert_eq!(step["data"]["state_scope"], "active_session");
+    assert_eq!(step["data"]["core"]["original_state"], "halted");
+    assert_eq!(step["data"]["core"]["state"], "halted");
+    assert_eq!(step["data"]["core"]["halt_reason"], "step");
+    assert_eq!(step["data"]["core"]["pc_before"], "0x08001234");
+    assert_eq!(step["data"]["core"]["pc_after"], "0x08001236");
+    assert_eq!(step["data"]["effects"]["instruction_step_requested"], true);
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
             "request_id": "registers",
             "operation": "registers.read",
             "session_id": session_id,
@@ -202,6 +225,112 @@ fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn replay_session_step_rejects_running_core_and_keeps_serving() {
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
+        .args([
+            "--fixture",
+            fixture(),
+            "session",
+            "serve",
+            "--target",
+            "STM32G431CBTx",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "open",
+            "operation": "session.open",
+            "probe": "replay:stlink-v3:0039002A3432510433343034",
+            "target": "STM32G431CBTx",
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let opened = read_jsonl_response(&mut stdout);
+    let session_id = opened["data"]["session"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for (request_id, operation) in [("run", "core.run"), ("step", "core.step")] {
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({
+                "schema_version": "1.0",
+                "request_id": request_id,
+                "operation": operation,
+                "session_id": session_id,
+                "core": 0,
+            })
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+        let response = read_jsonl_response(&mut stdout);
+        if operation == "core.step" {
+            assert_eq!(response["ok"], false);
+            assert_eq!(response["error"]["code"], "CONFIG_INVALID");
+            assert_eq!(response["error"]["details"]["original_state"], "running");
+        }
+    }
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "status",
+            "operation": "core.status",
+            "session_id": session_id,
+            "core": 0,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let status = read_jsonl_response(&mut stdout);
+    assert_eq!(status["data"]["core"]["state"], "running");
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "close",
+            "operation": "session.close",
+            "session_id": session_id,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    assert_eq!(read_jsonl_response(&mut stdout)["ok"], true);
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "shutdown",
+            "operation": "server.shutdown",
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    assert_eq!(read_jsonl_response(&mut stdout)["ok"], true);
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
 }
 
 #[test]
@@ -686,6 +815,50 @@ fn replay_core_run_reports_an_intentional_verified_state_change() {
     assert_eq!(
         result["data"]["operations"][4]["operation"],
         "session.disconnect_preserving_core_state"
+    );
+}
+
+#[test]
+fn replay_core_step_reports_a_halted_instruction_boundary() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "core",
+            "step",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "core.step");
+    assert_eq!(result["data"]["core"]["action"], "step");
+    assert_eq!(result["data"]["core"]["original_state"], "halted");
+    assert_eq!(result["data"]["core"]["state"], "halted");
+    assert_eq!(result["data"]["core"]["state_changed"], false);
+    assert_eq!(result["data"]["core"]["halt_reason"], "step");
+    assert_eq!(result["data"]["core"]["pc_before"], "0x08001234");
+    assert_eq!(result["data"]["core"]["pc_after"], "0x08001236");
+    assert_eq!(
+        result["data"]["effects"]["instruction_step_requested"],
+        true
+    );
+    assert_eq!(
+        result["data"]["effects"]["intentional_final_core_state_change_requested"],
+        false
+    );
+    assert_eq!(
+        result["data"]["operations"][2]["operation"],
+        "core.step_one_instruction"
     );
 }
 

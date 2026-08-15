@@ -58,6 +58,11 @@ All notable changes to this project will be documented in this file.
   one Replay service instance, and intentional-final-state effects. The separate
   `post_disconnect_core_state` capability prevents a one-shot command from
   claiming a state that probe-rs session teardown can change.
+- Versioned `core step` support in Replay, one-shot CLI, and persistent JSONL
+  sessions. Step requires a halted origin, executes one instruction, finishes
+  halted, returns before/after PCs, and reports `instruction_step_requested`;
+  native ESP32-S3 CPU0 passed a persistent-session PC-advance and UART-recovery
+  exercise.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
   unwritten sector bytes, independent read-back verification, reset-and-halt,
   PC/SP/LR snapshot, resume, and disconnect.
@@ -77,14 +82,15 @@ All notable changes to this project will be documented in this file.
   General ELF and Intel HEX are not accepted.
 - Native flashing is limited to readable boot NVM. Multi-core segmented
   execution is physically accepted only on ESP32-S3. RTT, arbitrary
-  memory writes, Generic/MMIO reads, register writes, breakpoints, and persistent
-  sessions are not implemented. Memory reads are one-shot, limited to 4096 bytes,
-  and do not freeze other cores or DMA.
+  memory writes, Generic/MMIO reads, register writes, hardware breakpoints,
+  and persistent lease timeout/cancellation are not implemented. Memory reads
+  are limited to 4096 bytes and do not freeze other cores or DMA.
 - Native probe-rs one-shot live snapshot, register read, memory read, core
-  status, core halt, and core run are exposed only as explicit
-  `CAPABILITY_UNAVAILABLE` results. probe-rs 0.32 teardown resumes halted Xtensa
-  cores and disables Cortex-M halting debug, so detach-safe observation and
-  durable control require a future long-running session owner.
+  status, core halt, core run, and core step are exposed only as explicit
+  `CAPABILITY_UNAVAILABLE` results. The persistent JSONL owner now provides
+  session-scoped status/halt/run/step plus bounded register and memory reads
+  while the lease is alive. probe-rs 0.32 teardown resumes halted Xtensa cores
+  and disables Cortex-M halting debug, so the one-shot commands remain gated.
 - Native attach/disconnect is verified on nRF52840/J-Link and ESP32-S3/native
   USB-JTAG. nRF52840 single-page guarded write acceptance passed, including
   exact confirmation, read-back, page preservation, post-reset snapshot,

@@ -100,18 +100,23 @@ synthesized. A successful response also requires
 `post_disconnect_core_state=true` before probe selection; malformed ranges are
 still rejected before this capability check.
 
-`core status|halt|run --probe <exact-selector> --target <exact-target> --core
+`core status|halt|run|step --probe <exact-selector> --target <exact-target> --core
 <index>` uses one versioned core-state contract. `original_state` is the state
 observed after attach, `state` is the state guaranteed after disconnect, and
 `state_changed` must exactly match their difference. Status cannot change the
 state. Halt must finish halted and run must finish running; repeating either
-action is valid and reports `state_changed=false`. Halted observations may
-include a normalized `halt_reason`, while running observations must not.
-Halt/run set `effects.intentional_final_core_state_change_requested=true`.
+action is valid and reports `state_changed=false`. Step requires
+`original_state=halted`, executes one instruction, finishes halted, and reports
+the normalized `halt_reason="step"`, explicit `pc_before`/`pc_after` evidence
+plus `effects.instruction_step_requested=true`; it does not set
+`intentional_final_core_state_change_requested` because the final execution
+state remains halted. Halted observations may include a normalized
+`halt_reason`, while running observations must not. Halt/run set
+`effects.intentional_final_core_state_change_requested=true`.
 
 A backend must advertise both `core_status` and
 `post_disconnect_core_state` before any core-state command may select or attach
-a probe. Halt and run additionally require their matching capabilities.
+a probe. Halt, run, and step additionally require their matching capabilities.
 `core_status` alone means the backend can observe state while a session is
 alive; it is deliberately insufficient for a process that immediately tears
 that session down. Replay provides explicit `control_cores` evidence and
@@ -120,9 +125,11 @@ instance. The same post-disconnect capability is required by live snapshot,
 register-read, and memory-read commands because they also report a final
 restored state. Native probe-rs currently sets it false: probe-rs 0.32 session
 teardown resumes a halted Xtensa core and disables Cortex-M halting debug.
-Native observation and control will be enabled through a long-running leased
-session, or after a backend/target pair proves the post-disconnect guarantee.
-Missing guarantees return `CAPABILITY_UNAVAILABLE` before probe discovery.
+Native observation and control are available through the long-running
+`session serve` lease and report `state_scope="active_session"`. One-shot native
+commands remain gated until a backend/target pair proves the post-disconnect
+guarantee. Missing guarantees return `CAPABILITY_UNAVAILABLE` before probe
+discovery.
 
 `snapshot reset-capture --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` reset-policy acceptance command. It requires reset,
@@ -135,11 +142,11 @@ memory write. CPU0 is expected to run after the workflow. Secondary cores retain
 the running or halted state observed immediately after the target reset sequence.
 
 R1 debug control is not equivalent to side-effect-free target inspection.
-`probes test`, `registers read`, `memory read`, `snapshot capture`, and
-`snapshot reset-capture` return an
-`effects` object. It records
-whether the command requested reset, Flash, bounded memory read, or arbitrary
-memory writes; whether
+`probes test`, `core status|halt|run|step`, `registers read`, `memory read`,
+`snapshot capture`, and `snapshot reset-capture` return an `effects` object. It
+records
+whether the command requested reset, Flash, a single instruction step, bounded
+memory read, or arbitrary memory writes; whether
 core execution-state restoration was verified; and any known backend-managed
 volatile target changes. probe-rs clears hardware breakpoints during attach and
 may invoke target-specific attach/halt sequences. The ESP32-S3 sequence disables
@@ -286,6 +293,7 @@ ID so stale or foreign clients cannot control the current lease.
 {"schema_version":"1.0","request_id":"req-halt","operation":"core.halt","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-status","operation":"core.status","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-run","operation":"core.run","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-step","operation":"core.step","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-registers","operation":"registers.read","session_id":"ses_<opaque>","core":0,"names":["pc","sp","lr"]}
 {"schema_version":"1.0","request_id":"req-memory","operation":"memory.read","session_id":"ses_<opaque>","core":0,"address":"0x42000000","length":32}
 ```
@@ -295,6 +303,11 @@ In-session core responses report `state_scope="active_session"`. They require
 `post_disconnect_core_state`: their state guarantee ends when the lease closes
 or the process terminates. This is distinct from one-shot `core` commands,
 which retain the detach-safe capability gate.
+
+`core.step` additionally requires the selected core to already be halted. A
+running-origin step is rejected with `CONFIG_INVALID` before the backend issues
+the instruction, so the lease remains running and the request cannot silently
+turn step into halt-plus-step.
 
 `registers.read` accepts at most 64 unique register names. An empty `names`
 array requests the backend's complete supported register set. `memory.read`

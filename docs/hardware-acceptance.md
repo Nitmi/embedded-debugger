@@ -200,6 +200,29 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   running- and halted-origin persistent reads and explicit close recovery for
   CPU0, not cross-core/peripheral atomicity or a durable halted state after the
   lease ends.
+- On 2026-08-15, the same exact ESP32-S3 probe passed persistent single-step:
+  a read-only baseline at 115200 baud observed `heartbeat=902..906`; inside one
+  lease, CPU0 was halted, `registers.read(pc)` captured `0x420129E4`,
+  `core.step` returned `halted -> halted` with `halt_reason=step` and
+  `instruction_step_requested=true`, and the next `registers.read(pc)` was
+  `0x420129E7`. `core.status` remained halted, `core.run` resumed the core,
+  and `session.close` verified `running -> running`. A delayed six-second
+  monitor then observed complete heartbeats `961..966`. All serial monitors
+  used DTR/RTS=false and transmitted no bytes; artifacts are under
+  `target/hardware-acceptance/2026-08-15-esp32s3-persistent-step`. This
+  accepts CPU0 single-step while halted, not running-origin step, CPU1 step,
+  or a durable halted state after lease teardown.
+- After `pc_before`/`pc_after` became part of the step response itself, the
+  rebuilt binary passed a second self-contained exercise on the same probe.
+  The read-only baseline observed complete heartbeats `3825..3829`;
+  `core.step` itself reported `pc_before=0x42012A3A`,
+  `pc_after=0x42012A3D`, `halted -> halted`, and
+  `instruction_step_requested=true`. `core.run` and `session.close` both
+  verified a running final state, the probe was accessible immediately after
+  close, and the next monitor received complete heartbeats `3906..3907` after
+  residual partial UART text at the halt/resume boundary. The monitor metadata
+  again records DTR/RTS=false and no transmitted bytes. This directly accepts
+  the versioned step response without relying on separate register reads.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.

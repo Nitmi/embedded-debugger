@@ -126,7 +126,8 @@
       "name": "core0",
       "architecture": "armv7em",
       "state": "halted",
-      "halt_reason": "breakpoint"
+      "halt_reason": "breakpoint",
+      "step_pcs": ["0x08001234", "0x08001236"]
     }
   ],
   "flash": {

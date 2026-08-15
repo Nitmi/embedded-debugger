@@ -339,6 +339,16 @@ impl<B: DebugBackend> DebugService<B> {
                         .then_some("post_disconnect_core_state")
                 }
             }
+            CoreExecutionAction::Step => {
+                if !capabilities.core_status {
+                    Some("core_status")
+                } else if !capabilities.step {
+                    Some("step")
+                } else {
+                    (!capabilities.post_disconnect_core_state)
+                        .then_some("post_disconnect_core_state")
+                }
+            }
         };
         if let Some(capability) = required_capability {
             return Err(DebugError::new(
@@ -409,6 +419,13 @@ impl<B: DebugBackend> DebugService<B> {
                 operation(4, "core.verify_running_before_disconnect"),
                 operation(5, "session.disconnect_preserving_core_state"),
             ],
+            CoreExecutionAction::Step => vec![
+                operation(1, "session.attach"),
+                operation(2, "core.read_original_execution_state"),
+                operation(3, "core.step_one_instruction"),
+                operation(4, "core.verify_halted_before_disconnect"),
+                operation(5, "session.disconnect_preserving_core_state"),
+            ],
         };
 
         Ok(CoreControlReport {
@@ -419,8 +436,11 @@ impl<B: DebugBackend> DebugService<B> {
             effects: debug_control_effects(
                 &self.backend,
                 DebugControlEffectRequest {
-                    intentional_final_core_state_change_requested: action
-                        != CoreExecutionAction::Status,
+                    instruction_step_requested: action == CoreExecutionAction::Step,
+                    intentional_final_core_state_change_requested: matches!(
+                        action,
+                        CoreExecutionAction::Halt | CoreExecutionAction::Run
+                    ),
                     ..DebugControlEffectRequest::default()
                 },
             ),
@@ -1025,6 +1045,7 @@ pub(crate) struct DebugControlEffectRequest {
     pub core_execution_state_restoration_verified: bool,
     pub reset_requested: bool,
     pub memory_read_requested: bool,
+    pub instruction_step_requested: bool,
     pub intentional_final_core_state_change_requested: bool,
 }
 
@@ -1037,6 +1058,7 @@ pub(crate) fn debug_control_effects<B: DebugBackend>(
         reset_requested: request.reset_requested,
         flash_operation_requested: false,
         memory_read_requested: request.memory_read_requested,
+        instruction_step_requested: request.instruction_step_requested,
         intentional_final_core_state_change_requested: request
             .intentional_final_core_state_change_requested,
         arbitrary_memory_write_requested: false,

@@ -142,6 +142,7 @@ pub enum CoreExecutionAction {
     Status,
     Halt,
     Run,
+    Step,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +226,10 @@ pub struct CoreExecutionObservation {
     pub state: CoreState,
     pub state_changed: bool,
     pub halt_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pc_before: Option<Address>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pc_after: Option<Address>,
 }
 
 fn unknown_core_state() -> CoreState {
@@ -452,6 +457,8 @@ pub struct DebugControlEffects {
     #[serde(default)]
     pub memory_read_requested: bool,
     #[serde(default)]
+    pub instruction_step_requested: bool,
+    #[serde(default)]
     pub intentional_final_core_state_change_requested: bool,
     pub arbitrary_memory_write_requested: bool,
     pub core_execution_state_restoration_verified: bool,
@@ -570,7 +577,35 @@ pub fn validate_core_execution_observation(
         CoreExecutionAction::Run if core.state != CoreState::Running => {
             return Err(format!("core {} did not finish running", core.index));
         }
+        CoreExecutionAction::Step if core.original_state != CoreState::Halted => {
+            return Err(format!(
+                "core {} step must start from a halted state",
+                core.index
+            ));
+        }
+        CoreExecutionAction::Step if core.state != CoreState::Halted => {
+            return Err(format!("core {} step did not finish halted", core.index));
+        }
+        CoreExecutionAction::Step if core.halt_reason.as_deref() != Some("step") => {
+            return Err(format!(
+                "core {} step requires the normalized step halt reason",
+                core.index
+            ));
+        }
         _ => {}
+    }
+    if core.action == CoreExecutionAction::Step {
+        let (Some(_pc_before), Some(_pc_after)) = (core.pc_before, core.pc_after) else {
+            return Err(format!(
+                "core {} step requires before/after PCs",
+                core.index
+            ));
+        };
+    } else if core.pc_before.is_some() || core.pc_after.is_some() {
+        return Err(format!(
+            "core {} non-step observation contains step PC evidence",
+            core.index
+        ));
     }
     if core.state == CoreState::Running && core.halt_reason.is_some() {
         return Err(format!(
@@ -1199,6 +1234,8 @@ mod tests {
             state: CoreState::Halted,
             state_changed: false,
             halt_reason: Some("breakpoint".to_string()),
+            pc_before: None,
+            pc_after: None,
         };
 
         assert!(validate_core_execution_observation(&target, &observation).is_ok());
@@ -1216,6 +1253,38 @@ mod tests {
             validate_core_execution_observation(&target, &observation)
                 .unwrap_err()
                 .contains("halt reason")
+        );
+
+        observation.action = CoreExecutionAction::Step;
+        observation.original_state = CoreState::Halted;
+        observation.state = CoreState::Halted;
+        observation.state_changed = false;
+        observation.halt_reason = Some("step".to_string());
+        observation.pc_before = Some(Address(0x0800_1234));
+        observation.pc_after = Some(Address(0x0800_1236));
+        assert!(validate_core_execution_observation(&target, &observation).is_ok());
+
+        observation.halt_reason = Some("request".to_string());
+        assert!(
+            validate_core_execution_observation(&target, &observation)
+                .unwrap_err()
+                .contains("normalized step halt reason")
+        );
+        observation.halt_reason = Some("step".to_string());
+
+        observation.pc_after = None;
+        assert!(
+            validate_core_execution_observation(&target, &observation)
+                .unwrap_err()
+                .contains("before/after PCs")
+        );
+
+        observation.action = CoreExecutionAction::Status;
+        observation.pc_after = Some(Address(0x0800_1236));
+        assert!(
+            validate_core_execution_observation(&target, &observation)
+                .unwrap_err()
+                .contains("non-step observation")
         );
     }
 }

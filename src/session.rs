@@ -29,6 +29,7 @@ const MAX_REQUEST_ID_BYTES: usize = 128;
 const CLOSE_POLICY: &str = "run_observed_cores_before_disconnect";
 const SESSION_STATE_WARNING: &str = "Core state is guaranteed only while this debug session remains open; closing the session or terminating the process may change target state.";
 const HALT_SIDE_EFFECT_WARNING: &str = "Halting a running core may interrupt in-flight peripheral or external I/O; resuming later cannot roll back effects already emitted.";
+const STEP_SIDE_EFFECT_WARNING: &str = "Stepping executes one target instruction while halted; it may mutate registers, memory, peripherals, and external I/O.";
 const READ_SIDE_EFFECT_WARNING: &str = "The read may briefly halt a running core; external I/O, peripherals, other cores, and DMA are not rolled back or made atomic.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -234,8 +235,11 @@ impl<B: DebugBackend> SessionService<B> {
             effects: debug_control_effects(
                 &self.backend,
                 DebugControlEffectRequest {
-                    intentional_final_core_state_change_requested: action
-                        != CoreExecutionAction::Status,
+                    instruction_step_requested: action == CoreExecutionAction::Step,
+                    intentional_final_core_state_change_requested: matches!(
+                        action,
+                        CoreExecutionAction::Halt | CoreExecutionAction::Run
+                    ),
                     ..DebugControlEffectRequest::default()
                 },
             ),
@@ -558,6 +562,12 @@ enum SessionOperation {
         #[serde(default)]
         core: u32,
     },
+    #[serde(rename = "core.step")]
+    CoreStep {
+        session_id: String,
+        #[serde(default)]
+        core: u32,
+    },
     #[serde(rename = "registers.read")]
     RegistersRead {
         session_id: String,
@@ -588,6 +598,7 @@ impl SessionOperation {
             Self::CoreStatus { .. } => "core.status",
             Self::CoreHalt { .. } => "core.halt",
             Self::CoreRun { .. } => "core.run",
+            Self::CoreStep { .. } => "core.step",
             Self::RegistersRead { .. } => "registers.read",
             Self::MemoryRead { .. } => "memory.read",
             Self::Close { .. } => "session.close",
@@ -793,6 +804,19 @@ fn handle_request<B: DebugBackend>(
             vec![SESSION_STATE_WARNING.to_string()],
             false,
         ),
+        SessionOperation::CoreStep { session_id, core } => (
+            serde_json::to_value(service.control_core(
+                session_id,
+                *core,
+                CoreExecutionAction::Step,
+            )?)
+            .expect("session core report always serializes"),
+            vec![
+                SESSION_STATE_WARNING.to_string(),
+                STEP_SIDE_EFFECT_WARNING.to_string(),
+            ],
+            false,
+        ),
         SessionOperation::RegistersRead {
             session_id,
             core,
@@ -956,6 +980,8 @@ fn require_core_action_capability(
         CoreExecutionAction::Halt if !capabilities.halt => Some("halt"),
         CoreExecutionAction::Run if !capabilities.core_status => Some("core_status"),
         CoreExecutionAction::Run if !capabilities.run => Some("run"),
+        CoreExecutionAction::Step if !capabilities.core_status => Some("core_status"),
+        CoreExecutionAction::Step if !capabilities.step => Some("step"),
         _ => None,
     };
     if let Some(capability) = missing {
@@ -1013,6 +1039,11 @@ fn in_session_core_operations(action: CoreExecutionAction) -> Vec<OperationRecor
             session_operation(1, "core.read_original_execution_state"),
             session_operation(2, "core.run_if_halted"),
             session_operation(3, "core.verify_running"),
+        ],
+        CoreExecutionAction::Step => vec![
+            session_operation(1, "core.read_original_execution_state"),
+            session_operation(2, "core.step_one_instruction"),
+            session_operation(3, "core.verify_halted"),
         ],
     }
 }
@@ -1201,6 +1232,9 @@ mod tests {
         service
             .control_core(&session_id, 0, CoreExecutionAction::Halt)
             .unwrap();
+        let stepped = service
+            .control_core(&session_id, 0, CoreExecutionAction::Step)
+            .unwrap();
         let halted_registers = service
             .read_registers(&session_id, 0, &["pc".to_string()])
             .unwrap();
@@ -1216,10 +1250,49 @@ mod tests {
         assert_eq!(halted_memory.core.original_state, CoreState::Halted);
         assert_eq!(halted_memory.core.state, CoreState::Halted);
         assert_eq!(halted_status.core.state, CoreState::Halted);
+        assert_eq!(stepped.core.original_state, CoreState::Halted);
+        assert_eq!(stepped.core.state, CoreState::Halted);
+        assert_eq!(stepped.core.halt_reason.as_deref(), Some("step"));
+        assert_eq!(stepped.core.pc_before, Some(Address(0x0800_1234)));
+        assert_eq!(stepped.core.pc_after, Some(Address(0x0800_1236)));
+        assert!(stepped.effects.instruction_step_requested);
+        assert!(
+            !stepped
+                .effects
+                .intentional_final_core_state_change_requested
+        );
 
         let closed = service.close(&session_id).unwrap();
         assert_eq!(closed.final_core_observations[0].state, CoreState::Running);
         assert!(closed.effects.intentional_final_core_state_change_requested);
+    }
+
+    #[test]
+    fn persistent_step_requires_halted_state_without_mutating_the_lease() {
+        let mut service = service();
+        let opened = service
+            .open("replay:stlink-v3:0039002A3432510433343034", "STM32G431CBTx")
+            .unwrap();
+        let session_id = opened.session.session_id;
+
+        service
+            .control_core(&session_id, 0, CoreExecutionAction::Run)
+            .unwrap();
+        let error = service
+            .control_core(&session_id, 0, CoreExecutionAction::Step)
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(error.details["original_state"], "running");
+        assert_eq!(
+            service
+                .control_core(&session_id, 0, CoreExecutionAction::Status)
+                .unwrap()
+                .core
+                .state,
+            CoreState::Running
+        );
+        service.close(&session_id).unwrap();
     }
 
     #[test]

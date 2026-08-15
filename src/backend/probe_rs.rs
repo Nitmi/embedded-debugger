@@ -83,6 +83,7 @@ impl ProbeRsBackend {
         let accepted_esp32s3_post_reset = target.name.eq_ignore_ascii_case("esp32s3");
         let accepted_esp32s3_segmented_flash = target.name.eq_ignore_ascii_case("esp32s3");
         let accepted_esp32s3_memory_read = target.name.eq_ignore_ascii_case("esp32s3");
+        let accepted_esp32s3_step = target.name.eq_ignore_ascii_case("esp32s3");
         let flash = !target.flash_algorithms.is_empty();
         let target_info = TargetInfo {
             name: target.name.clone(),
@@ -99,7 +100,9 @@ impl ProbeRsBackend {
             halt: true,
             run: true,
             reset: single_core || accepted_esp32s3_post_reset,
-            step: single_core,
+            // probe-rs implements Xtensa single-instruction stepping; this is
+            // accepted for CPU0 on ESP32-S3 and for single-core targets.
+            step: single_core || accepted_esp32s3_step,
             core_status: true,
             // A probe-rs Session may alter execution state while it is dropped. In
             // particular, Xtensa leave_debug_mode resumes a halted core.
@@ -1014,6 +1017,23 @@ impl DebugBackend for ProbeRsBackend {
                 }),
             ));
         }
+        if action == CoreExecutionAction::Step
+            && self.target_info.name.eq_ignore_ascii_case("esp32s3")
+            && core_index != 0
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "single-step is not physically accepted for the selected target core",
+                6,
+                json!({
+                    "action": action,
+                    "capability": "step",
+                    "core_index": core_index,
+                    "accepted_core_indexes": [0],
+                    "target": self.target_info.name,
+                }),
+            ));
+        }
         let index = core_index as usize;
         let (core_name, architecture) = self
             .target
@@ -1057,6 +1077,8 @@ impl DebugBackend for ProbeRsBackend {
             .map_err(|error| map_core_error("read original core state", error))?;
         let original_state = live_core_state(index, original_status)
             .map_err(|error| map_core_error("determine original core state", error))?;
+        let mut step_pc_before = None;
+        let mut step_pc_after = None;
         match (action, original_state) {
             (CoreExecutionAction::Halt, CoreState::Running) => core
                 .halt(CORE_OPERATION_TIMEOUT)
@@ -1065,6 +1087,27 @@ impl DebugBackend for ProbeRsBackend {
             (CoreExecutionAction::Run, CoreState::Halted) => core
                 .run()
                 .map_err(|error| map_core_error("run selected core", error))?,
+            (CoreExecutionAction::Step, CoreState::Halted) => {
+                step_pc_before = Some(Address(
+                    core.read_core_reg::<u64>(core.program_counter().id())
+                        .map_err(|error| map_core_error("read PC before step", error))?,
+                ));
+                step_pc_after = Some(Address(
+                    core.step()
+                        .map_err(|error| map_core_error("step selected core", error))?
+                        .pc,
+                ));
+            }
+            (CoreExecutionAction::Step, CoreState::Running) => {
+                return Err(DebugError::config(
+                    "core.step requires the selected core to be halted",
+                    json!({
+                        "core_index": core_index,
+                        "action": action,
+                        "original_state": original_state,
+                    }),
+                ));
+            }
             _ => {}
         }
         let final_status = core
@@ -1076,6 +1119,7 @@ impl DebugBackend for ProbeRsBackend {
             CoreExecutionAction::Status => original_state,
             CoreExecutionAction::Halt => CoreState::Halted,
             CoreExecutionAction::Run => CoreState::Running,
+            CoreExecutionAction::Step => CoreState::Halted,
         };
         if state != expected {
             return Err(DebugError::new(
@@ -1099,6 +1143,8 @@ impl DebugBackend for ProbeRsBackend {
             state,
             state_changed: original_state != state,
             halt_reason: halt_reason(final_status),
+            pc_before: step_pc_before,
+            pc_after: step_pc_after,
         })
     }
 
@@ -1985,6 +2031,14 @@ fn halt_reason(status: CoreStatus) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn esp32s3_advertises_physically_accepted_step_support() {
+        let backend = ProbeRsBackend::new("esp32s3").unwrap();
+
+        assert!(backend.capabilities().step);
+        assert_eq!(backend.target().core_count, 2);
+    }
 
     #[test]
     fn known_target_resolves_write_and_sector_erase_ranges() {

@@ -52,6 +52,8 @@ pub struct ReplayCoreState {
     pub architecture: String,
     pub state: CoreState,
     pub halt_reason: Option<String>,
+    #[serde(default)]
+    pub step_pcs: Vec<Address>,
 }
 
 fn default_true() -> bool {
@@ -228,6 +230,8 @@ impl ReplayFixture {
                 state: core.state,
                 state_changed: false,
                 halt_reason: core.halt_reason.clone(),
+                pc_before: None,
+                pc_after: None,
             };
             if let Err(problem) = validate_core_execution_observation(&self.target, &observation) {
                 return Err(DebugError::fixture(
@@ -240,6 +244,26 @@ impl ReplayFixture {
             return Err(DebugError::fixture(
                 "core status capability requires explicit execution-control evidence",
                 json!({"control_core_count": 0}),
+            ));
+        }
+        if self.capabilities.step
+            && self.capabilities.core_status
+            && self
+                .control_cores
+                .iter()
+                .any(|core| core.step_pcs.len() < 2)
+        {
+            return Err(DebugError::fixture(
+                "step capability requires explicit before/after PC evidence for every control core",
+                json!({
+                    "capability": "step",
+                    "missing_core_indexes": self
+                        .control_cores
+                        .iter()
+                        .filter(|core| core.step_pcs.len() < 2)
+                        .map(|core| core.index)
+                        .collect::<Vec<_>>()
+                }),
             ));
         }
         if self.capabilities.post_disconnect_core_state && !self.capabilities.core_status {
@@ -797,6 +821,7 @@ impl DebugBackend for ReplayBackend {
             }
             CoreExecutionAction::Halt if !self.fixture.capabilities.halt => Some("halt"),
             CoreExecutionAction::Run if !self.fixture.capabilities.run => Some("run"),
+            CoreExecutionAction::Step if !self.fixture.capabilities.step => Some("step"),
             _ if !self.fixture.capabilities.core_status => Some("core_status"),
             _ => None,
         };
@@ -820,6 +845,16 @@ impl DebugBackend for ReplayBackend {
             })?;
         let core = &self.control_cores[position];
         let original_state = core.state;
+        if action == CoreExecutionAction::Step && original_state != CoreState::Halted {
+            return Err(DebugError::config(
+                "core.step requires the selected core to be halted",
+                json!({
+                    "core_index": core_index,
+                    "action": action,
+                    "original_state": original_state,
+                }),
+            ));
+        }
         let (state, halt_reason) = match action {
             CoreExecutionAction::Status => (core.state, core.halt_reason.clone()),
             CoreExecutionAction::Halt => (
@@ -831,6 +866,18 @@ impl DebugBackend for ReplayBackend {
                 },
             ),
             CoreExecutionAction::Run => (CoreState::Running, None),
+            CoreExecutionAction::Step => (CoreState::Halted, Some("step".to_string())),
+        };
+        let (pc_before, pc_after) = if action == CoreExecutionAction::Step {
+            let [before, after, ..] = self.control_cores[position].step_pcs.as_slice() else {
+                return Err(DebugError::fixture(
+                    "replay fixture has no remaining step PC evidence for the requested core",
+                    json!({"core_index": core_index}),
+                ));
+            };
+            (Some(*before), Some(*after))
+        } else {
+            (None, None)
         };
         let observation = CoreExecutionObservation {
             index: core.index,
@@ -841,6 +888,8 @@ impl DebugBackend for ReplayBackend {
             state,
             state_changed: original_state != state,
             halt_reason: halt_reason.clone(),
+            pc_before,
+            pc_after,
         };
         validate_core_execution_observation(&self.fixture.target, &observation).map_err(
             |problem| {
@@ -852,6 +901,9 @@ impl DebugBackend for ReplayBackend {
         )?;
         self.control_cores[position].state = state;
         self.control_cores[position].halt_reason = halt_reason;
+        if action == CoreExecutionAction::Step {
+            self.control_cores[position].step_pcs.remove(0);
+        }
         Ok(observation)
     }
 
@@ -1522,6 +1574,9 @@ mod tests {
         let halted = backend
             .control_core_in_session(&session, 0, CoreExecutionAction::Halt)
             .unwrap();
+        let stepped = backend
+            .control_core_in_session(&session, 0, CoreExecutionAction::Step)
+            .unwrap();
 
         assert_eq!(initial.state, CoreState::Halted);
         assert!(!initial.state_changed);
@@ -1535,6 +1590,12 @@ mod tests {
         assert_eq!(halted.state, CoreState::Halted);
         assert!(halted.state_changed);
         assert_eq!(halted.halt_reason.as_deref(), Some("request"));
+        assert_eq!(stepped.original_state, CoreState::Halted);
+        assert_eq!(stepped.state, CoreState::Halted);
+        assert!(!stepped.state_changed);
+        assert_eq!(stepped.halt_reason.as_deref(), Some("step"));
+        assert_eq!(stepped.pc_before, Some(Address(0x0800_1234)));
+        assert_eq!(stepped.pc_after, Some(Address(0x0800_1236)));
         backend.disconnect(&session).unwrap();
     }
 
@@ -1565,6 +1626,18 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::FixtureInvalid);
         assert_eq!(error.details["control_core_count"], 0);
+    }
+
+    #[test]
+    fn step_capability_requires_explicit_pc_evidence_for_every_control_core() {
+        let mut fixture = fixture();
+        fixture.control_cores[0].step_pcs.clear();
+
+        let error = fixture.validate().unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FixtureInvalid);
+        assert_eq!(error.details["capability"], "step");
+        assert_eq!(error.details["missing_core_indexes"], json!([0]));
     }
 
     #[test]
