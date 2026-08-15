@@ -114,6 +114,8 @@ pub struct Capabilities {
     pub verify: bool,
     pub halt: bool,
     pub run: bool,
+    #[serde(default)]
+    pub continue_execution: bool,
     pub reset: bool,
     pub step: bool,
     #[serde(default)]
@@ -142,6 +144,7 @@ pub enum CoreExecutionAction {
     Status,
     Halt,
     Run,
+    Continue,
     Step,
 }
 
@@ -230,6 +233,41 @@ pub struct CoreExecutionObservation {
     pub pc_before: Option<Address>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pc_after: Option<Address>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HardwareBreakpointAction {
+    List,
+    Set,
+    Clear,
+    ClearAll,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardwareBreakpointSlot {
+    pub index: u32,
+    pub address: Option<Address>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardwareBreakpointObservation {
+    pub index: u32,
+    pub name: String,
+    pub architecture: String,
+    pub action: HardwareBreakpointAction,
+    pub original_state: CoreState,
+    pub state: CoreState,
+    pub capacity: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_address: Option<Address>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_slot: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_slot: Option<u32>,
+    pub before: Vec<HardwareBreakpointSlot>,
+    pub after: Vec<HardwareBreakpointSlot>,
+    pub changed: bool,
 }
 
 fn unknown_core_state() -> CoreState {
@@ -459,6 +497,12 @@ pub struct DebugControlEffects {
     #[serde(default)]
     pub instruction_step_requested: bool,
     #[serde(default)]
+    pub execution_continue_requested: bool,
+    #[serde(default)]
+    pub hardware_breakpoint_configuration_requested: bool,
+    #[serde(default)]
+    pub hardware_breakpoint_state_verified: bool,
+    #[serde(default)]
     pub intentional_final_core_state_change_requested: bool,
     pub arbitrary_memory_write_requested: bool,
     pub core_execution_state_restoration_verified: bool,
@@ -577,6 +621,24 @@ pub fn validate_core_execution_observation(
         CoreExecutionAction::Run if core.state != CoreState::Running => {
             return Err(format!("core {} did not finish running", core.index));
         }
+        CoreExecutionAction::Continue if core.original_state != CoreState::Halted => {
+            return Err(format!(
+                "core {} continue must start from a halted state",
+                core.index
+            ));
+        }
+        CoreExecutionAction::Continue
+            if core.state == CoreState::Halted
+                && !core
+                    .halt_reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.trim().is_empty()) =>
+        {
+            return Err(format!(
+                "core {} halted continue result requires a halt reason",
+                core.index
+            ));
+        }
         CoreExecutionAction::Step if core.original_state != CoreState::Halted => {
             return Err(format!(
                 "core {} step must start from a halted state",
@@ -611,6 +673,215 @@ pub fn validate_core_execution_observation(
         return Err(format!(
             "core {} is running but still contains a halt reason",
             core.index
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_hardware_breakpoint_observation(
+    target: &TargetInfo,
+    observation: &HardwareBreakpointObservation,
+) -> std::result::Result<(), String> {
+    if observation.index >= target.core_count {
+        return Err(format!(
+            "core index {} is outside target core count {}",
+            observation.index, target.core_count
+        ));
+    }
+    if observation.name.trim().is_empty() || observation.architecture.trim().is_empty() {
+        return Err(format!(
+            "core {} requires a name and architecture",
+            observation.index
+        ));
+    }
+    if observation.original_state == CoreState::Unknown || observation.state == CoreState::Unknown {
+        return Err(format!(
+            "core {} hardware-breakpoint observation contains an unknown state",
+            observation.index
+        ));
+    }
+    if observation.original_state != observation.state {
+        return Err(format!(
+            "core {} hardware-breakpoint operation changed execution state",
+            observation.index
+        ));
+    }
+    if observation.capacity == 0 {
+        return Err(format!(
+            "core {} reports zero hardware-breakpoint capacity",
+            observation.index
+        ));
+    }
+    validate_hardware_breakpoint_slots(
+        observation.index,
+        observation.capacity,
+        "before",
+        &observation.before,
+    )?;
+    validate_hardware_breakpoint_slots(
+        observation.index,
+        observation.capacity,
+        "after",
+        &observation.after,
+    )?;
+    if observation.changed != (observation.before != observation.after) {
+        return Err(format!(
+            "core {} hardware-breakpoint changed flag does not match the slot transition",
+            observation.index
+        ));
+    }
+
+    match observation.action {
+        HardwareBreakpointAction::List => {
+            if observation.requested_address.is_some()
+                || observation.requested_slot.is_some()
+                || observation.affected_slot.is_some()
+                || observation.changed
+            {
+                return Err(format!(
+                    "core {} hardware-breakpoint list contains mutation fields",
+                    observation.index
+                ));
+            }
+        }
+        HardwareBreakpointAction::Set => {
+            require_halted_breakpoint_mutation(observation)?;
+            let address = observation.requested_address.ok_or_else(|| {
+                format!(
+                    "core {} hardware-breakpoint set has no requested address",
+                    observation.index
+                )
+            })?;
+            let affected_slot = observation.affected_slot.ok_or_else(|| {
+                format!(
+                    "core {} hardware-breakpoint set has no affected slot",
+                    observation.index
+                )
+            })?;
+            if observation
+                .requested_slot
+                .is_some_and(|requested| requested != affected_slot)
+            {
+                return Err(format!(
+                    "core {} hardware-breakpoint set affected a different slot than requested",
+                    observation.index
+                ));
+            }
+            require_only_affected_breakpoint_slot_changed(observation, affected_slot)?;
+            if observation.after[affected_slot as usize].address != Some(address) {
+                return Err(format!(
+                    "core {} hardware-breakpoint set did not verify the requested address",
+                    observation.index
+                ));
+            }
+        }
+        HardwareBreakpointAction::Clear => {
+            require_halted_breakpoint_mutation(observation)?;
+            if observation.requested_address.is_some() {
+                return Err(format!(
+                    "core {} hardware-breakpoint clear contains an address",
+                    observation.index
+                ));
+            }
+            let requested_slot = observation.requested_slot.ok_or_else(|| {
+                format!(
+                    "core {} hardware-breakpoint clear has no requested slot",
+                    observation.index
+                )
+            })?;
+            if observation.affected_slot != Some(requested_slot) {
+                return Err(format!(
+                    "core {} hardware-breakpoint clear affected a different slot than requested",
+                    observation.index
+                ));
+            }
+            require_only_affected_breakpoint_slot_changed(observation, requested_slot)?;
+            if observation.after[requested_slot as usize].address.is_some() {
+                return Err(format!(
+                    "core {} hardware-breakpoint clear did not empty the requested slot",
+                    observation.index
+                ));
+            }
+        }
+        HardwareBreakpointAction::ClearAll => {
+            require_halted_breakpoint_mutation(observation)?;
+            if observation.requested_address.is_some()
+                || observation.requested_slot.is_some()
+                || observation.affected_slot.is_some()
+                || observation.after.iter().any(|slot| slot.address.is_some())
+            {
+                return Err(format!(
+                    "core {} hardware-breakpoint clear-all did not leave every slot empty",
+                    observation.index
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_hardware_breakpoint_slots(
+    core_index: u32,
+    capacity: u32,
+    phase: &str,
+    slots: &[HardwareBreakpointSlot],
+) -> std::result::Result<(), String> {
+    if slots.len() != capacity as usize {
+        return Err(format!(
+            "core {core_index} hardware-breakpoint {phase} snapshot has {} slots, expected {capacity}",
+            slots.len()
+        ));
+    }
+    for (expected, slot) in slots.iter().enumerate() {
+        if slot.index != expected as u32 {
+            return Err(format!(
+                "core {core_index} hardware-breakpoint {phase} slot indexes are not contiguous"
+            ));
+        }
+    }
+    let active = slots
+        .iter()
+        .filter_map(|slot| slot.address)
+        .collect::<std::collections::BTreeSet<_>>();
+    if active.len() != slots.iter().filter(|slot| slot.address.is_some()).count() {
+        return Err(format!(
+            "core {core_index} hardware-breakpoint {phase} snapshot contains duplicate addresses"
+        ));
+    }
+    Ok(())
+}
+
+fn require_halted_breakpoint_mutation(
+    observation: &HardwareBreakpointObservation,
+) -> std::result::Result<(), String> {
+    if observation.original_state != CoreState::Halted {
+        return Err(format!(
+            "core {} hardware-breakpoint mutation must start halted",
+            observation.index
+        ));
+    }
+    Ok(())
+}
+
+fn require_only_affected_breakpoint_slot_changed(
+    observation: &HardwareBreakpointObservation,
+    affected_slot: u32,
+) -> std::result::Result<(), String> {
+    if affected_slot >= observation.capacity {
+        return Err(format!(
+            "core {} hardware-breakpoint affected slot {} exceeds capacity {}",
+            observation.index, affected_slot, observation.capacity
+        ));
+    }
+    if observation
+        .before
+        .iter()
+        .zip(&observation.after)
+        .any(|(before, after)| before.index != affected_slot && before != after)
+    {
+        return Err(format!(
+            "core {} hardware-breakpoint operation changed an unrequested slot",
+            observation.index
         ));
     }
     Ok(())
@@ -1285,6 +1556,82 @@ mod tests {
             validate_core_execution_observation(&target, &observation)
                 .unwrap_err()
                 .contains("non-step observation")
+        );
+
+        observation.action = CoreExecutionAction::Continue;
+        observation.original_state = CoreState::Halted;
+        observation.state = CoreState::Running;
+        observation.state_changed = true;
+        observation.halt_reason = None;
+        observation.pc_before = None;
+        observation.pc_after = None;
+        assert!(validate_core_execution_observation(&target, &observation).is_ok());
+
+        observation.state = CoreState::Halted;
+        observation.state_changed = false;
+        observation.halt_reason = Some("breakpoint".to_string());
+        assert!(validate_core_execution_observation(&target, &observation).is_ok());
+
+        observation.halt_reason = None;
+        assert!(
+            validate_core_execution_observation(&target, &observation)
+                .unwrap_err()
+                .contains("requires a halt reason")
+        );
+    }
+
+    #[test]
+    fn hardware_breakpoint_observation_enforces_slot_and_state_semantics() {
+        let target = TargetInfo {
+            name: "single".to_string(),
+            architecture: "armv7em".to_string(),
+            core_count: 1,
+        };
+        let empty_slots = (0..2)
+            .map(|index| HardwareBreakpointSlot {
+                index,
+                address: None,
+            })
+            .collect::<Vec<_>>();
+        let mut set_slots = empty_slots.clone();
+        set_slots[0].address = Some(Address(0x0800_1234));
+        let mut observation = HardwareBreakpointObservation {
+            index: 0,
+            name: "core0".to_string(),
+            architecture: "armv7em".to_string(),
+            action: HardwareBreakpointAction::Set,
+            original_state: CoreState::Halted,
+            state: CoreState::Halted,
+            capacity: 2,
+            requested_address: Some(Address(0x0800_1234)),
+            requested_slot: None,
+            affected_slot: Some(0),
+            before: empty_slots,
+            after: set_slots,
+            changed: true,
+        };
+
+        assert!(validate_hardware_breakpoint_observation(&target, &observation).is_ok());
+
+        observation.state = CoreState::Running;
+        assert!(
+            validate_hardware_breakpoint_observation(&target, &observation)
+                .unwrap_err()
+                .contains("changed execution state")
+        );
+        observation.state = CoreState::Halted;
+        observation.after[1].address = Some(Address(0x0800_2000));
+        assert!(
+            validate_hardware_breakpoint_observation(&target, &observation)
+                .unwrap_err()
+                .contains("unrequested slot")
+        );
+        observation.after[1].address = None;
+        observation.changed = false;
+        assert!(
+            validate_hardware_breakpoint_observation(&target, &observation)
+                .unwrap_err()
+                .contains("changed flag")
         );
     }
 }

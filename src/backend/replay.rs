@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -8,18 +8,21 @@ use crate::{
     SCHEMA_VERSION,
     backend::{
         DebugBackend, checked_memory_read_end, firmware_flash_report, validate_firmware_segments,
+        validate_hardware_breakpoint_request,
     },
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
         CoreSnapshot, CoreState, FirmwareSegmentInfo, FlashLayout, FlashRange, FlashReport,
+        HardwareBreakpointAction, HardwareBreakpointObservation, HardwareBreakpointSlot,
         MAX_INLINE_MEMORY_READ_BYTES, MAX_REGISTER_READS, MemoryCoreObservation, MemoryReadRange,
         MemoryReadResult, MemoryRegionInfo, MemoryRegionKind, PostFlashCoreObservation, ProbeInfo,
         RegisterCoreObservation, RegisterReading, SessionInfo, TargetInfo,
         validate_core_execution_observation, validate_core_inventory,
-        validate_memory_core_observation, validate_memory_read_range,
-        validate_post_flash_core_inventory, validate_register_core_observation,
+        validate_hardware_breakpoint_observation, validate_memory_core_observation,
+        validate_memory_read_range, validate_post_flash_core_inventory,
+        validate_register_core_observation,
     },
 };
 
@@ -54,6 +57,14 @@ pub struct ReplayCoreState {
     pub halt_reason: Option<String>,
     #[serde(default)]
     pub step_pcs: Vec<Address>,
+    #[serde(default)]
+    pub continue_results: Vec<ReplayContinueResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayContinueResult {
+    pub state: CoreState,
+    pub halt_reason: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -266,6 +277,50 @@ impl ReplayFixture {
                 }),
             ));
         }
+        if self.capabilities.continue_execution
+            && self.capabilities.core_status
+            && self
+                .control_cores
+                .iter()
+                .any(|core| core.continue_results.is_empty())
+        {
+            return Err(DebugError::fixture(
+                "continue capability requires explicit result evidence for every control core",
+                json!({
+                    "capability": "continue_execution",
+                    "missing_core_indexes": self
+                        .control_cores
+                        .iter()
+                        .filter(|core| core.continue_results.is_empty())
+                        .map(|core| core.index)
+                        .collect::<Vec<_>>()
+                }),
+            ));
+        }
+        for core in &self.control_cores {
+            for result in &core.continue_results {
+                let observation = CoreExecutionObservation {
+                    index: core.index,
+                    name: core.name.clone(),
+                    architecture: core.architecture.clone(),
+                    action: CoreExecutionAction::Continue,
+                    original_state: CoreState::Halted,
+                    state: result.state,
+                    state_changed: result.state != CoreState::Halted,
+                    halt_reason: result.halt_reason.clone(),
+                    pc_before: None,
+                    pc_after: None,
+                };
+                if let Err(problem) =
+                    validate_core_execution_observation(&self.target, &observation)
+                {
+                    return Err(DebugError::fixture(
+                        "replay continue result evidence is invalid",
+                        json!({"core_index": core.index, "problem": problem}),
+                    ));
+                }
+            }
+        }
         if self.capabilities.post_disconnect_core_state && !self.capabilities.core_status {
             return Err(DebugError::fixture(
                 "post-disconnect core-state guarantees require core status support",
@@ -346,6 +401,26 @@ impl ReplayFixture {
                 ));
             }
         }
+        if self.capabilities.hardware_breakpoints > 0 && self.capabilities.core_status {
+            for (capability, enabled) in [
+                ("core_status", self.capabilities.core_status),
+                ("halt", self.capabilities.halt),
+                ("run", self.capabilities.run),
+            ] {
+                if !enabled {
+                    return Err(DebugError::fixture(
+                        "hardware breakpoint capability requires state-preserving core control",
+                        json!({"capability": capability}),
+                    ));
+                }
+            }
+            if self.control_cores.is_empty() {
+                return Err(DebugError::fixture(
+                    "hardware breakpoint capability requires explicit control-core evidence",
+                    json!({"control_core_count": 0}),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -353,6 +428,7 @@ impl ReplayFixture {
 pub struct ReplayBackend {
     fixture: ReplayFixture,
     control_cores: Vec<ReplayCoreState>,
+    hardware_breakpoints: BTreeMap<u32, Vec<Option<Address>>>,
     active_session_id: Option<String>,
     programmed: Option<(String, Vec<FirmwareSegmentInfo>)>,
     reset_performed: bool,
@@ -365,9 +441,20 @@ impl ReplayBackend {
 
     pub fn new(fixture: ReplayFixture) -> Self {
         let control_cores = fixture.control_cores.clone();
+        let hardware_breakpoints = fixture
+            .control_cores
+            .iter()
+            .map(|core| {
+                (
+                    core.index,
+                    vec![None; fixture.capabilities.hardware_breakpoints as usize],
+                )
+            })
+            .collect();
         Self {
             fixture,
             control_cores,
+            hardware_breakpoints,
             active_session_id: None,
             programmed: None,
             reset_performed: false,
@@ -821,6 +908,9 @@ impl DebugBackend for ReplayBackend {
             }
             CoreExecutionAction::Halt if !self.fixture.capabilities.halt => Some("halt"),
             CoreExecutionAction::Run if !self.fixture.capabilities.run => Some("run"),
+            CoreExecutionAction::Continue if !self.fixture.capabilities.continue_execution => {
+                Some("continue_execution")
+            }
             CoreExecutionAction::Step if !self.fixture.capabilities.step => Some("step"),
             _ if !self.fixture.capabilities.core_status => Some("core_status"),
             _ => None,
@@ -845,9 +935,13 @@ impl DebugBackend for ReplayBackend {
             })?;
         let core = &self.control_cores[position];
         let original_state = core.state;
-        if action == CoreExecutionAction::Step && original_state != CoreState::Halted {
+        if matches!(
+            action,
+            CoreExecutionAction::Continue | CoreExecutionAction::Step
+        ) && original_state != CoreState::Halted
+        {
             return Err(DebugError::config(
-                "core.step requires the selected core to be halted",
+                "the requested core action requires the selected core to be halted",
                 json!({
                     "core_index": core_index,
                     "action": action,
@@ -866,6 +960,18 @@ impl DebugBackend for ReplayBackend {
                 },
             ),
             CoreExecutionAction::Run => (CoreState::Running, None),
+            CoreExecutionAction::Continue => {
+                let result = self.control_cores[position]
+                    .continue_results
+                    .first()
+                    .ok_or_else(|| {
+                        DebugError::fixture(
+                            "replay fixture has no remaining continue result evidence for the requested core",
+                            json!({"core_index": core_index}),
+                        )
+                    })?;
+                (result.state, result.halt_reason.clone())
+            }
             CoreExecutionAction::Step => (CoreState::Halted, Some("step".to_string())),
         };
         let (pc_before, pc_after) = if action == CoreExecutionAction::Step {
@@ -903,7 +1009,153 @@ impl DebugBackend for ReplayBackend {
         self.control_cores[position].halt_reason = halt_reason;
         if action == CoreExecutionAction::Step {
             self.control_cores[position].step_pcs.remove(0);
+        } else if action == CoreExecutionAction::Continue {
+            self.control_cores[position].continue_results.remove(0);
         }
+        Ok(observation)
+    }
+
+    fn control_hardware_breakpoints_in_session(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        action: HardwareBreakpointAction,
+        address: Option<Address>,
+        slot: Option<u32>,
+    ) -> Result<HardwareBreakpointObservation> {
+        self.ensure_session(session)?;
+        let capacity = self.fixture.capabilities.hardware_breakpoints;
+        if !self.fixture.capabilities.core_status
+            || (action != HardwareBreakpointAction::List
+                && (!self.fixture.capabilities.halt || !self.fixture.capabilities.run))
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "replay fixture cannot perform the requested hardware-breakpoint operation",
+                6,
+                json!({
+                    "required": if action == HardwareBreakpointAction::List {
+                        vec!["core_status"]
+                    } else {
+                        vec!["core_status", "halt", "run"]
+                    }
+                }),
+            ));
+        }
+        if capacity == 0 {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "replay fixture does not support hardware breakpoints",
+                6,
+                json!({"capability": "hardware_breakpoints"}),
+            ));
+        }
+        let core = self
+            .control_cores
+            .iter()
+            .find(|core| core.index == core_index)
+            .cloned()
+            .ok_or_else(|| {
+                DebugError::config(
+                    "requested core has no replay execution-control evidence",
+                    json!({"core_index": core_index}),
+                )
+            })?;
+        let mutation = action != HardwareBreakpointAction::List;
+        if mutation && core.state != CoreState::Halted {
+            return Err(DebugError::config(
+                "hardware breakpoint mutations require the selected core to be halted",
+                json!({
+                    "core_index": core_index,
+                    "action": action,
+                    "original_state": core.state,
+                }),
+            ));
+        }
+        validate_hardware_breakpoint_request(action, address, slot, capacity)?;
+        let slots = self
+            .hardware_breakpoints
+            .get_mut(&core_index)
+            .expect("validated replay control cores have breakpoint state");
+        let before = replay_breakpoint_slots(slots);
+        let affected_slot = match action {
+            HardwareBreakpointAction::List | HardwareBreakpointAction::ClearAll => None,
+            HardwareBreakpointAction::Set => {
+                let address = address.expect("set arguments were validated");
+                if let Some(existing) = slots.iter().position(|entry| *entry == Some(address)) {
+                    if slot.is_some_and(|requested| requested as usize != existing) {
+                        return Err(DebugError::config(
+                            "requested hardware breakpoint address already occupies a different slot",
+                            json!({
+                                "core_index": core_index,
+                                "address": address,
+                                "existing_slot": existing,
+                                "requested_slot": slot,
+                            }),
+                        ));
+                    }
+                    slots[existing] = Some(address);
+                    Some(existing as u32)
+                } else {
+                    let selected = if let Some(requested) = slot {
+                        requested as usize
+                    } else {
+                        slots.iter().position(Option::is_none).ok_or_else(|| {
+                            DebugError::new(
+                                ErrorCode::CapabilityUnavailable,
+                                "no hardware breakpoint slot is available",
+                                6,
+                                json!({"core_index": core_index, "capacity": capacity}),
+                            )
+                        })?
+                    };
+                    if let Some(occupied) = slots[selected] {
+                        return Err(DebugError::config(
+                            "requested hardware breakpoint slot is already occupied",
+                            json!({
+                                "core_index": core_index,
+                                "slot": selected,
+                                "address": occupied,
+                            }),
+                        ));
+                    }
+                    slots[selected] = Some(address);
+                    Some(selected as u32)
+                }
+            }
+            HardwareBreakpointAction::Clear => {
+                let selected = slot.expect("clear arguments were validated") as usize;
+                slots[selected] = None;
+                Some(selected as u32)
+            }
+        };
+        if action == HardwareBreakpointAction::ClearAll {
+            slots.fill(None);
+        }
+        let after = replay_breakpoint_slots(slots);
+        let observation = HardwareBreakpointObservation {
+            index: core.index,
+            name: core.name,
+            architecture: core.architecture,
+            action,
+            original_state: core.state,
+            state: core.state,
+            capacity,
+            requested_address: address,
+            requested_slot: slot,
+            affected_slot,
+            changed: before != after,
+            before,
+            after,
+        };
+        validate_hardware_breakpoint_observation(&self.fixture.target, &observation).map_err(
+            |problem| {
+                DebugError::fixture(
+                    "replay hardware-breakpoint evidence is invalid",
+                    json!({"core_index": core_index, "problem": problem}),
+                )
+            },
+        )?;
         Ok(observation)
     }
 
@@ -1148,8 +1400,22 @@ impl DebugBackend for ReplayBackend {
         self.active_session_id = None;
         self.programmed = None;
         self.reset_performed = false;
+        for slots in self.hardware_breakpoints.values_mut() {
+            slots.fill(None);
+        }
         Ok(())
     }
+}
+
+fn replay_breakpoint_slots(slots: &[Option<Address>]) -> Vec<HardwareBreakpointSlot> {
+    slots
+        .iter()
+        .enumerate()
+        .map(|(index, address)| HardwareBreakpointSlot {
+            index: index as u32,
+            address: *address,
+        })
+        .collect()
 }
 
 fn decode_memory_block(block: &ReplayMemoryBlock) -> Result<Vec<u8>> {
@@ -1577,6 +1843,9 @@ mod tests {
         let stepped = backend
             .control_core_in_session(&session, 0, CoreExecutionAction::Step)
             .unwrap();
+        let continued = backend
+            .control_core_in_session(&session, 0, CoreExecutionAction::Continue)
+            .unwrap();
 
         assert_eq!(initial.state, CoreState::Halted);
         assert!(!initial.state_changed);
@@ -1596,6 +1865,179 @@ mod tests {
         assert_eq!(stepped.halt_reason.as_deref(), Some("step"));
         assert_eq!(stepped.pc_before, Some(Address(0x0800_1234)));
         assert_eq!(stepped.pc_after, Some(Address(0x0800_1236)));
+        assert_eq!(continued.original_state, CoreState::Halted);
+        assert_eq!(continued.state, CoreState::Running);
+        assert!(continued.state_changed);
+        assert_eq!(continued.halt_reason, None);
+        backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn continue_can_report_an_immediate_breakpoint_halt() {
+        let mut fixture = fixture();
+        fixture.control_cores[0].continue_results = vec![ReplayContinueResult {
+            state: CoreState::Halted,
+            halt_reason: Some("breakpoint".to_string()),
+        }];
+        fixture.validate().unwrap();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+
+        let continued = backend
+            .control_core_in_session(&session, 0, CoreExecutionAction::Continue)
+            .unwrap();
+
+        assert_eq!(continued.original_state, CoreState::Halted);
+        assert_eq!(continued.state, CoreState::Halted);
+        assert!(!continued.state_changed);
+        assert_eq!(continued.halt_reason.as_deref(), Some("breakpoint"));
+        backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn hardware_breakpoints_are_slot_addressable_verified_and_idempotent() {
+        let fixture = fixture();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+
+        let listed = backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::List,
+                None,
+                None,
+            )
+            .unwrap();
+        let set = backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_1234)),
+                None,
+            )
+            .unwrap();
+        let set_again = backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_1234)),
+                None,
+            )
+            .unwrap();
+        let explicit = backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_2000)),
+                Some(2),
+            )
+            .unwrap();
+        let cleared = backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::Clear,
+                None,
+                Some(0),
+            )
+            .unwrap();
+        let cleared_again = backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::Clear,
+                None,
+                Some(0),
+            )
+            .unwrap();
+        let cleared_all = backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::ClearAll,
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(listed.capacity, 6);
+        assert!(listed.after.iter().all(|slot| slot.address.is_none()));
+        assert_eq!(set.affected_slot, Some(0));
+        assert_eq!(set.after[0].address, Some(Address(0x0800_1234)));
+        assert!(set.changed);
+        assert_eq!(set_again.affected_slot, Some(0));
+        assert!(!set_again.changed);
+        assert_eq!(explicit.affected_slot, Some(2));
+        assert_eq!(explicit.after[2].address, Some(Address(0x0800_2000)));
+        assert!(cleared.changed);
+        assert!(!cleared_again.changed);
+        assert!(cleared_all.after.iter().all(|slot| slot.address.is_none()));
+        backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn hardware_breakpoint_mutation_rejects_running_core_and_occupied_slots() {
+        let fixture = fixture();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+
+        backend
+            .control_core_in_session(&session, 0, CoreExecutionAction::Run)
+            .unwrap();
+        let running = backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_1234)),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(running.code, ErrorCode::ConfigInvalid);
+
+        backend
+            .control_core_in_session(&session, 0, CoreExecutionAction::Halt)
+            .unwrap();
+        backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_1234)),
+                Some(1),
+            )
+            .unwrap();
+        let occupied = backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_2000)),
+                Some(1),
+            )
+            .unwrap_err();
+        let mismatched = backend
+            .control_hardware_breakpoints_in_session(
+                &session,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_1234)),
+                Some(2),
+            )
+            .unwrap_err();
+
+        assert_eq!(occupied.code, ErrorCode::ConfigInvalid);
+        assert_eq!(mismatched.code, ErrorCode::ConfigInvalid);
         backend.disconnect(&session).unwrap();
     }
 

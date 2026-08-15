@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-14
+- Last updated: 2026-08-15
 
 ## Context
 
@@ -24,20 +25,31 @@ tool call recreates the teardown race and makes state continuity ambiguous.
 4. A stale or foreign `session_id` is a protocol error. A second open is
    rejected while a lease is active. `server.shutdown` requires an explicit
    `session.close` first.
-5. In-session `core.status`, `core.halt`, `core.run`, and `core.step` use the
-   backend's explicit `control_core_in_session` boundary. `core.step` requires
-   a halted origin and finishes halted after one instruction. In-session
-   `registers.read` and `memory.read` reuse the bounded read contracts while
-   the same backend session remains alive. Every result reports
-   `state_scope="active_session"` and does not claim a post-disconnect
-   guarantee.
-6. `session.close` explicitly runs every core observed by the service before
-   disconnecting (`run_observed_cores_before_disconnect`). EOF and transport
-   errors use the same best-effort cleanup path. If cleanup fails, the response
+5. In-session `core.status`, `core.halt`, `core.run`, `core.continue`, and
+   `core.step` use the backend's explicit `control_core_in_session` boundary.
+   `core.run` is a strict desired-state operation. `core.continue` requires a
+   halted origin and accepts either an immediate running observation or a new
+   halted observation with a reason. `core.step` requires a halted origin and
+   finishes halted after one instruction. In-session `registers.read` and
+   `memory.read` reuse the bounded read contracts while the same backend
+   session remains alive. Every result reports `state_scope="active_session"`
+   and does not claim a post-disconnect guarantee.
+6. Add session-scoped hardware-breakpoint list/set/clear/clear-all operations.
+   Capacity is negotiated from the attached core. Results expose the complete
+   indexed before/after slot inventory; mutations are halted-only, reject
+   occupied-slot overwrites, and are idempotent when the requested state is
+   already present.
+7. `session.close` explicitly halts each core with an attempted breakpoint
+   mutation, clears and verifies all of its slots, then runs every core observed
+   by the service before disconnecting
+   (`halt_clear_hardware_breakpoints_run_observed_cores_before_disconnect`). EOF
+   and transport errors use the same best-effort cleanup path. If breakpoint
+   cleanup cannot be verified, explicit resume is skipped and the response
    reports whether the session was nevertheless disconnected.
-7. One-shot CLI commands retain their existing `post_disconnect_core_state`
+8. One-shot CLI commands retain their existing `post_disconnect_core_state`
    gate. The persistent service is the only first-class path for native
-   probe-rs stateful halt/run in this milestone.
+   probe-rs stateful control, bounded reads, and hardware breakpoints in this
+   milestone.
 
 ## Consequences
 
@@ -56,5 +68,13 @@ tool call recreates the teardown race and makes state continuity ambiguous.
   for native probe-rs targets. A one-shot step remains behind the same
   detach-safe capability gate because dropping the backend session can change
   the final halted state.
+- Continue is separate from strict run because a real hardware breakpoint may
+  halt the core before the post-run status read. Returning that immediate halt
+  as an observed success preserves the event instead of misclassifying it as a
+  backend failure.
+- Hardware breakpoints remain owned by the lease. Explicit close cleanup is
+  stronger than relying on probe-rs drop behavior and produces verifiable slot
+  evidence for Agents. It cannot protect against power loss or a hard process
+  kill, so backend teardown remains the last best-effort layer.
 - The JSONL transport is easy to launch from an Agent and easy to replace with
   MCP stdio or a local authenticated socket without changing domain operations.

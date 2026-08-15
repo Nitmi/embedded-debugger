@@ -33,7 +33,7 @@ device support must also complete this checklist on representative hardware.
 
 ## Current result
 
-Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
+Run on 2026-08-13 through 2026-08-15 with probe-rs 0.32.0 on Windows:
 
 - nRF52840: J-Link `1366:1061:001050282192`, detected target
   `nRF52840_xxAA`, silicon `NRF52840_xxAA_REV2`. Product-level `probes test`
@@ -171,7 +171,8 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   clean heartbeats `13354..13356`.
 - The unexpected-client-exit path was exercised separately: after another
   `running -> halted`, stdin was closed without `core.run` or `session.close`.
-  The service logged that it safely closed the active session using
+  The service logged that it safely closed the active session using the
+  then-current policy
   `run_observed_cores_before_disconnect`, exited with code 0, and the following
   monitor received heartbeats `13411..13413`. All monitors used DTR/RTS=false
   and transmitted no serial bytes. Artifacts are under
@@ -223,6 +224,39 @@ Partially run on 2026-08-13 and 2026-08-14 with probe-rs 0.32.0 on Windows:
   residual partial UART text at the halt/resume boundary. The monitor metadata
   again records DTR/RTS=false and no transmitted bytes. This directly accepts
   the versioned step response without relying on separate register reads.
+- On 2026-08-15, persistent hardware-breakpoint lifecycle acceptance passed on
+  the exact ESP32-S3 native USB-JTAG probe
+  `303a:1001:E0:72:A1:D4:1F:DC`. Attach negotiated two hardware comparator
+  slots from CPU0. While halted, slot 0 set/list/readback, duplicate set,
+  clear, duplicate clear, explicit-slot set, clear-all, and close cleanup all
+  returned exact full-slot before/after evidence. Mutations from a running core
+  were rejected with `CONFIG_INVALID`. A breakpoint deliberately left active
+  before close was halted, cleared, read back empty, and followed by a verified
+  running state before disconnect. The read-only serial baseline observed
+  complete heartbeats `8827..8830`; after the lifecycle it observed
+  `9103..9107`. Both used 115200 baud, DTR/RTS=false, and transmitted no bytes.
+- A true-hit exercise then exposed an important semantic boundary: after slot 0
+  was set to a recently stepped PC, strict `core.run` returned
+  `PROTOCOL_ERROR` because the core hit the breakpoint before the immediate
+  running-state verification. Cleanup still cleared the comparator, restored
+  runtime, and the next monitor observed `heartbeat=9429..9432`. This was used
+  to add the distinct `core.continue` operation instead of weakening the strict
+  `core.run` contract.
+- The rebuilt `core.continue` path passed a final self-contained exercise. A
+  pre-test monitor observed complete heartbeats `10364..10366`. CPU0 was halted
+  and stepped, slot 0 was set to `0x420129D4`, and `core.continue` immediately
+  succeeded with `halted`, `halt_reason=breakpoint`; `registers.read(pc)` matched
+  `0x420129D4` exactly. A concurrent three-second read-only serial monitor
+  received zero bytes while the breakpoint held. Clearing slot 0, strict
+  `core.run`, and `session.close` all succeeded; close reported policy
+  `halt_clear_hardware_breakpoints_run_observed_cores_before_disconnect` and one
+  verified cleanup observation. The probe was immediately accessible, and the
+  recovery monitor received complete heartbeats `10523..10524` after one
+  expected partial boundary record. Artifacts are under
+  `target/hardware-acceptance/2026-08-15-esp32s3-persistent-breakpoints`.
+  This accepts session-scoped CPU0 hardware breakpoints and immediate-result
+  continue semantics, not CPU1, software/symbolic/conditional breakpoints,
+  watchpoints, or durable breakpoint ownership after a hard process kill.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.

@@ -9,8 +9,9 @@ use crate::{
     model::{
         Address, Capabilities, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
         CoreSnapshot, FirmwareImageOptions, FlashLayout, FlashReport, FlashSegmentReport,
-        MAX_INLINE_MEMORY_READ_BYTES, MemoryReadRange, MemoryReadResult, PostFlashCoreObservation,
-        ProbeInfo, RegisterCoreObservation, SessionInfo, TargetInfo,
+        HardwareBreakpointAction, HardwareBreakpointObservation, MAX_INLINE_MEMORY_READ_BYTES,
+        MemoryReadRange, MemoryReadResult, PostFlashCoreObservation, ProbeInfo,
+        RegisterCoreObservation, SessionInfo, TargetInfo,
     },
 };
 
@@ -81,6 +82,17 @@ pub trait DebugBackend {
         core_index: u32,
         action: CoreExecutionAction,
     ) -> Result<CoreExecutionObservation>;
+    /// Inspect or mutate hardware breakpoint comparators while `session` remains active.
+    ///
+    /// User-requested mutations must be rejected unless the selected core is already halted.
+    fn control_hardware_breakpoints_in_session(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        action: HardwareBreakpointAction,
+        address: Option<Address>,
+        slot: Option<u32>,
+    ) -> Result<HardwareBreakpointObservation>;
     fn read_registers(
         &mut self,
         session: &SessionInfo,
@@ -125,6 +137,42 @@ pub(crate) fn checked_memory_read_end(start: Address, length: u64) -> Result<u64
             serde_json::json!({"start": start, "length": length}),
         )
     })
+}
+
+pub(crate) fn validate_hardware_breakpoint_request(
+    action: HardwareBreakpointAction,
+    address: Option<Address>,
+    slot: Option<u32>,
+    capacity: u32,
+) -> Result<()> {
+    let valid = match action {
+        HardwareBreakpointAction::List | HardwareBreakpointAction::ClearAll => {
+            address.is_none() && slot.is_none()
+        }
+        HardwareBreakpointAction::Set => address.is_some(),
+        HardwareBreakpointAction::Clear => address.is_none() && slot.is_some(),
+    };
+    if !valid {
+        return Err(DebugError::config(
+            "hardware breakpoint request fields do not match the selected action",
+            serde_json::json!({"action": action, "address": address, "slot": slot}),
+        ));
+    }
+    if capacity == 0 {
+        return Err(DebugError::new(
+            ErrorCode::CapabilityUnavailable,
+            "selected backend does not expose any hardware breakpoint comparators",
+            6,
+            serde_json::json!({"capability": "hardware_breakpoints"}),
+        ));
+    }
+    if slot.is_some_and(|slot| slot >= capacity) {
+        return Err(DebugError::config(
+            "hardware breakpoint slot is outside the available comparator range",
+            serde_json::json!({"slot": slot, "capacity": capacity}),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_firmware_segments(segments: &[FirmwareSegment]) -> Result<u64> {

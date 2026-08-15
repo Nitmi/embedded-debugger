@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, sync::Once, time::Duration};
 
 use probe_rs::{
-    CoreRegister, CoreStatus, HaltReason, MemoryInterface, Permissions, RegisterDataType,
-    RegisterValue, Session, Target,
+    CoreInterface, CoreRegister, CoreStatus, CoreType, HaltReason, MemoryInterface, Permissions,
+    RegisterDataType, RegisterValue, Session, Target,
     config::{NvmRegion, RawFlashAlgorithm, Registry, RegistryError},
     flashing::{DownloadOptions, FlashError, FlashProgress},
     probe::{
@@ -16,16 +16,18 @@ use uuid::Uuid;
 use crate::{
     backend::{
         DebugBackend, checked_memory_read_end, firmware_flash_report, validate_firmware_segments,
+        validate_hardware_breakpoint_request,
     },
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
         Address, Capabilities, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
         CoreSnapshot, CoreState, FirmwareImageOptions, FirmwareSegmentInfo, FlashLayout,
-        FlashRange, FlashReport, MAX_REGISTER_READS, MemoryCoreObservation, MemoryReadRange,
+        FlashRange, FlashReport, HardwareBreakpointAction, HardwareBreakpointObservation,
+        HardwareBreakpointSlot, MAX_REGISTER_READS, MemoryCoreObservation, MemoryReadRange,
         MemoryReadResult, MemoryRegionInfo, MemoryRegionKind, PostFlashCoreObservation, ProbeInfo,
         RegisterCoreObservation, RegisterKind, RegisterReading, SessionInfo, TargetInfo,
-        validate_memory_read_range,
+        validate_hardware_breakpoint_observation, validate_memory_read_range,
     },
 };
 
@@ -99,6 +101,7 @@ impl ProbeRsBackend {
             verify: flash,
             halt: true,
             run: true,
+            continue_execution: single_core || accepted_esp32s3_step,
             reset: single_core || accepted_esp32s3_post_reset,
             // probe-rs implements Xtensa single-instruction stepping; this is
             // accepted for CPU0 on ESP32-S3 and for single-core targets.
@@ -438,9 +441,18 @@ impl DebugBackend for ProbeRsBackend {
             .open(selector)
             .map_err(|error| map_probe_error("open probe", error))?;
         // Default permissions deliberately exclude full-chip erase/unlock operations.
-        let native_session = probe
+        let mut native_session = probe
             .attach(self.target.clone(), Permissions::default())
             .map_err(|error| map_core_error("attach target", error))?;
+        let breakpoint_capacity = if supports_native_hardware_breakpoints(&self.target) {
+            native_session
+                .core(0)
+                .and_then(|mut core| core.available_breakpoint_units())
+                .map_err(|error| map_core_error("query hardware breakpoint capacity", error))?
+        } else {
+            0
+        };
+        self.capabilities.hardware_breakpoints = breakpoint_capacity;
         let id = format!("ses_{}", Uuid::new_v4().simple());
         let info = SessionInfo {
             session_id: id.clone(),
@@ -1087,6 +1099,19 @@ impl DebugBackend for ProbeRsBackend {
             (CoreExecutionAction::Run, CoreState::Halted) => core
                 .run()
                 .map_err(|error| map_core_error("run selected core", error))?,
+            (CoreExecutionAction::Continue, CoreState::Halted) => core
+                .run()
+                .map_err(|error| map_core_error("continue selected core", error))?,
+            (CoreExecutionAction::Continue, CoreState::Running) => {
+                return Err(DebugError::config(
+                    "core.continue requires the selected core to be halted",
+                    json!({
+                        "core_index": core_index,
+                        "action": action,
+                        "original_state": original_state,
+                    }),
+                ));
+            }
             (CoreExecutionAction::Step, CoreState::Halted) => {
                 step_pc_before = Some(Address(
                     core.read_core_reg::<u64>(core.program_counter().id())
@@ -1119,6 +1144,7 @@ impl DebugBackend for ProbeRsBackend {
             CoreExecutionAction::Status => original_state,
             CoreExecutionAction::Halt => CoreState::Halted,
             CoreExecutionAction::Run => CoreState::Running,
+            CoreExecutionAction::Continue => state,
             CoreExecutionAction::Step => CoreState::Halted,
         };
         if state != expected {
@@ -1146,6 +1172,196 @@ impl DebugBackend for ProbeRsBackend {
             pc_before: step_pc_before,
             pc_after: step_pc_after,
         })
+    }
+
+    fn control_hardware_breakpoints_in_session(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        action: HardwareBreakpointAction,
+        address: Option<Address>,
+        slot: Option<u32>,
+    ) -> Result<HardwareBreakpointObservation> {
+        let capacity = session.capabilities.hardware_breakpoints;
+        validate_hardware_breakpoint_request(action, address, slot, capacity)?;
+        if !supports_native_hardware_breakpoints(&self.target) || core_index != 0 {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "hardware breakpoints are not physically accepted for the selected target core",
+                6,
+                json!({
+                    "capability": "hardware_breakpoints",
+                    "core_index": core_index,
+                    "accepted_core_indexes": if supports_native_hardware_breakpoints(&self.target) {
+                        vec![0]
+                    } else {
+                        Vec::<u32>::new()
+                    },
+                    "target": self.target_info.name,
+                }),
+            ));
+        }
+        if address.is_some_and(|address| address.0 > u32::MAX as u64) {
+            return Err(DebugError::config(
+                "hardware breakpoint address exceeds the selected core address width",
+                json!({"address": address, "maximum": Address(u32::MAX as u64)}),
+            ));
+        }
+        let index = core_index as usize;
+        let (core_name, architecture) = self
+            .target
+            .cores
+            .get(index)
+            .map(|core| {
+                (
+                    core.name.clone(),
+                    format!("{:?}", core.core_type).to_ascii_lowercase(),
+                )
+            })
+            .ok_or_else(|| {
+                DebugError::config(
+                    "requested core index is outside the target core inventory",
+                    json!({
+                        "core_index": core_index,
+                        "core_count": self.target.cores.len(),
+                    }),
+                )
+            })?;
+        let target_info = self.target_info.clone();
+        let active = self.ensure_session_mut(session)?;
+        if active.reset_halted || !active.restore_before_disconnect.is_empty() {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "cannot control hardware breakpoints while restoration is pending",
+                6,
+                json!({"session_id": session.session_id, "core_index": core_index}),
+            ));
+        }
+        let mut core = active.session.core(index).map_err(|error| match error {
+            probe_rs::Error::CoreDisabled(_) => DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "requested target core is disabled",
+                6,
+                json!({"core_index": core_index}),
+            ),
+            other => map_core_error("attach core for hardware breakpoint control", other),
+        })?;
+        let original_status = core.status().map_err(|error| {
+            map_core_error("read core state before breakpoint operation", error)
+        })?;
+        let original_state = live_core_state(index, original_status).map_err(|error| {
+            map_core_error("determine core state before breakpoint operation", error)
+        })?;
+        if action != HardwareBreakpointAction::List && original_state != CoreState::Halted {
+            return Err(DebugError::config(
+                "hardware breakpoint mutations require the selected core to be halted",
+                json!({
+                    "core_index": core_index,
+                    "action": action,
+                    "original_state": original_state,
+                }),
+            ));
+        }
+
+        let before = native_hardware_breakpoint_slots(&mut core, capacity)?;
+        let affected_slot = match action {
+            HardwareBreakpointAction::List | HardwareBreakpointAction::ClearAll => None,
+            HardwareBreakpointAction::Set => {
+                let address = address.expect("set request was validated");
+                let selected = if let Some(existing) = before
+                    .iter()
+                    .position(|entry| entry.address == Some(address))
+                {
+                    if slot.is_some_and(|requested| requested as usize != existing) {
+                        return Err(DebugError::config(
+                            "requested hardware breakpoint address already occupies a different slot",
+                            json!({
+                                "core_index": core_index,
+                                "address": address,
+                                "existing_slot": existing,
+                                "requested_slot": slot,
+                            }),
+                        ));
+                    }
+                    existing
+                } else if let Some(requested) = slot {
+                    let selected = requested as usize;
+                    if let Some(occupied) = before[selected].address {
+                        return Err(DebugError::config(
+                            "requested hardware breakpoint slot is already occupied",
+                            json!({
+                                "core_index": core_index,
+                                "slot": requested,
+                                "address": occupied,
+                            }),
+                        ));
+                    }
+                    selected
+                } else {
+                    before
+                        .iter()
+                        .position(|entry| entry.address.is_none())
+                        .ok_or_else(|| {
+                            DebugError::new(
+                                ErrorCode::CapabilityUnavailable,
+                                "no hardware breakpoint slot is available",
+                                6,
+                                json!({"core_index": core_index, "capacity": capacity}),
+                            )
+                        })?
+                };
+                core.set_hw_breakpoint_unit(selected, address.0)
+                    .map_err(|error| map_core_error("set hardware breakpoint", error))?;
+                Some(selected as u32)
+            }
+            HardwareBreakpointAction::Clear => {
+                let selected = slot.expect("clear request was validated") as usize;
+                if before[selected].address.is_some() {
+                    CoreInterface::clear_hw_breakpoint(&mut core, selected)
+                        .map_err(|error| map_core_error("clear hardware breakpoint", error))?;
+                }
+                Some(selected as u32)
+            }
+        };
+        if action == HardwareBreakpointAction::ClearAll {
+            for active_slot in before.iter().filter(|entry| entry.address.is_some()) {
+                CoreInterface::clear_hw_breakpoint(&mut core, active_slot.index as usize)
+                    .map_err(|error| map_core_error("clear all hardware breakpoints", error))?;
+            }
+        }
+        let after = native_hardware_breakpoint_slots(&mut core, capacity)?;
+        let final_status = core
+            .status()
+            .map_err(|error| map_core_error("read core state after breakpoint operation", error))?;
+        let state = live_core_state(index, final_status).map_err(|error| {
+            map_core_error("determine core state after breakpoint operation", error)
+        })?;
+        let observation = HardwareBreakpointObservation {
+            index: core_index,
+            name: core_name,
+            architecture,
+            action,
+            original_state,
+            state,
+            capacity,
+            requested_address: address,
+            requested_slot: slot,
+            affected_slot,
+            changed: before != after,
+            before,
+            after,
+        };
+        validate_hardware_breakpoint_observation(&target_info, &observation).map_err(
+            |problem| {
+                DebugError::new(
+                    ErrorCode::ProtocolError,
+                    "probe-rs returned an invalid hardware-breakpoint observation",
+                    6,
+                    json!({"problem": problem, "core": observation}),
+                )
+            },
+        )?;
+        Ok(observation)
     }
 
     fn read_registers(
@@ -1690,6 +1906,41 @@ fn restore_pending_core_states(
     }
 }
 
+fn supports_native_hardware_breakpoints(target: &Target) -> bool {
+    target.name.eq_ignore_ascii_case("esp32s3")
+        && target
+            .cores
+            .first()
+            .is_some_and(|core| core.core_type == CoreType::Xtensa)
+}
+
+fn native_hardware_breakpoint_slots(
+    core: &mut probe_rs::Core<'_>,
+    expected_capacity: u32,
+) -> Result<Vec<HardwareBreakpointSlot>> {
+    let addresses = CoreInterface::hw_breakpoints(core)
+        .map_err(|error| map_core_error("read hardware breakpoint slots", error))?;
+    if addresses.len() != expected_capacity as usize {
+        return Err(DebugError::new(
+            ErrorCode::ProtocolError,
+            "hardware breakpoint capacity changed within the active session",
+            6,
+            json!({
+                "expected_capacity": expected_capacity,
+                "received_capacity": addresses.len(),
+            }),
+        ));
+    }
+    Ok(addresses
+        .into_iter()
+        .enumerate()
+        .map(|(index, address)| HardwareBreakpointSlot {
+            index: index as u32,
+            address: address.map(Address),
+        })
+        .collect())
+}
+
 fn restore_after_capture_error(
     active: &mut NativeSession,
     operation: &str,
@@ -2033,10 +2284,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn esp32s3_advertises_physically_accepted_step_support() {
+    fn esp32s3_advertises_accepted_session_controls_before_attach() {
         let backend = ProbeRsBackend::new("esp32s3").unwrap();
 
         assert!(backend.capabilities().step);
+        assert!(backend.capabilities().continue_execution);
+        assert_eq!(backend.capabilities().hardware_breakpoints, 0);
+        assert!(supports_native_hardware_breakpoints(&backend.target));
         assert_eq!(backend.target().core_count, 2);
     }
 

@@ -100,12 +100,16 @@ synthesized. A successful response also requires
 `post_disconnect_core_state=true` before probe selection; malformed ranges are
 still rejected before this capability check.
 
-`core status|halt|run|step --probe <exact-selector> --target <exact-target> --core
-<index>` uses one versioned core-state contract. `original_state` is the state
-observed after attach, `state` is the state guaranteed after disconnect, and
-`state_changed` must exactly match their difference. Status cannot change the
-state. Halt must finish halted and run must finish running; repeating either
-action is valid and reports `state_changed=false`. Step requires
+`core status|halt|run|continue|step --probe <exact-selector> --target
+<exact-target> --core <index>` uses one versioned core-state contract.
+`original_state` is the state observed after attach, `state` is the state
+guaranteed after disconnect, and `state_changed` must exactly match their
+difference. Status cannot change the state. Halt must finish halted and strict
+run must finish running; repeating either action is valid and reports
+`state_changed=false`. Continue requires `original_state=halted`, requests
+execution, and may report running or an immediate halted result with a non-empty
+halt reason. It sets `effects.execution_continue_requested=true` but does not
+claim an intentional durable final-state change. Step also requires
 `original_state=halted`, executes one instruction, finishes halted, and reports
 the normalized `halt_reason="step"`, explicit `pc_before`/`pc_after` evidence
 plus `effects.instruction_step_requested=true`; it does not set
@@ -116,7 +120,8 @@ state remains halted. Halted observations may include a normalized
 
 A backend must advertise both `core_status` and
 `post_disconnect_core_state` before any core-state command may select or attach
-a probe. Halt, run, and step additionally require their matching capabilities.
+a probe. Halt, run, continue, and step additionally require their matching
+capabilities.
 `core_status` alone means the backend can observe state while a session is
 alive; it is deliberately insufficient for a process that immediately tears
 that session down. Replay provides explicit `control_cores` evidence and
@@ -142,19 +147,19 @@ memory write. CPU0 is expected to run after the workflow. Secondary cores retain
 the running or halted state observed immediately after the target reset sequence.
 
 R1 debug control is not equivalent to side-effect-free target inspection.
-`probes test`, `core status|halt|run|step`, `registers read`, `memory read`,
-`snapshot capture`, and `snapshot reset-capture` return an `effects` object. It
-records
-whether the command requested reset, Flash, a single instruction step, bounded
-memory read, or arbitrary memory writes; whether
-core execution-state restoration was verified; and any known backend-managed
-volatile target changes. probe-rs clears hardware breakpoints during attach and
-may invoke target-specific attach/halt sequences. The ESP32-S3 sequence disables
-several watchdogs, and session teardown can resume a core that was halted before
-attach. Halting a running core can also interrupt in-flight peripheral activity
-or produce partial external I/O; restoration cannot undo bytes or physical
-actions already emitted. Agents must surface these notes instead of treating R1
-as R0 read-only behavior.
+`probes test`, `core status|halt|run|continue|step`, `breakpoints.*`,
+`registers read`, `memory read`, `snapshot capture`, and
+`snapshot reset-capture` return an `effects` object. It records whether the
+command requested reset, Flash, continue, a single instruction step, hardware
+breakpoint configuration, bounded memory read, or arbitrary memory writes;
+whether core execution-state restoration or breakpoint state was verified; and
+any known backend-managed volatile target changes. probe-rs clears hardware
+breakpoints during attach and may invoke target-specific attach/halt sequences.
+The ESP32-S3 sequence disables several watchdogs, and session teardown can
+resume a core that was halted before attach. Halting a running core can also
+interrupt in-flight peripheral activity or produce partial external I/O;
+restoration cannot undo bytes or physical actions already emitted. Agents must
+surface these notes instead of treating R1 as R0 read-only behavior.
 
 ## Exit codes
 
@@ -285,15 +290,22 @@ Open one exact probe/target lease:
 The response adds `request_id` to the normal versioned result envelope and
 returns `data.session.session_id`, `state="open"`,
 `transport="stdio_jsonl"`, and
-`close_policy="run_observed_cores_before_disconnect"`. Only one session may be
-open. Target matching is exact; later operations must echo the opaque session
-ID so stale or foreign clients cannot control the current lease.
+`close_policy="halt_clear_hardware_breakpoints_run_observed_cores_before_disconnect"`.
+Only one session may be open. Target matching is exact; later operations must
+echo the opaque session ID so stale or foreign clients cannot control the
+current lease. The response capability matrix contains the hardware-breakpoint
+capacity negotiated from the live core rather than a target-name guess.
 
 ```json
 {"schema_version":"1.0","request_id":"req-halt","operation":"core.halt","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-status","operation":"core.status","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-run","operation":"core.run","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-continue","operation":"core.continue","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-step","operation":"core.step","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-breakpoint-list","operation":"breakpoints.list","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-breakpoint-set","operation":"breakpoints.set","session_id":"ses_<opaque>","core":0,"address":"0x420129D4","slot":0}
+{"schema_version":"1.0","request_id":"req-breakpoint-clear","operation":"breakpoints.clear","session_id":"ses_<opaque>","core":0,"slot":0}
+{"schema_version":"1.0","request_id":"req-breakpoint-clear-all","operation":"breakpoints.clear_all","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-registers","operation":"registers.read","session_id":"ses_<opaque>","core":0,"names":["pc","sp","lr"]}
 {"schema_version":"1.0","request_id":"req-memory","operation":"memory.read","session_id":"ses_<opaque>","core":0,"address":"0x42000000","length":32}
 ```
@@ -309,6 +321,31 @@ running-origin step is rejected with `CONFIG_INVALID` before the backend issues
 the instruction, so the lease remains running and the request cannot silently
 turn step into halt-plus-step.
 
+`core.run` is a strict desired-state operation: success requires its immediate
+post-command observation to be running. `core.continue` is an event-oriented
+operation that requires a halted origin, requests execution, and then reports
+the immediate observed result. Running is valid; halted is also valid when a
+non-empty `halt_reason` explains the immediate stop. This lets a client
+distinguish a real breakpoint hit from a failed resume. The result sets
+`effects.execution_continue_requested=true` without claiming an intentional
+durable final state.
+
+`breakpoints.list` requires a non-zero `hardware_breakpoints` capability and
+returns every indexed comparator slot. It may be called while the core is
+running, although a backend may transiently halt the core to read the debug
+registers; the returned `original_state` and `state` must match.
+`breakpoints.set`, `breakpoints.clear`, and `breakpoints.clear_all` additionally
+require halt/run support and a halted selected core. Set requires `address` and
+accepts an optional `slot`; without a slot it chooses the lowest free one. A
+repeat of the same address is idempotent, including the same explicit slot.
+The same address in a different requested slot and an overwrite of an occupied
+slot are `CONFIG_INVALID`. Clear requires a slot and is idempotent when it is
+already empty; clear-all is also idempotent. Every successful response contains
+the exact `capacity`, complete contiguous `before` and `after` inventories,
+`requested_address`, `requested_slot`, `affected_slot`, and an exact `changed`
+flag. Duplicate active addresses and capacity/index mismatches are protocol
+errors. Native physical acceptance currently covers ESP32-S3 CPU0 only.
+
 `registers.read` accepts at most 64 unique register names. An empty `names`
 array requests the backend's complete supported register set. `memory.read`
 uses the canonical hexadecimal `address` string and a numeric `length`; the
@@ -322,10 +359,17 @@ structured `effects`, ordered `operations`, `complete=true`, and
 `state_scope="active_session"`; they do not claim atomicity for peripherals,
 DMA, other cores, or external UART writes.
 
-`session.status` reports the active identity, open timestamp, close policy, and
-observed core indexes. `session.close` first issues an idempotent run for every
-observed or read core, verifies those states, disconnects, and reports the
-final core observations plus structured effects and operations.
+`session.status` reports the active identity, open timestamp, close policy,
+observed core indexes, and cores tracked for hardware-breakpoint cleanup. A
+mutation attempt is tracked before the backend write, so even a partial or
+failed write is included in close cleanup. `session.close` first issues and
+verifies an idempotent halt for each tracked breakpoint core, clears and reads
+back every slot, then issues and verifies an idempotent run for every observed
+or read core before disconnecting. Its report includes
+`hardware_breakpoint_cleanup`, final core observations, structured effects, and
+ordered operations. If explicit breakpoint cleanup cannot be verified, the
+service skips the explicit resume step rather than deliberately running with a
+possibly stale breakpoint, then still attempts backend disconnect.
 `server.shutdown` succeeds only after the active session has been closed. EOF
 and transport failures invoke the same best-effort close path and record
 cleanup on stderr; an OS-level hard kill or power loss cannot receive a

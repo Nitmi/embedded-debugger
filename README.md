@@ -60,22 +60,26 @@ registers. On ESP32-S3, the current probe-rs sequence disables multiple
 watchdogs during attach/halt. This is why the command is R1 rather than R0.
 
 The versioned core-state contract is available through `core status`,
-`core halt`, `core run`, and `core step`. A successful response guarantees that
-`data.core.state` still describes the target after the one-shot debug session
-has disconnected; `data.core.original_state`, `state_changed`, and
-`effects.intentional_final_core_state_change_requested` make the transition
-explicit. This guarantee is advertised separately as
+`core halt`, `core run`, `core continue`, and `core step`. A successful one-shot
+response guarantees that `data.core.state` still describes the target after
+the debug session has disconnected; `data.core.original_state`,
+`state_changed`, and the structured `effects` make the transition explicit.
+This guarantee is advertised separately as
 `capabilities.post_disconnect_core_state`.
 
-`core step` requires the selected core to be halted, executes one target
-instruction, and must finish halted with `halt_reason="step"`, `pc_before`,
-`pc_after`, and `effects.instruction_step_requested=true`.
-Replay implements and tests all four actions, including repeatable idempotent
-halt/run, the halted step boundary, and state continuity across later
-snapshot, register, and memory operations within one service/backend instance.
-Native probe-rs exposes status, halt, run, step, register reads, and bounded
+`core run` is strict: success means the immediate verification still observed
+the core running. `core continue` instead requires a halted origin, resumes
+execution, and reports either an immediate running state or a new halted state
+with a non-empty halt reason. This distinction matters when a breakpoint is
+hit before a strict run verification can observe the transient running state.
+`core step` also requires a halted origin, executes one target instruction, and
+must finish halted with `halt_reason="step"`, `pc_before`, `pc_after`, and
+`effects.instruction_step_requested=true`. Replay implements and tests all five
+actions, including repeatable idempotent halt/run, immediate breakpoint results,
+the halted step boundary, and state continuity within one backend instance.
+Native probe-rs exposes the session-scoped actions, register reads, and bounded
 memory reads through the foreground `session serve` owner while its exclusive
-lease remains active. ESP32-S3 stepping is currently accepted only on CPU0.
+lease remains active. ESP32-S3 continue and step are accepted on CPU0.
 
 Read a bounded set of registers from one core while preserving that core's
 original running or halted state:
@@ -120,12 +124,13 @@ core-state and byte-block evidence; it never invents missing memory content.
 
 All successful one-shot core-state, live snapshot, register-read, and
 memory-read reports require `post_disconnect_core_state=true`. Native probe-rs
-currently advertises the underlying in-session read/halt/run capabilities but
-sets this guarantee to false, so these commands return `CAPABILITY_UNAVAILABLE`
-before probe selection. probe-rs 0.32 deconfigures cores when a `Session` is
-dropped; this resumes a halted Xtensa core and disables halting debug on
-Cortex-M. Persistent native observation and control therefore use the
-foreground JSONL session service rather than a short-lived CLI process:
+currently advertises the underlying in-session read and execution-control
+capabilities but sets this guarantee to false, so these commands return
+`CAPABILITY_UNAVAILABLE` before probe selection. probe-rs 0.32 deconfigures
+cores when a `Session` is dropped; this resumes a halted Xtensa core and
+disables halting debug on Cortex-M. Persistent native observation and control
+therefore use the foreground JSONL session service rather than a short-lived
+CLI process:
 
 ```console
 cargo run -- --backend probe-rs session serve --target esp32s3
@@ -133,26 +138,43 @@ cargo run -- --backend probe-rs session serve --target esp32s3
 
 Write one compact JSON request per stdin line. Start with `session.open` and an
 exact probe/target, then use the returned `session_id` for `session.status`,
-`core.status`, `core.halt`, `core.run`, `core.step`, `registers.read`,
-`memory.read`, and `session.close`. For example:
+`core.status`, `core.halt`, `core.run`, `core.continue`, `core.step`,
+`breakpoints.list`, `breakpoints.set`, `breakpoints.clear`,
+`breakpoints.clear_all`, `registers.read`, `memory.read`, and `session.close`.
+For example:
 
 ```json
 {"schema_version":"1.0","request_id":"req-registers","operation":"registers.read","session_id":"ses_<opaque>","core":0,"names":["pc","sp","lr"]}
 {"schema_version":"1.0","request_id":"req-memory","operation":"memory.read","session_id":"ses_<opaque>","core":0,"address":"0x42000000","length":32}
 {"schema_version":"1.0","request_id":"req-step","operation":"core.step","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-breakpoint","operation":"breakpoints.set","session_id":"ses_<opaque>","core":0,"address":"0x420129D4","slot":0}
+{"schema_version":"1.0","request_id":"req-continue","operation":"core.continue","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-clear","operation":"breakpoints.clear","session_id":"ses_<opaque>","core":0,"slot":0}
 ```
 
 `core.step` is only accepted while the selected core is halted; it preserves
 that halted execution state within the active lease while advancing one
-instruction and reports the R1 instruction effect. Both reads preserve the
-core's running or halted state within the active lease
-and return structured R1 `effects` plus ordered operations. Memory reads keep
-the same target-region and 4096-byte bounds as the one-shot command. Finish
-with `server.shutdown`. Responses are one versioned JSON object per stdout
-line; diagnostics stay on stderr. Core responses are explicitly scoped to the
-active session. Close and stdin EOF run every observed core before
-disconnecting, so a normal client exit does not leave the target paused. See
-[`docs/contracts.md`](docs/contracts.md) for the wire contract.
+instruction and reports the R1 instruction effect. `core.continue` is also
+halted-only, but unlike strict `core.run` it treats an immediate breakpoint hit
+as a successful observed result instead of a protocol failure.
+
+Hardware-breakpoint capacity is negotiated from the live core during
+`session.open`; ESP32-S3 CPU0 currently reports two accepted slots. Listing
+returns every slot and is allowed while running. Mutations require a halted
+core. Set accepts an optional slot, otherwise chooses the lowest free slot;
+repeating the same address is idempotent, occupied-slot overwrites are rejected,
+and clear/clear-all are also idempotent. Every result carries the complete
+`before` and `after` slot inventory plus explicit verification effects.
+
+Register and memory reads preserve the core's running or halted state within
+the active lease and return structured R1 `effects` plus ordered operations.
+Memory reads keep the same target-region and 4096-byte bounds as the one-shot
+command. Finish with `server.shutdown`. Responses are one versioned JSON object
+per stdout line; diagnostics stay on stderr. Core responses are explicitly
+scoped to the active session. Close and stdin EOF first halt cores with managed
+breakpoints, clear and verify all of their slots, then run every observed core
+and disconnect. See [`docs/contracts.md`](docs/contracts.md) for the wire
+contract.
 
 Exercise the target's accepted reset policy without flashing it:
 
@@ -271,8 +293,9 @@ explicit blockers until their own physical acceptance is complete.
 - A complete evidence bundle means the debug session was also disconnected.
 
 See [docs/contracts.md](docs/contracts.md),
-[ADR-0001](docs/decisions/0001-cli-first-control-plane.md), and
-[ADR-0002](docs/decisions/0002-core-state-follows-session-lifetime.md).
+[ADR-0001](docs/decisions/0001-cli-first-control-plane.md),
+[ADR-0002](docs/decisions/0002-core-state-follows-session-lifetime.md), and
+[ADR-0003](docs/decisions/0003-persistent-session-jsonl-lease.md).
 
 ## Current status
 
@@ -295,12 +318,15 @@ snapshots and bounded register and RAM/NVM reads passed running-origin ESP32-S3
 exercises, including pre-attach MMIO and size rejection plus serial heartbeat
 recovery, but are now native capability-gated because halted-origin teardown is
 not state preserving. OpenOCD, general ELF/HEX loading, RTT, memory writes,
-Generic/MMIO reads, hardware breakpoints, persistent-lease timeout/cancellation,
-other physically accepted native segmented targets, and non-boot NVM writes are
-not yet exposed. The core status/halt/run/step contract is complete in Replay,
-and its session-scoped native path is accepted on ESP32-S3 CPU0. Native one-shot
+Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
+watchpoints, persistent-lease timeout/cancellation, other physically accepted
+native segmented targets, and non-boot NVM writes are not yet exposed. The core
+status/halt/run/continue/step contract is complete in Replay. Its session-scoped
+native path plus slot-addressable hardware breakpoints are accepted on
+ESP32-S3 CPU0; live attach negotiates two comparator slots. Native one-shot
 commands that promise a final core state remain capability-gated because
-probe-rs cannot guarantee every reported execution state across session teardown.
+probe-rs cannot guarantee every reported execution state across session
+teardown.
 See `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 

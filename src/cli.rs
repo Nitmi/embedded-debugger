@@ -255,6 +255,7 @@ pub enum CoreCommand {
     Status(CoreSelection),
     Halt(CoreSelection),
     Run(CoreSelection),
+    Continue(CoreSelection),
     Step(CoreSelection),
 }
 
@@ -332,6 +333,9 @@ impl Cli {
             Command::Core {
                 command: CoreCommand::Run(_),
             } => "core.run",
+            Command::Core {
+                command: CoreCommand::Continue(_),
+            } => "core.continue",
             Command::Core {
                 command: CoreCommand::Step(_),
             } => "core.step",
@@ -840,6 +844,7 @@ fn control_core(cli: &Cli, command: &CoreCommand) -> Result<CommandResult> {
         CoreCommand::Status(selection) => (CoreExecutionAction::Status, selection),
         CoreCommand::Halt(selection) => (CoreExecutionAction::Halt, selection),
         CoreCommand::Run(selection) => (CoreExecutionAction::Run, selection),
+        CoreCommand::Continue(selection) => (CoreExecutionAction::Continue, selection),
         CoreCommand::Step(selection) => (CoreExecutionAction::Step, selection),
     };
     let report = match cli.backend {
@@ -872,6 +877,7 @@ fn control_core(cli: &Cli, command: &CoreCommand) -> Result<CommandResult> {
         CoreExecutionAction::Status => "core.status",
         CoreExecutionAction::Halt => "core.halt",
         CoreExecutionAction::Run => "core.run",
+        CoreExecutionAction::Continue => "core.continue",
         CoreExecutionAction::Step => "core.step",
     };
     Ok(CommandResult::serializable(operation, &report, human))

@@ -10,13 +10,15 @@ use uuid::Uuid;
 
 use crate::{
     SCHEMA_VERSION,
-    backend::DebugBackend,
+    backend::{DebugBackend, validate_hardware_breakpoint_request},
     error::{DebugError, ErrorCode, Result},
     model::{
         Address, CoreExecutionAction, CoreExecutionObservation, DebugControlEffects,
-        MemoryCoreObservation, MemoryReadRange, OperationRecord, RegisterCoreObservation,
-        SessionInfo, validate_core_execution_observation, validate_memory_core_observation,
-        validate_memory_read_range, validate_register_core_observation,
+        HardwareBreakpointAction, HardwareBreakpointObservation, MemoryCoreObservation,
+        MemoryReadRange, OperationRecord, RegisterCoreObservation, SessionInfo,
+        validate_core_execution_observation, validate_hardware_breakpoint_observation,
+        validate_memory_core_observation, validate_memory_read_range,
+        validate_register_core_observation,
     },
     service::{
         DebugControlEffectRequest, debug_control_effects, select_probe, sha256_bytes,
@@ -26,10 +28,11 @@ use crate::{
 
 const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
-const CLOSE_POLICY: &str = "run_observed_cores_before_disconnect";
+const CLOSE_POLICY: &str = "halt_clear_hardware_breakpoints_run_observed_cores_before_disconnect";
 const SESSION_STATE_WARNING: &str = "Core state is guaranteed only while this debug session remains open; closing the session or terminating the process may change target state.";
 const HALT_SIDE_EFFECT_WARNING: &str = "Halting a running core may interrupt in-flight peripheral or external I/O; resuming later cannot roll back effects already emitted.";
 const STEP_SIDE_EFFECT_WARNING: &str = "Stepping executes one target instruction while halted; it may mutate registers, memory, peripherals, and external I/O.";
+const BREAKPOINT_SIDE_EFFECT_WARNING: &str = "Hardware breakpoint changes write volatile debug comparator state. Once resumed, a matching instruction address will halt the core; session close clears managed breakpoint slots before resuming observed cores.";
 const READ_SIDE_EFFECT_WARNING: &str = "The read may briefly halt a running core; external I/O, peripherals, other cores, and DMA are not rolled back or made atomic.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -49,6 +52,7 @@ pub struct SessionStatusReport {
     pub opened_at: String,
     pub session: SessionInfo,
     pub observed_core_indexes: Vec<u32>,
+    pub hardware_breakpoint_core_indexes: Vec<u32>,
     pub close_policy: &'static str,
 }
 
@@ -60,6 +64,18 @@ pub struct SessionCoreControlReport {
     pub risk: String,
     pub effects: DebugControlEffects,
     pub core: CoreExecutionObservation,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionHardwareBreakpointReport {
+    pub observed_at: String,
+    pub state_scope: &'static str,
+    pub session_id: String,
+    pub risk: String,
+    pub effects: DebugControlEffects,
+    pub core: HardwareBreakpointObservation,
     pub operations: Vec<OperationRecord>,
     pub complete: bool,
 }
@@ -101,6 +117,7 @@ pub struct SessionCloseReport {
     pub close_policy: &'static str,
     pub risk: String,
     pub effects: DebugControlEffects,
+    pub hardware_breakpoint_cleanup: Vec<HardwareBreakpointObservation>,
     pub final_core_observations: Vec<CoreExecutionObservation>,
     pub operations: Vec<OperationRecord>,
     pub disconnected: bool,
@@ -111,6 +128,7 @@ struct ActiveSession {
     info: SessionInfo,
     opened_at: String,
     observed_cores: BTreeSet<u32>,
+    hardware_breakpoint_cores: BTreeSet<u32>,
 }
 
 pub struct SessionService<B: DebugBackend> {
@@ -196,6 +214,7 @@ impl<B: DebugBackend> SessionService<B> {
             info: session,
             opened_at,
             observed_cores: BTreeSet::new(),
+            hardware_breakpoint_cores: BTreeSet::new(),
         });
         Ok(report)
     }
@@ -207,6 +226,11 @@ impl<B: DebugBackend> SessionService<B> {
             opened_at: active.opened_at.clone(),
             session: active.info.clone(),
             observed_core_indexes: active.observed_cores.iter().copied().collect(),
+            hardware_breakpoint_core_indexes: active
+                .hardware_breakpoint_cores
+                .iter()
+                .copied()
+                .collect(),
             close_policy: CLOSE_POLICY,
         })
     }
@@ -236,6 +260,7 @@ impl<B: DebugBackend> SessionService<B> {
                 &self.backend,
                 DebugControlEffectRequest {
                     instruction_step_requested: action == CoreExecutionAction::Step,
+                    execution_continue_requested: action == CoreExecutionAction::Continue,
                     intentional_final_core_state_change_requested: matches!(
                         action,
                         CoreExecutionAction::Halt | CoreExecutionAction::Run
@@ -245,6 +270,122 @@ impl<B: DebugBackend> SessionService<B> {
             ),
             core,
             operations: in_session_core_operations(action),
+            complete: true,
+        })
+    }
+
+    pub fn control_hardware_breakpoints(
+        &mut self,
+        session_id: &str,
+        core_index: u32,
+        action: HardwareBreakpointAction,
+        address: Option<Address>,
+        slot: Option<u32>,
+    ) -> Result<SessionHardwareBreakpointReport> {
+        let session = self.require_session(session_id)?.info.clone();
+        validate_session_core_index(&session, core_index)?;
+        validate_hardware_breakpoint_request(
+            action,
+            address,
+            slot,
+            session.capabilities.hardware_breakpoints,
+        )?;
+        let mut required = vec![("core_status", session.capabilities.core_status)];
+        if action != HardwareBreakpointAction::List {
+            required.extend([
+                ("halt", session.capabilities.halt),
+                ("run", session.capabilities.run),
+            ]);
+        }
+        require_capabilities(
+            self.backend.name(),
+            match action {
+                HardwareBreakpointAction::List => "breakpoints.list",
+                HardwareBreakpointAction::Set => "breakpoints.set",
+                HardwareBreakpointAction::Clear => "breakpoints.clear",
+                HardwareBreakpointAction::ClearAll => "breakpoints.clear_all",
+            },
+            &required,
+        )?;
+
+        if action != HardwareBreakpointAction::List {
+            let status = self.backend.control_core_in_session(
+                &session,
+                core_index,
+                CoreExecutionAction::Status,
+            )?;
+            validate_control_observation(
+                &session,
+                core_index,
+                CoreExecutionAction::Status,
+                &status,
+            )?;
+            if status.state != crate::model::CoreState::Halted {
+                return Err(DebugError::config(
+                    "hardware breakpoint mutations require the selected core to be halted",
+                    json!({
+                        "core_index": core_index,
+                        "action": action,
+                        "original_state": status.state,
+                    }),
+                ));
+            }
+            self.track_observed_core(core_index);
+            self.active
+                .as_mut()
+                .expect("active session was validated")
+                .hardware_breakpoint_cores
+                .insert(core_index);
+        }
+
+        let core = self
+            .backend
+            .control_hardware_breakpoints_in_session(&session, core_index, action, address, slot)?;
+        if core.index != core_index || core.action != action {
+            return Err(protocol_error(
+                "backend returned a different hardware-breakpoint observation than requested",
+                json!({
+                    "requested_core": core_index,
+                    "received_core": core.index,
+                    "requested_action": action,
+                    "received_action": core.action,
+                }),
+            ));
+        }
+        if core.capacity != session.capabilities.hardware_breakpoints {
+            return Err(protocol_error(
+                "backend hardware-breakpoint capacity does not match the active session",
+                json!({
+                    "session_capacity": session.capabilities.hardware_breakpoints,
+                    "received_capacity": core.capacity,
+                }),
+            ));
+        }
+        validate_hardware_breakpoint_observation(&session.target, &core).map_err(|problem| {
+            protocol_error(
+                "backend returned an invalid in-session hardware-breakpoint observation",
+                json!({"problem": problem, "core": core}),
+            )
+        })?;
+        self.track_observed_core(core_index);
+
+        Ok(SessionHardwareBreakpointReport {
+            observed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            state_scope: "active_session",
+            session_id: session.session_id,
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    core_execution_state_restoration_verified: true,
+                    hardware_breakpoint_configuration_requested: action
+                        != HardwareBreakpointAction::List,
+                    hardware_breakpoint_state_verified: true,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
+            core,
+            operations: in_session_hardware_breakpoint_operations(action),
             complete: true,
         })
     }
@@ -400,26 +541,94 @@ impl<B: DebugBackend> SessionService<B> {
         let active = self.require_session(session_id)?;
         let session = active.info.clone();
         let observed_cores = active.observed_cores.iter().copied().collect::<Vec<_>>();
+        let hardware_breakpoint_cores = active
+            .hardware_breakpoint_cores
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
         let observed_core_count = observed_cores.len();
 
-        let mut final_core_observations = Vec::with_capacity(observed_cores.len());
-        let mut resume_failures = Vec::new();
-        for core_index in observed_cores.iter().copied() {
+        let mut hardware_breakpoint_cleanup = Vec::with_capacity(hardware_breakpoint_cores.len());
+        let mut breakpoint_cleanup_failures = Vec::new();
+        let mut breakpoint_cleanup_halt_count = 0_u32;
+        for core_index in hardware_breakpoint_cores.iter().copied() {
             match self.backend.control_core_in_session(
                 &session,
                 core_index,
-                CoreExecutionAction::Run,
+                CoreExecutionAction::Halt,
             ) {
-                Ok(core) => match validate_control_observation(
+                Ok(core) => {
+                    if let Err(error) = validate_control_observation(
+                        &session,
+                        core_index,
+                        CoreExecutionAction::Halt,
+                        &core,
+                    ) {
+                        breakpoint_cleanup_failures.push(error_summary(&error));
+                        continue;
+                    }
+                    breakpoint_cleanup_halt_count += 1;
+                }
+                Err(error) => {
+                    breakpoint_cleanup_failures.push(error_summary(&error));
+                    continue;
+                }
+            }
+            match self.backend.control_hardware_breakpoints_in_session(
+                &session,
+                core_index,
+                HardwareBreakpointAction::ClearAll,
+                None,
+                None,
+            ) {
+                Ok(core) => {
+                    if core.index != core_index || core.action != HardwareBreakpointAction::ClearAll
+                    {
+                        breakpoint_cleanup_failures.push(json!({
+                            "code": ErrorCode::ProtocolError,
+                            "message": "backend returned a different breakpoint cleanup observation than requested",
+                            "details": {
+                                "requested_core": core_index,
+                                "received_core": core.index,
+                                "received_action": core.action,
+                            }
+                        }));
+                    } else if let Err(problem) =
+                        validate_hardware_breakpoint_observation(&session.target, &core)
+                    {
+                        breakpoint_cleanup_failures.push(json!({
+                            "code": ErrorCode::ProtocolError,
+                            "message": "backend returned invalid breakpoint cleanup evidence",
+                            "details": {"core_index": core_index, "problem": problem}
+                        }));
+                    } else {
+                        hardware_breakpoint_cleanup.push(core);
+                    }
+                }
+                Err(error) => breakpoint_cleanup_failures.push(error_summary(&error)),
+            }
+        }
+
+        let mut final_core_observations = Vec::with_capacity(observed_cores.len());
+        let mut resume_failures = Vec::new();
+        if breakpoint_cleanup_failures.is_empty() {
+            for core_index in observed_cores.iter().copied() {
+                match self.backend.control_core_in_session(
                     &session,
                     core_index,
                     CoreExecutionAction::Run,
-                    &core,
                 ) {
-                    Ok(()) => final_core_observations.push(core),
+                    Ok(core) => match validate_control_observation(
+                        &session,
+                        core_index,
+                        CoreExecutionAction::Run,
+                        &core,
+                    ) {
+                        Ok(()) => final_core_observations.push(core),
+                        Err(error) => resume_failures.push(error_summary(&error)),
+                    },
                     Err(error) => resume_failures.push(error_summary(&error)),
-                },
-                Err(error) => resume_failures.push(error_summary(&error)),
+                }
             }
         }
 
@@ -432,32 +641,75 @@ impl<B: DebugBackend> SessionService<B> {
             &self.backend,
             DebugControlEffectRequest {
                 intentional_final_core_state_change_requested: observed_core_count != 0,
+                hardware_breakpoint_configuration_requested: !hardware_breakpoint_cores.is_empty(),
+                hardware_breakpoint_state_verified: !hardware_breakpoint_cores.is_empty()
+                    && breakpoint_cleanup_failures.is_empty(),
                 ..DebugControlEffectRequest::default()
             },
         );
-        let mut operations = final_core_observations
-            .iter()
-            .enumerate()
-            .map(|(index, _)| session_operation(index as u32 + 1, "core.run_observed_and_verify"))
+        let mut operations = (0..breakpoint_cleanup_halt_count)
+            .map(|index| {
+                session_operation(index + 1, "core.halt_for_breakpoint_cleanup_and_verify")
+            })
             .collect::<Vec<_>>();
+        let cleanup_operation_start = operations.len() as u32 + 1;
+        operations.extend(
+            hardware_breakpoint_cleanup
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    session_operation(
+                        cleanup_operation_start + index as u32,
+                        "breakpoints.clear_all_and_verify",
+                    )
+                }),
+        );
+        let resume_operation_start = operations.len() as u32 + 1;
+        operations.extend(
+            final_core_observations
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    session_operation(
+                        resume_operation_start + index as u32,
+                        "core.run_observed_and_verify",
+                    )
+                }),
+        );
         operations.push(session_operation(
             operations.len() as u32 + 1,
             "session.disconnect",
         ));
 
-        match (resume_failures.is_empty(), disconnect_result) {
-            (true, Ok(())) => Ok(SessionCloseReport {
+        match (
+            breakpoint_cleanup_failures.is_empty(),
+            resume_failures.is_empty(),
+            disconnect_result,
+        ) {
+            (true, true, Ok(())) => Ok(SessionCloseReport {
                 state: "closed",
                 session_id: session.session_id,
                 close_policy: CLOSE_POLICY,
                 risk: "R1_REVERSIBLE_CONTROL".to_string(),
                 effects,
+                hardware_breakpoint_cleanup,
                 final_core_observations,
                 operations,
                 disconnected: true,
                 complete: true,
             }),
-            (false, Ok(())) => Err(DebugError::new(
+            (false, _, Ok(())) => Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "session disconnected, but hardware breakpoints could not be explicitly cleared",
+                6,
+                json!({
+                    "session_id": session.session_id,
+                    "session_closed": true,
+                    "breakpoint_cleanup_failures": breakpoint_cleanup_failures,
+                    "resume_skipped": true,
+                }),
+            )),
+            (true, false, Ok(())) => Err(DebugError::new(
                 ErrorCode::ProtocolError,
                 "session disconnected, but one or more observed cores could not be explicitly resumed",
                 6,
@@ -467,14 +719,15 @@ impl<B: DebugBackend> SessionService<B> {
                     "resume_failures": resume_failures,
                 }),
             )),
-            (true, Err(error)) => Err(error),
-            (false, Err(cleanup)) => Err(DebugError::new(
+            (true, true, Err(error)) => Err(error),
+            (_, _, Err(cleanup)) => Err(DebugError::new(
                 ErrorCode::ProtocolError,
-                "failed to resume observed cores and disconnect the active session",
+                "failed to clean up the active debug session before disconnect",
                 6,
                 json!({
                     "session_id": session.session_id,
                     "session_closed": false,
+                    "breakpoint_cleanup_failures": breakpoint_cleanup_failures,
                     "resume_failures": resume_failures,
                     "disconnect_failure": error_summary(&cleanup),
                 }),
@@ -562,8 +815,42 @@ enum SessionOperation {
         #[serde(default)]
         core: u32,
     },
+    #[serde(rename = "core.continue")]
+    CoreContinue {
+        session_id: String,
+        #[serde(default)]
+        core: u32,
+    },
     #[serde(rename = "core.step")]
     CoreStep {
+        session_id: String,
+        #[serde(default)]
+        core: u32,
+    },
+    #[serde(rename = "breakpoints.list")]
+    BreakpointsList {
+        session_id: String,
+        #[serde(default)]
+        core: u32,
+    },
+    #[serde(rename = "breakpoints.set")]
+    BreakpointsSet {
+        session_id: String,
+        #[serde(default)]
+        core: u32,
+        address: Address,
+        #[serde(default)]
+        slot: Option<u32>,
+    },
+    #[serde(rename = "breakpoints.clear")]
+    BreakpointsClear {
+        session_id: String,
+        #[serde(default)]
+        core: u32,
+        slot: u32,
+    },
+    #[serde(rename = "breakpoints.clear_all")]
+    BreakpointsClearAll {
         session_id: String,
         #[serde(default)]
         core: u32,
@@ -598,7 +885,12 @@ impl SessionOperation {
             Self::CoreStatus { .. } => "core.status",
             Self::CoreHalt { .. } => "core.halt",
             Self::CoreRun { .. } => "core.run",
+            Self::CoreContinue { .. } => "core.continue",
             Self::CoreStep { .. } => "core.step",
+            Self::BreakpointsList { .. } => "breakpoints.list",
+            Self::BreakpointsSet { .. } => "breakpoints.set",
+            Self::BreakpointsClear { .. } => "breakpoints.clear",
+            Self::BreakpointsClearAll { .. } => "breakpoints.clear_all",
             Self::RegistersRead { .. } => "registers.read",
             Self::MemoryRead { .. } => "memory.read",
             Self::Close { .. } => "session.close",
@@ -804,6 +1096,19 @@ fn handle_request<B: DebugBackend>(
             vec![SESSION_STATE_WARNING.to_string()],
             false,
         ),
+        SessionOperation::CoreContinue { session_id, core } => (
+            serde_json::to_value(service.control_core(
+                session_id,
+                *core,
+                CoreExecutionAction::Continue,
+            )?)
+            .expect("session core report always serializes"),
+            vec![
+                SESSION_STATE_WARNING.to_string(),
+                "Continuing a halted core may immediately hit a breakpoint and return halted; the response reports the observed result rather than promising a durable running state.".to_string(),
+            ],
+            false,
+        ),
         SessionOperation::CoreStep { session_id, core } => (
             serde_json::to_value(service.control_core(
                 session_id,
@@ -814,6 +1119,75 @@ fn handle_request<B: DebugBackend>(
             vec![
                 SESSION_STATE_WARNING.to_string(),
                 STEP_SIDE_EFFECT_WARNING.to_string(),
+            ],
+            false,
+        ),
+        SessionOperation::BreakpointsList { session_id, core } => (
+            serde_json::to_value(service.control_hardware_breakpoints(
+                session_id,
+                *core,
+                HardwareBreakpointAction::List,
+                None,
+                None,
+            )?)
+            .expect("session hardware-breakpoint report always serializes"),
+            vec![
+                SESSION_STATE_WARNING.to_string(),
+                READ_SIDE_EFFECT_WARNING.to_string(),
+            ],
+            false,
+        ),
+        SessionOperation::BreakpointsSet {
+            session_id,
+            core,
+            address,
+            slot,
+        } => (
+            serde_json::to_value(service.control_hardware_breakpoints(
+                session_id,
+                *core,
+                HardwareBreakpointAction::Set,
+                Some(*address),
+                *slot,
+            )?)
+            .expect("session hardware-breakpoint report always serializes"),
+            vec![
+                SESSION_STATE_WARNING.to_string(),
+                BREAKPOINT_SIDE_EFFECT_WARNING.to_string(),
+            ],
+            false,
+        ),
+        SessionOperation::BreakpointsClear {
+            session_id,
+            core,
+            slot,
+        } => (
+            serde_json::to_value(service.control_hardware_breakpoints(
+                session_id,
+                *core,
+                HardwareBreakpointAction::Clear,
+                None,
+                Some(*slot),
+            )?)
+            .expect("session hardware-breakpoint report always serializes"),
+            vec![
+                SESSION_STATE_WARNING.to_string(),
+                BREAKPOINT_SIDE_EFFECT_WARNING.to_string(),
+            ],
+            false,
+        ),
+        SessionOperation::BreakpointsClearAll { session_id, core } => (
+            serde_json::to_value(service.control_hardware_breakpoints(
+                session_id,
+                *core,
+                HardwareBreakpointAction::ClearAll,
+                None,
+                None,
+            )?)
+            .expect("session hardware-breakpoint report always serializes"),
+            vec![
+                SESSION_STATE_WARNING.to_string(),
+                BREAKPOINT_SIDE_EFFECT_WARNING.to_string(),
             ],
             false,
         ),
@@ -980,6 +1354,10 @@ fn require_core_action_capability(
         CoreExecutionAction::Halt if !capabilities.halt => Some("halt"),
         CoreExecutionAction::Run if !capabilities.core_status => Some("core_status"),
         CoreExecutionAction::Run if !capabilities.run => Some("run"),
+        CoreExecutionAction::Continue if !capabilities.core_status => Some("core_status"),
+        CoreExecutionAction::Continue if !capabilities.continue_execution => {
+            Some("continue_execution")
+        }
         CoreExecutionAction::Step if !capabilities.core_status => Some("core_status"),
         CoreExecutionAction::Step if !capabilities.step => Some("step"),
         _ => None,
@@ -1040,10 +1418,44 @@ fn in_session_core_operations(action: CoreExecutionAction) -> Vec<OperationRecor
             session_operation(2, "core.run_if_halted"),
             session_operation(3, "core.verify_running"),
         ],
+        CoreExecutionAction::Continue => vec![
+            session_operation(1, "core.verify_halted"),
+            session_operation(2, "core.continue_execution"),
+            session_operation(3, "core.observe_immediate_result"),
+        ],
         CoreExecutionAction::Step => vec![
             session_operation(1, "core.read_original_execution_state"),
             session_operation(2, "core.step_one_instruction"),
             session_operation(3, "core.verify_halted"),
+        ],
+    }
+}
+
+fn in_session_hardware_breakpoint_operations(
+    action: HardwareBreakpointAction,
+) -> Vec<OperationRecord> {
+    match action {
+        HardwareBreakpointAction::List => vec![session_operation(
+            1,
+            "breakpoints.read_and_verify_all_slots",
+        )],
+        HardwareBreakpointAction::Set => vec![
+            session_operation(1, "core.verify_halted"),
+            session_operation(2, "breakpoints.read_before"),
+            session_operation(3, "breakpoints.set_slot"),
+            session_operation(4, "breakpoints.read_after_and_verify"),
+        ],
+        HardwareBreakpointAction::Clear => vec![
+            session_operation(1, "core.verify_halted"),
+            session_operation(2, "breakpoints.read_before"),
+            session_operation(3, "breakpoints.clear_slot"),
+            session_operation(4, "breakpoints.read_after_and_verify"),
+        ],
+        HardwareBreakpointAction::ClearAll => vec![
+            session_operation(1, "core.verify_halted"),
+            session_operation(2, "breakpoints.read_before"),
+            session_operation(3, "breakpoints.clear_all"),
+            session_operation(4, "breakpoints.read_after_and_verify"),
         ],
     }
 }
@@ -1293,6 +1705,121 @@ mod tests {
             CoreState::Running
         );
         service.close(&session_id).unwrap();
+    }
+
+    #[test]
+    fn persistent_continue_reports_explicit_replay_result_and_effect() {
+        let mut service = service();
+        let opened = service
+            .open("replay:stlink-v3:0039002A3432510433343034", "STM32G431CBTx")
+            .unwrap();
+        let session_id = opened.session.session_id;
+
+        let continued = service
+            .control_core(&session_id, 0, CoreExecutionAction::Continue)
+            .unwrap();
+
+        assert_eq!(continued.core.original_state, CoreState::Halted);
+        assert_eq!(continued.core.state, CoreState::Running);
+        assert!(continued.effects.execution_continue_requested);
+        assert!(
+            !continued
+                .effects
+                .intentional_final_core_state_change_requested
+        );
+        service.close(&session_id).unwrap();
+    }
+
+    #[test]
+    fn persistent_hardware_breakpoints_are_verified_and_cleaned_before_close() {
+        let mut service = service();
+        let opened = service
+            .open("replay:stlink-v3:0039002A3432510433343034", "STM32G431CBTx")
+            .unwrap();
+        let session_id = opened.session.session_id;
+
+        let listed = service
+            .control_hardware_breakpoints(
+                &session_id,
+                0,
+                HardwareBreakpointAction::List,
+                None,
+                None,
+            )
+            .unwrap();
+        let set = service
+            .control_hardware_breakpoints(
+                &session_id,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_1234)),
+                None,
+            )
+            .unwrap();
+        service
+            .control_core(&session_id, 0, CoreExecutionAction::Run)
+            .unwrap();
+        let closed = service.close(&session_id).unwrap();
+
+        assert_eq!(listed.core.capacity, 6);
+        assert_eq!(set.core.affected_slot, Some(0));
+        assert!(set.effects.hardware_breakpoint_configuration_requested);
+        assert!(set.effects.hardware_breakpoint_state_verified);
+        assert_eq!(closed.hardware_breakpoint_cleanup.len(), 1);
+        assert!(
+            closed.hardware_breakpoint_cleanup[0]
+                .after
+                .iter()
+                .all(|slot| slot.address.is_none())
+        );
+        assert!(closed.effects.hardware_breakpoint_configuration_requested);
+        assert!(closed.effects.hardware_breakpoint_state_verified);
+        assert_eq!(closed.final_core_observations[0].state, CoreState::Running);
+        assert!(!service.has_active_session());
+    }
+
+    #[test]
+    fn failed_breakpoint_mutation_is_still_tracked_for_close_cleanup() {
+        let mut service = service();
+        let opened = service
+            .open("replay:stlink-v3:0039002A3432510433343034", "STM32G431CBTx")
+            .unwrap();
+        let session_id = opened.session.session_id;
+
+        service
+            .control_hardware_breakpoints(
+                &session_id,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_1234)),
+                Some(1),
+            )
+            .unwrap();
+        let error = service
+            .control_hardware_breakpoints(
+                &session_id,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_2000)),
+                Some(1),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(
+            service
+                .status(&session_id)
+                .unwrap()
+                .hardware_breakpoint_core_indexes,
+            vec![0]
+        );
+        let closed = service.close(&session_id).unwrap();
+        assert!(
+            closed.hardware_breakpoint_cleanup[0]
+                .after
+                .iter()
+                .all(|slot| slot.address.is_none())
+        );
     }
 
     #[test]

@@ -124,6 +124,139 @@ fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
         "{}",
         serde_json::json!({
             "schema_version": "1.0",
+            "request_id": "breakpoints-list",
+            "operation": "breakpoints.list",
+            "session_id": session_id,
+            "core": 0,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let listed_breakpoints = read_jsonl_response(&mut stdout);
+    assert_eq!(listed_breakpoints["data"]["core"]["capacity"], 6);
+    assert_eq!(listed_breakpoints["data"]["core"]["changed"], false);
+    assert!(
+        listed_breakpoints["data"]["core"]["after"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|slot| slot["address"].is_null())
+    );
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "breakpoints-set",
+            "operation": "breakpoints.set",
+            "session_id": session_id,
+            "core": 0,
+            "address": "0x08001234",
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let set_breakpoint = read_jsonl_response(&mut stdout);
+    assert_eq!(set_breakpoint["data"]["core"]["affected_slot"], 0);
+    assert_eq!(
+        set_breakpoint["data"]["core"]["after"][0]["address"],
+        "0x08001234"
+    );
+    assert_eq!(
+        set_breakpoint["data"]["effects"]["hardware_breakpoint_configuration_requested"],
+        true
+    );
+    assert_eq!(
+        set_breakpoint["data"]["effects"]["hardware_breakpoint_state_verified"],
+        true
+    );
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "breakpoints-clear",
+            "operation": "breakpoints.clear",
+            "session_id": session_id,
+            "core": 0,
+            "slot": 0,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let cleared_breakpoint = read_jsonl_response(&mut stdout);
+    assert_eq!(cleared_breakpoint["data"]["core"]["affected_slot"], 0);
+    assert!(cleared_breakpoint["data"]["core"]["after"][0]["address"].is_null());
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "breakpoints-set-for-close",
+            "operation": "breakpoints.set",
+            "session_id": session_id,
+            "core": 0,
+            "address": "0x08002000",
+            "slot": 2,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    assert_eq!(
+        read_jsonl_response(&mut stdout)["data"]["core"]["affected_slot"],
+        2
+    );
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "breakpoints-clear-all",
+            "operation": "breakpoints.clear_all",
+            "session_id": session_id,
+            "core": 0,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let cleared_all = read_jsonl_response(&mut stdout);
+    assert!(
+        cleared_all["data"]["core"]["after"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|slot| slot["address"].is_null())
+    );
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "breakpoints-set-for-close-again",
+            "operation": "breakpoints.set",
+            "session_id": session_id,
+            "core": 0,
+            "address": "0x08002000",
+            "slot": 2,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    assert_eq!(
+        read_jsonl_response(&mut stdout)["data"]["core"]["affected_slot"],
+        2
+    );
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
             "request_id": "registers",
             "operation": "registers.read",
             "session_id": session_id,
@@ -187,6 +320,7 @@ fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
     let status = read_jsonl_response(&mut stdout);
     assert_eq!(status["data"]["state"], "open");
     assert_eq!(status["data"]["observed_core_indexes"][0], 0);
+    assert_eq!(status["data"]["hardware_breakpoint_core_indexes"][0], 0);
 
     writeln!(
         stdin,
@@ -205,6 +339,14 @@ fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
     assert_eq!(
         closed["data"]["final_core_observations"][0]["state"],
         "running"
+    );
+    assert_eq!(
+        closed["data"]["hardware_breakpoint_cleanup"][0]["after"][2]["address"],
+        Value::Null
+    );
+    assert_eq!(
+        closed["data"]["effects"]["hardware_breakpoint_state_verified"],
+        true
     );
 
     writeln!(
@@ -228,7 +370,7 @@ fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
 }
 
 #[test]
-fn replay_session_step_rejects_running_core_and_keeps_serving() {
+fn replay_session_halted_only_mutations_reject_running_core_and_keep_serving() {
     let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
         .args([
             "--fixture",
@@ -292,6 +434,25 @@ fn replay_session_step_rejects_running_core_and_keeps_serving() {
         "{}",
         serde_json::json!({
             "schema_version": "1.0",
+            "request_id": "breakpoint",
+            "operation": "breakpoints.set",
+            "session_id": session_id,
+            "core": 0,
+            "address": "0x08001234",
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let breakpoint = read_jsonl_response(&mut stdout);
+    assert_eq!(breakpoint["ok"], false);
+    assert_eq!(breakpoint["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(breakpoint["error"]["details"]["original_state"], "running");
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
             "request_id": "status",
             "operation": "core.status",
             "session_id": session_id,
@@ -302,6 +463,56 @@ fn replay_session_step_rejects_running_core_and_keeps_serving() {
     stdin.flush().unwrap();
     let status = read_jsonl_response(&mut stdout);
     assert_eq!(status["data"]["core"]["state"], "running");
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "halt-before-continue",
+            "operation": "core.halt",
+            "session_id": session_id,
+            "core": 0,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let halted = read_jsonl_response(&mut stdout);
+    assert_eq!(halted["ok"], true);
+    assert_eq!(halted["data"]["core"]["state"], "halted");
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "continue",
+            "operation": "core.continue",
+            "session_id": session_id,
+            "core": 0,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let continued = read_jsonl_response(&mut stdout);
+    assert_eq!(continued["ok"], true);
+    assert_eq!(continued["operation"], "core.continue");
+    assert_eq!(continued["data"]["core"]["original_state"], "halted");
+    assert_eq!(continued["data"]["core"]["state"], "running");
+    assert_eq!(
+        continued["data"]["effects"]["execution_continue_requested"],
+        true
+    );
+    assert!(
+        continued["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("immediately hit a breakpoint"))
+    );
 
     writeln!(
         stdin,
@@ -859,6 +1070,41 @@ fn replay_core_step_reports_a_halted_instruction_boundary() {
     assert_eq!(
         result["data"]["operations"][2]["operation"],
         "core.step_one_instruction"
+    );
+}
+
+#[test]
+fn replay_core_continue_reports_the_observed_immediate_result() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "core",
+            "continue",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "core.continue");
+    assert_eq!(result["data"]["core"]["original_state"], "halted");
+    assert_eq!(result["data"]["core"]["state"], "running");
+    assert_eq!(
+        result["data"]["effects"]["execution_continue_requested"],
+        true
+    );
+    assert_eq!(
+        result["data"]["effects"]["intentional_final_core_state_change_requested"],
+        false
     );
 }
 

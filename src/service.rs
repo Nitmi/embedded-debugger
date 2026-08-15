@@ -339,6 +339,16 @@ impl<B: DebugBackend> DebugService<B> {
                         .then_some("post_disconnect_core_state")
                 }
             }
+            CoreExecutionAction::Continue => {
+                if !capabilities.core_status {
+                    Some("core_status")
+                } else if !capabilities.continue_execution {
+                    Some("continue_execution")
+                } else {
+                    (!capabilities.post_disconnect_core_state)
+                        .then_some("post_disconnect_core_state")
+                }
+            }
             CoreExecutionAction::Step => {
                 if !capabilities.core_status {
                     Some("core_status")
@@ -419,6 +429,13 @@ impl<B: DebugBackend> DebugService<B> {
                 operation(4, "core.verify_running_before_disconnect"),
                 operation(5, "session.disconnect_preserving_core_state"),
             ],
+            CoreExecutionAction::Continue => vec![
+                operation(1, "session.attach"),
+                operation(2, "core.verify_halted"),
+                operation(3, "core.continue_execution"),
+                operation(4, "core.observe_immediate_result"),
+                operation(5, "session.disconnect_preserving_core_state"),
+            ],
             CoreExecutionAction::Step => vec![
                 operation(1, "session.attach"),
                 operation(2, "core.read_original_execution_state"),
@@ -437,6 +454,7 @@ impl<B: DebugBackend> DebugService<B> {
                 &self.backend,
                 DebugControlEffectRequest {
                     instruction_step_requested: action == CoreExecutionAction::Step,
+                    execution_continue_requested: action == CoreExecutionAction::Continue,
                     intentional_final_core_state_change_requested: matches!(
                         action,
                         CoreExecutionAction::Halt | CoreExecutionAction::Run
@@ -1046,6 +1064,9 @@ pub(crate) struct DebugControlEffectRequest {
     pub reset_requested: bool,
     pub memory_read_requested: bool,
     pub instruction_step_requested: bool,
+    pub execution_continue_requested: bool,
+    pub hardware_breakpoint_configuration_requested: bool,
+    pub hardware_breakpoint_state_verified: bool,
     pub intentional_final_core_state_change_requested: bool,
 }
 
@@ -1059,6 +1080,10 @@ pub(crate) fn debug_control_effects<B: DebugBackend>(
         flash_operation_requested: false,
         memory_read_requested: request.memory_read_requested,
         instruction_step_requested: request.instruction_step_requested,
+        execution_continue_requested: request.execution_continue_requested,
+        hardware_breakpoint_configuration_requested: request
+            .hardware_breakpoint_configuration_requested,
+        hardware_breakpoint_state_verified: request.hardware_breakpoint_state_verified,
         intentional_final_core_state_change_requested: request
             .intentional_final_core_state_change_requested,
         arbitrary_memory_write_requested: false,

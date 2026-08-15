@@ -22,6 +22,7 @@
     "verify": true,
     "halt": true,
     "run": true,
+    "continue_execution": true,
     "reset": true,
     "step": true,
     "core_status": true,
@@ -127,7 +128,10 @@
       "architecture": "armv7em",
       "state": "halted",
       "halt_reason": "breakpoint",
-      "step_pcs": ["0x08001234", "0x08001236"]
+      "step_pcs": ["0x08001234", "0x08001236"],
+      "continue_results": [
+        {"state": "running", "halt_reason": null}
+      ]
     }
   ],
   "flash": {
