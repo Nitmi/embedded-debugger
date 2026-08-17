@@ -289,11 +289,12 @@ ordered operations.
 
 ## Persistent session JSONL
 
-`session serve --target <exact-target>` is a foreground stdio service. It emits
-JSONL regardless of the global `--json` flag: each non-empty stdin line is one
-request and each request receives exactly one stdout line. Diagnostics stay on
-stderr. A request line is limited to 64 KiB and `request_id` to 128 bytes.
-Malformed lines return `PROTOCOL_ERROR` without terminating the server.
+`session serve --target <exact-target> [--idle-timeout-ms <ms>]` is a
+foreground stdio service. It emits JSONL regardless of the global `--json`
+flag: each non-empty stdin line is one request and each request receives
+exactly one stdout line. Diagnostics stay on stderr. A request line is limited
+to 64 KiB and `request_id` to 128 bytes. Malformed lines return
+`PROTOCOL_ERROR` without terminating the server.
 
 Open one exact probe/target lease:
 
@@ -305,6 +306,8 @@ The response adds `request_id` to the normal versioned result envelope and
 returns `data.session.session_id`, `state="open"`,
 `transport="stdio_jsonl"`, and
 `close_policy="halt_clear_hardware_breakpoints_run_observed_cores_before_disconnect"`.
+Both `session.open` and `session.status` include `lease_policy`, whose
+`idle_timeout_ms` and `idle_timeout_action` report the effective server policy.
 Only one session may be open. Target matching is exact; later operations must
 echo the opaque session ID so stale or foreign clients cannot control the
 current lease. The response capability matrix contains the hardware-breakpoint
@@ -386,20 +389,41 @@ structured `effects`, ordered `operations`, `complete=true`, and
 DMA, other cores, or external UART writes.
 
 `session.status` reports the active identity, open timestamp, close policy,
-observed core indexes, and cores tracked for hardware-breakpoint cleanup. A
-mutation attempt is tracked before the backend write, so even a partial or
-failed write is included in close cleanup. `session.close` first issues and
-verifies an idempotent halt for each tracked breakpoint core, clears and reads
-back every slot, then issues and verifies an idempotent run for every observed
-or read core before disconnecting. Its report includes
+lease policy, observed core indexes, and cores tracked for hardware-breakpoint
+cleanup. A mutation attempt is tracked before the backend write, so even a
+partial or failed write is included in close cleanup. `session.close` first
+issues and verifies an idempotent halt for each tracked breakpoint core, clears
+and reads back every slot, then issues and verifies an idempotent run for every
+observed or read core before disconnecting. Its report includes
 `hardware_breakpoint_cleanup`, final core observations, structured effects, and
 ordered operations. If explicit breakpoint cleanup cannot be verified, the
 service skips the explicit resume step rather than deliberately running with a
 possibly stale breakpoint, then still attempts backend disconnect.
 `server.shutdown` succeeds only after the active session has been closed. EOF
 and transport failures invoke the same best-effort close path and record
-cleanup on stderr; an OS-level hard kill or power loss cannot receive a
-response and still relies on backend teardown behavior.
+cleanup on stderr.
+
+The CLI default idle timeout is 300000 ms. A finite value must be
+100..=86400000 ms; 0 disables expiry. This option is validated before fixture
+loading, probe discovery, or target attach. No deadline runs before
+`session.open`. While a lease is active, each structurally valid request renews
+the deadline only after processing and response output complete, including a
+valid request that receives an operation-level error. Blank, malformed, and
+oversized lines do not renew it. Because the backend remains exclusively owned
+by the main loop, expiry is checked only between requests and never interrupts
+an in-flight operation. Long requests therefore receive a fresh full idle
+interval after they finish; asynchronous cancellation remains a separate
+future capability.
+
+On idle expiry, the service applies the same guarded close policy as explicit
+close and EOF, writes one compact versioned `session.idle_expired` JSON object
+to stderr, and exits with code 0. The event contains `idle_timeout_ms`,
+`action="close_and_exit"`, and the complete close report under `close`. If
+cleanup fails, stderr instead receives
+`session.idle_expiry_cleanup_failed` with the structured error and the process
+returns the mapped failure code. An OS-level hard kill or power loss cannot run
+this path and still relies on backend teardown behavior; automatic external
+restart is outside this service contract.
 
 General ELF and Intel HEX loading are not yet part of this contract. ESP-IDF
 application ELF normalization is the only format-aware path; execution is

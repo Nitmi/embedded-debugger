@@ -91,6 +91,13 @@ pub enum SessionCommand {
 pub struct SessionServeSelection {
     #[arg(long, help = "exact target name that this JSONL server is bound to")]
     pub target: String,
+
+    #[arg(
+        long,
+        default_value_t = session::DEFAULT_SESSION_IDLE_TIMEOUT_MS,
+        help = "close the active lease and exit after this many idle milliseconds; 0 disables (100..=86400000)"
+    )]
+    pub idle_timeout_ms: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -388,21 +395,27 @@ pub fn serve_session_stdio(cli: &Cli) -> Result<()> {
             json!({"operation": cli.operation_name()}),
         ));
     };
+    let options = session::SessionServerOptions::from_idle_timeout_ms(selection.idle_timeout_ms)?;
 
     match cli.backend {
-        BackendArg::Replay => {
-            serve_session_backend(ReplayBackend::from_path(replay_fixture_path(cli)?)?)
+        BackendArg::Replay => serve_session_backend(
+            ReplayBackend::from_path(replay_fixture_path(cli)?)?,
+            options,
+        ),
+        BackendArg::ProbeRs => {
+            serve_session_backend(ProbeRsBackend::new(&selection.target)?, options)
         }
-        BackendArg::ProbeRs => serve_session_backend(ProbeRsBackend::new(&selection.target)?),
         BackendArg::Openocd => Err(unsupported_openocd("persistent_session")),
     }
 }
 
-fn serve_session_backend<B: DebugBackend>(backend: B) -> Result<()> {
-    let stdin = io::stdin();
+fn serve_session_backend<B: DebugBackend>(
+    backend: B,
+    options: session::SessionServerOptions,
+) -> Result<()> {
     let stdout = io::stdout();
     let stderr = io::stderr();
-    session::serve_jsonl(backend, stdin.lock(), stdout.lock(), stderr.lock())
+    session::serve_stdio_jsonl(backend, stdout.lock(), stderr.lock(), options)
 }
 
 pub fn execute(cli: &Cli) -> Result<CommandResult> {

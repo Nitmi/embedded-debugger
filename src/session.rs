@@ -1,6 +1,9 @@
 use std::{
     collections::BTreeSet,
-    io::{BufRead, Write},
+    io::{self, BufRead, Write},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+    thread,
+    time::{Duration, Instant},
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -31,11 +34,78 @@ use crate::{
 const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const CLOSE_POLICY: &str = "halt_clear_hardware_breakpoints_run_observed_cores_before_disconnect";
+const IDLE_TIMEOUT_ACTION: &str = "close_and_exit";
 const SESSION_STATE_WARNING: &str = "Core state is guaranteed only while this debug session remains open; closing the session or terminating the process may change target state.";
 const HALT_SIDE_EFFECT_WARNING: &str = "Halting a running core may interrupt in-flight peripheral or external I/O; resuming later cannot roll back effects already emitted.";
 const STEP_SIDE_EFFECT_WARNING: &str = "Stepping executes one target instruction while halted; it may mutate registers, memory, peripherals, and external I/O.";
 const BREAKPOINT_SIDE_EFFECT_WARNING: &str = "Hardware breakpoint changes write volatile debug comparator state. Once resumed, a matching instruction address will halt the core; session close clears managed breakpoint slots before resuming observed cores.";
 const READ_SIDE_EFFECT_WARNING: &str = "The read may briefly halt a running core; external I/O, peripherals, other cores, and DMA are not rolled back or made atomic.";
+
+pub const DEFAULT_SESSION_IDLE_TIMEOUT_MS: u64 = 300_000;
+pub const MIN_SESSION_IDLE_TIMEOUT_MS: u64 = 100;
+pub const MAX_SESSION_IDLE_TIMEOUT_MS: u64 = 86_400_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionServerOptions {
+    idle_timeout_ms: Option<u64>,
+}
+
+impl SessionServerOptions {
+    pub fn from_idle_timeout_ms(idle_timeout_ms: u64) -> Result<Self> {
+        if idle_timeout_ms == 0 {
+            return Ok(Self::disabled());
+        }
+        if !(MIN_SESSION_IDLE_TIMEOUT_MS..=MAX_SESSION_IDLE_TIMEOUT_MS).contains(&idle_timeout_ms) {
+            return Err(DebugError::config(
+                "session idle timeout is outside the supported range",
+                json!({
+                    "idle_timeout_ms": idle_timeout_ms,
+                    "minimum_ms": MIN_SESSION_IDLE_TIMEOUT_MS,
+                    "maximum_ms": MAX_SESSION_IDLE_TIMEOUT_MS,
+                    "disable_value": 0,
+                }),
+            ));
+        }
+        Ok(Self {
+            idle_timeout_ms: Some(idle_timeout_ms),
+        })
+    }
+
+    pub const fn disabled() -> Self {
+        Self {
+            idle_timeout_ms: None,
+        }
+    }
+
+    pub const fn idle_timeout_ms(self) -> Option<u64> {
+        self.idle_timeout_ms
+    }
+
+    fn idle_timeout(self) -> Option<Duration> {
+        self.idle_timeout_ms.map(Duration::from_millis)
+    }
+
+    fn lease_policy(self) -> SessionLeasePolicy {
+        SessionLeasePolicy {
+            idle_timeout_ms: self.idle_timeout_ms,
+            idle_timeout_action: self.idle_timeout_ms.map(|_| IDLE_TIMEOUT_ACTION),
+        }
+    }
+}
+
+impl Default for SessionServerOptions {
+    fn default() -> Self {
+        Self {
+            idle_timeout_ms: Some(DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SessionLeasePolicy {
+    pub idle_timeout_ms: Option<u64>,
+    pub idle_timeout_action: Option<&'static str>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionOpenReport {
@@ -46,6 +116,7 @@ pub struct SessionOpenReport {
     pub session: SessionInfo,
     pub effects: DebugControlEffects,
     pub close_policy: &'static str,
+    pub lease_policy: SessionLeasePolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -56,6 +127,7 @@ pub struct SessionStatusReport {
     pub observed_core_indexes: Vec<u32>,
     pub hardware_breakpoint_core_indexes: Vec<u32>,
     pub close_policy: &'static str,
+    pub lease_policy: SessionLeasePolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -148,13 +220,19 @@ struct ActiveSession {
 pub struct SessionService<B: DebugBackend> {
     backend: B,
     active: Option<ActiveSession>,
+    server_options: SessionServerOptions,
 }
 
 impl<B: DebugBackend> SessionService<B> {
     pub fn new(backend: B) -> Self {
+        Self::with_server_options(backend, SessionServerOptions::disabled())
+    }
+
+    pub fn with_server_options(backend: B, server_options: SessionServerOptions) -> Self {
         Self {
             backend,
             active: None,
+            server_options,
         }
     }
 
@@ -223,6 +301,7 @@ impl<B: DebugBackend> SessionService<B> {
             session: session.clone(),
             effects: debug_control_effects(&self.backend, DebugControlEffectRequest::default()),
             close_policy: CLOSE_POLICY,
+            lease_policy: self.server_options.lease_policy(),
         };
         self.active = Some(ActiveSession {
             info: session,
@@ -246,6 +325,7 @@ impl<B: DebugBackend> SessionService<B> {
                 .copied()
                 .collect(),
             close_policy: CLOSE_POLICY,
+            lease_policy: self.server_options.lease_policy(),
         })
     }
 
@@ -1042,6 +1122,26 @@ struct SessionErrorPayload<'a> {
     suggested_actions: &'a [crate::error::SuggestedAction],
 }
 
+#[derive(Debug)]
+enum SessionInputEvent {
+    Line(String),
+    End,
+    Error(io::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionLoopExit {
+    Shutdown,
+    TransportEnded,
+    IdleTimeout { idle_timeout_ms: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessedLine {
+    valid_request: bool,
+    shutdown: bool,
+}
+
 pub fn serve_jsonl<B, R, W, D>(
     backend: B,
     mut input: R,
@@ -1056,20 +1156,33 @@ where
 {
     let mut service = SessionService::new(backend);
     let result = serve_jsonl_loop(&mut service, &mut input, &mut output);
-    let cleanup = cleanup_after_transport_end(&mut service, &mut diagnostics);
-    match (result, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(primary), Ok(())) => Err(primary),
-        (Ok(()), Err(cleanup)) => Err(cleanup),
-        (Err(primary), Err(cleanup)) => Err(with_cleanup_failure(primary, cleanup)),
-    }
+    finish_session_server(result, &mut service, &mut diagnostics)
+}
+
+pub fn serve_stdio_jsonl<B, W, D>(
+    backend: B,
+    output: W,
+    diagnostics: D,
+    options: SessionServerOptions,
+) -> Result<()>
+where
+    B: DebugBackend,
+    W: Write,
+    D: Write,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("embedded-debugger-stdin".to_string())
+        .spawn(move || read_stdio_events(sender))
+        .map_err(|error| DebugError::io("start session stdin supervisor", None, &error))?;
+    serve_jsonl_events(backend, receiver, output, diagnostics, options)
 }
 
 fn serve_jsonl_loop<B: DebugBackend>(
     service: &mut SessionService<B>,
     input: &mut impl BufRead,
     output: &mut impl Write,
-) -> Result<()> {
+) -> Result<SessionLoopExit> {
     let mut line = String::new();
 
     loop {
@@ -1078,45 +1191,173 @@ fn serve_jsonl_loop<B: DebugBackend>(
             .read_line(&mut line)
             .map_err(|error| DebugError::io("read session JSONL request", None, &error))?;
         if bytes == 0 {
-            return Ok(());
+            return Ok(SessionLoopExit::TransportEnded);
         }
-        if line.trim().is_empty() {
-            continue;
+        if process_jsonl_line(service, output, &line)?.shutdown {
+            return Ok(SessionLoopExit::Shutdown);
         }
+    }
+}
 
-        let (request_id, operation) = request_context(&line);
-        if line.len() > MAX_REQUEST_LINE_BYTES {
-            let error = protocol_error(
-                "session request exceeds the JSONL line limit",
-                json!({"maximum_bytes": MAX_REQUEST_LINE_BYTES, "received_bytes": line.len()}),
-            );
-            write_error(output, request_id.as_deref(), &operation, &error)?;
-            continue;
-        }
+fn serve_jsonl_events<B, W, D>(
+    backend: B,
+    receiver: Receiver<SessionInputEvent>,
+    mut output: W,
+    mut diagnostics: D,
+    options: SessionServerOptions,
+) -> Result<()>
+where
+    B: DebugBackend,
+    W: Write,
+    D: Write,
+{
+    let mut service = SessionService::with_server_options(backend, options);
+    let result = serve_jsonl_event_loop(&mut service, &receiver, &mut output, options);
+    finish_session_server(result, &mut service, &mut diagnostics)
+}
 
-        let request = match parse_request(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                write_error(output, request_id.as_deref(), &operation, &error)?;
-                continue;
+fn serve_jsonl_event_loop<B: DebugBackend>(
+    service: &mut SessionService<B>,
+    receiver: &Receiver<SessionInputEvent>,
+    output: &mut impl Write,
+    options: SessionServerOptions,
+) -> Result<SessionLoopExit> {
+    let idle_timeout = options.idle_timeout();
+    let mut idle_deadline = None;
+
+    loop {
+        let event = if service.has_active_session() {
+            if let Some(timeout) = idle_timeout {
+                let deadline = idle_deadline.get_or_insert_with(|| Instant::now() + timeout);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(SessionLoopExit::IdleTimeout {
+                        idle_timeout_ms: options
+                            .idle_timeout_ms()
+                            .expect("enabled timeout always has milliseconds"),
+                    });
+                }
+                match receiver.recv_timeout(remaining) {
+                    Ok(event) => event,
+                    Err(RecvTimeoutError::Timeout) => {
+                        return Ok(SessionLoopExit::IdleTimeout {
+                            idle_timeout_ms: options
+                                .idle_timeout_ms()
+                                .expect("enabled timeout always has milliseconds"),
+                        });
+                    }
+                    Err(RecvTimeoutError::Disconnected) => SessionInputEvent::End,
+                }
+            } else {
+                receiver.recv().unwrap_or(SessionInputEvent::End)
             }
+        } else {
+            idle_deadline = None;
+            receiver.recv().unwrap_or(SessionInputEvent::End)
         };
 
-        match handle_request(service, &request) {
-            Ok(response) => {
-                let shutdown = response.shutdown;
-                write_success(output, &request.request_id, response)?;
-                if shutdown {
-                    return Ok(());
+        match event {
+            SessionInputEvent::Line(line) => {
+                let processed = process_jsonl_line(service, output, &line)?;
+                if processed.shutdown {
+                    return Ok(SessionLoopExit::Shutdown);
+                }
+                if !service.has_active_session() {
+                    idle_deadline = None;
+                } else if processed.valid_request
+                    && let Some(timeout) = idle_timeout
+                {
+                    idle_deadline = Some(Instant::now() + timeout);
+                }
+            }
+            SessionInputEvent::End => return Ok(SessionLoopExit::TransportEnded),
+            SessionInputEvent::Error(error) => {
+                return Err(DebugError::io(
+                    "read supervised session JSONL request",
+                    None,
+                    &error,
+                ));
+            }
+        }
+    }
+}
+
+fn process_jsonl_line<B: DebugBackend>(
+    service: &mut SessionService<B>,
+    output: &mut impl Write,
+    line: &str,
+) -> Result<ProcessedLine> {
+    if line.trim().is_empty() {
+        return Ok(ProcessedLine {
+            valid_request: false,
+            shutdown: false,
+        });
+    }
+
+    let (request_id, operation) = request_context(line);
+    if line.len() > MAX_REQUEST_LINE_BYTES {
+        let error = protocol_error(
+            "session request exceeds the JSONL line limit",
+            json!({"maximum_bytes": MAX_REQUEST_LINE_BYTES, "received_bytes": line.len()}),
+        );
+        write_error(output, request_id.as_deref(), &operation, &error)?;
+        return Ok(ProcessedLine {
+            valid_request: false,
+            shutdown: false,
+        });
+    }
+
+    let request = match parse_request(line) {
+        Ok(request) => request,
+        Err(error) => {
+            write_error(output, request_id.as_deref(), &operation, &error)?;
+            return Ok(ProcessedLine {
+                valid_request: false,
+                shutdown: false,
+            });
+        }
+    };
+
+    let shutdown = match handle_request(service, &request) {
+        Ok(response) => {
+            let shutdown = response.shutdown;
+            write_success(output, &request.request_id, response)?;
+            shutdown
+        }
+        Err(error) => {
+            write_error(
+                output,
+                Some(&request.request_id),
+                request.operation.name(),
+                &error,
+            )?;
+            false
+        }
+    };
+    Ok(ProcessedLine {
+        valid_request: true,
+        shutdown,
+    })
+}
+
+fn read_stdio_events(sender: SyncSender<SessionInputEvent>) {
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    loop {
+        let mut line = String::new();
+        match input.read_line(&mut line) {
+            Ok(0) => {
+                let _ = sender.send(SessionInputEvent::End);
+                return;
+            }
+            Ok(_) => {
+                if sender.send(SessionInputEvent::Line(line)).is_err() {
+                    return;
                 }
             }
             Err(error) => {
-                write_error(
-                    output,
-                    Some(&request.request_id),
-                    request.operation.name(),
-                    &error,
-                )?;
+                let _ = sender.send(SessionInputEvent::Error(error));
+                return;
             }
         }
     }
@@ -1426,27 +1667,91 @@ fn write_envelope(output: &mut impl Write, envelope: &impl Serialize) -> Result<
         .map_err(|error| DebugError::io("write session JSONL response", None, &error))
 }
 
-fn cleanup_after_transport_end<B: DebugBackend>(
+fn finish_session_server<B: DebugBackend>(
+    result: Result<SessionLoopExit>,
     service: &mut SessionService<B>,
     diagnostics: &mut impl Write,
 ) -> Result<()> {
+    let exit = result.as_ref().ok().copied();
+    let cleanup = cleanup_after_server_exit(service, diagnostics, exit);
+    match (result.map(|_| ()), cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(()), Err(cleanup)) => Err(cleanup),
+        (Err(primary), Err(cleanup)) => Err(with_cleanup_failure(primary, cleanup)),
+    }
+}
+
+fn cleanup_after_server_exit<B: DebugBackend>(
+    service: &mut SessionService<B>,
+    diagnostics: &mut impl Write,
+    exit: Option<SessionLoopExit>,
+) -> Result<()> {
     match service.close_active() {
         Ok(Some(report)) => {
-            let _ = writeln!(
-                diagnostics,
-                "session transport ended; safely closed {} using {}",
-                report.session_id, report.close_policy
-            );
+            match exit {
+                Some(SessionLoopExit::IdleTimeout { idle_timeout_ms }) => {
+                    let event = json!({
+                        "schema_version": SCHEMA_VERSION,
+                        "event": "session.idle_expired",
+                        "idle_timeout_ms": idle_timeout_ms,
+                        "action": IDLE_TIMEOUT_ACTION,
+                        "close": report,
+                    });
+                    let _ = writeln!(diagnostics, "{event}");
+                }
+                Some(SessionLoopExit::Shutdown) => {
+                    let _ = writeln!(
+                        diagnostics,
+                        "session server shutdown; safely closed {} using {}",
+                        report.session_id, report.close_policy
+                    );
+                }
+                Some(SessionLoopExit::TransportEnded) => {
+                    let _ = writeln!(
+                        diagnostics,
+                        "session transport ended; safely closed {} using {}",
+                        report.session_id, report.close_policy
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        diagnostics,
+                        "session transport failed; safely closed {} using {}",
+                        report.session_id, report.close_policy
+                    );
+                }
+            }
+            let _ = diagnostics.flush();
             Ok(())
         }
         Ok(None) => Ok(()),
         Err(error) => {
-            let _ = writeln!(
-                diagnostics,
-                "session transport ended; cleanup failed [{}]: {}",
-                serialize_error_code(error.code),
-                error.message
-            );
+            match exit {
+                Some(SessionLoopExit::IdleTimeout { idle_timeout_ms }) => {
+                    let event = json!({
+                        "schema_version": SCHEMA_VERSION,
+                        "event": "session.idle_expiry_cleanup_failed",
+                        "idle_timeout_ms": idle_timeout_ms,
+                        "action": IDLE_TIMEOUT_ACTION,
+                        "error": {
+                            "code": error.code,
+                            "message": error.message,
+                            "details": error.details,
+                        },
+                    });
+                    let _ = writeln!(diagnostics, "{event}");
+                }
+                _ => {
+                    let _ = writeln!(
+                        diagnostics,
+                        "session transport ended; cleanup failed [{}]: {}",
+                        serialize_error_code(error.code),
+                        error.message
+                    );
+                }
+            }
+            let _ = diagnostics.flush();
             Err(error)
         }
     }
@@ -1655,7 +1960,10 @@ fn serialize_error_code(code: ErrorCode) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, path::Path};
+    use std::{
+        io::{self, Cursor},
+        path::Path,
+    };
 
     use serde_json::Value;
 
@@ -1669,6 +1977,37 @@ mod tests {
         SessionService::new(
             ReplayBackend::from_path(Path::new("examples/replay/stm32g4.json")).unwrap(),
         )
+    }
+
+    struct SlowFlushWriter {
+        bytes: Vec<u8>,
+        delay: Duration,
+        delayed: bool,
+    }
+
+    impl SlowFlushWriter {
+        fn new(delay: Duration) -> Self {
+            Self {
+                bytes: Vec::new(),
+                delay,
+                delayed: false,
+            }
+        }
+    }
+
+    impl Write for SlowFlushWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if !self.delayed {
+                self.delayed = true;
+                thread::sleep(self.delay);
+            }
+            Ok(())
+        }
     }
 
     #[test]
@@ -2087,5 +2426,161 @@ mod tests {
         assert_eq!(responses[1]["error"]["details"]["expected"], "1.0");
         assert_eq!(responses[2]["ok"], true);
         assert_eq!(responses[2]["operation"], "server.shutdown");
+    }
+
+    #[test]
+    fn session_idle_timeout_options_are_bounded_and_zero_disables() {
+        assert_eq!(
+            SessionServerOptions::default().idle_timeout_ms(),
+            Some(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        );
+        assert_eq!(
+            SessionServerOptions::from_idle_timeout_ms(0)
+                .unwrap()
+                .idle_timeout_ms(),
+            None
+        );
+        assert_eq!(
+            SessionServerOptions::from_idle_timeout_ms(MIN_SESSION_IDLE_TIMEOUT_MS)
+                .unwrap()
+                .idle_timeout_ms(),
+            Some(MIN_SESSION_IDLE_TIMEOUT_MS)
+        );
+        assert_eq!(
+            SessionServerOptions::from_idle_timeout_ms(MIN_SESSION_IDLE_TIMEOUT_MS - 1)
+                .unwrap_err()
+                .code,
+            ErrorCode::ConfigInvalid
+        );
+        assert_eq!(
+            SessionServerOptions::from_idle_timeout_ms(MAX_SESSION_IDLE_TIMEOUT_MS + 1)
+                .unwrap_err()
+                .code,
+            ErrorCode::ConfigInvalid
+        );
+    }
+
+    #[test]
+    fn idle_timeout_cleans_breakpoints_restores_running_and_emits_evidence() {
+        let options =
+            SessionServerOptions::from_idle_timeout_ms(MIN_SESSION_IDLE_TIMEOUT_MS).unwrap();
+        let backend = ReplayBackend::from_path(Path::new("examples/replay/stm32g4.json")).unwrap();
+        let mut service = SessionService::with_server_options(backend, options);
+        let opened = service
+            .open("replay:stlink-v3:0039002A3432510433343034", "STM32G431CBTx")
+            .unwrap();
+        let session_id = opened.session.session_id;
+        service
+            .control_hardware_breakpoints(
+                &session_id,
+                0,
+                HardwareBreakpointAction::Set,
+                Some(Address(0x0800_1234)),
+                Some(0),
+            )
+            .unwrap();
+
+        let (_sender, receiver) = mpsc::channel();
+        let mut output = Vec::new();
+        let exit = serve_jsonl_event_loop(&mut service, &receiver, &mut output, options).unwrap();
+        assert_eq!(
+            exit,
+            SessionLoopExit::IdleTimeout {
+                idle_timeout_ms: MIN_SESSION_IDLE_TIMEOUT_MS
+            }
+        );
+
+        let mut diagnostics = Vec::new();
+        cleanup_after_server_exit(&mut service, &mut diagnostics, Some(exit)).unwrap();
+        assert!(!service.has_active_session());
+        let event: Value = serde_json::from_slice(&diagnostics).unwrap();
+        assert_eq!(event["event"], "session.idle_expired");
+        assert_eq!(event["idle_timeout_ms"], MIN_SESSION_IDLE_TIMEOUT_MS);
+        assert_eq!(event["action"], "close_and_exit");
+        assert_eq!(event["close"]["state"], "closed");
+        assert_eq!(event["close"]["disconnected"], true);
+        assert_eq!(
+            event["close"]["final_core_observations"][0]["state"],
+            "running"
+        );
+        assert!(
+            event["close"]["hardware_breakpoint_cleanup"][0]["after"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|slot| slot["address"].is_null())
+        );
+    }
+
+    #[test]
+    fn idle_timeout_never_interrupts_an_in_flight_request() {
+        let options =
+            SessionServerOptions::from_idle_timeout_ms(MIN_SESSION_IDLE_TIMEOUT_MS).unwrap();
+        let backend = ReplayBackend::from_path(Path::new("examples/replay/stm32g4.json")).unwrap();
+        let mut service = SessionService::with_server_options(backend, options);
+        let opened = service
+            .open("replay:stlink-v3:0039002A3432510433343034", "STM32G431CBTx")
+            .unwrap();
+        let session_id = opened.session.session_id;
+
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(SessionInputEvent::Line(
+                json!({
+                    "schema_version": "1.0",
+                    "request_id": "long-request",
+                    "operation": "session.status",
+                    "session_id": session_id,
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let mut output = SlowFlushWriter::new(Duration::from_millis(150));
+        let started = Instant::now();
+
+        let exit = serve_jsonl_event_loop(&mut service, &receiver, &mut output, options).unwrap();
+
+        assert_eq!(
+            exit,
+            SessionLoopExit::IdleTimeout {
+                idle_timeout_ms: MIN_SESSION_IDLE_TIMEOUT_MS
+            }
+        );
+        assert!(started.elapsed() >= Duration::from_millis(225));
+        let response: Value = serde_json::from_slice(&output.bytes).unwrap();
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["operation"], "session.status");
+
+        let mut diagnostics = Vec::new();
+        cleanup_after_server_exit(&mut service, &mut diagnostics, Some(exit)).unwrap();
+        let event: Value = serde_json::from_slice(&diagnostics).unwrap();
+        assert_eq!(event["event"], "session.idle_expired");
+    }
+
+    #[test]
+    fn idle_timeout_does_not_start_before_a_lease_is_open() {
+        let options =
+            SessionServerOptions::from_idle_timeout_ms(MIN_SESSION_IDLE_TIMEOUT_MS).unwrap();
+        let backend = ReplayBackend::from_path(Path::new("examples/replay/stm32g4.json")).unwrap();
+        let mut service = SessionService::with_server_options(backend, options);
+        let (sender, receiver) = mpsc::channel();
+        let delayed_request = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(MIN_SESSION_IDLE_TIMEOUT_MS + 50));
+            sender
+                .send(SessionInputEvent::Line(
+                    "{\"schema_version\":\"1.0\",\"request_id\":\"done\",\"operation\":\"server.shutdown\"}\n"
+                        .to_string(),
+                ))
+                .unwrap();
+        });
+        let mut output = Vec::new();
+
+        let exit = serve_jsonl_event_loop(&mut service, &receiver, &mut output, options).unwrap();
+        delayed_request.join().unwrap();
+
+        assert_eq!(exit, SessionLoopExit::Shutdown);
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["operation"], "server.shutdown");
+        assert_eq!(response["ok"], true);
     }
 }

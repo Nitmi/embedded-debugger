@@ -1,7 +1,9 @@
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     process::{Command as ProcessCommand, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use assert_cmd::Command;
@@ -53,6 +55,11 @@ fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
         .to_string();
     assert_eq!(opened["request_id"], "open");
     assert_eq!(opened["data"]["state"], "open");
+    assert_eq!(opened["data"]["lease_policy"]["idle_timeout_ms"], 300000);
+    assert_eq!(
+        opened["data"]["lease_policy"]["idle_timeout_action"],
+        "close_and_exit"
+    );
 
     writeln!(
         stdin,
@@ -682,6 +689,137 @@ fn replay_session_server_safely_closes_an_active_session_on_eof() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("session transport ended; safely closed"));
     assert!(stderr.contains("run_observed_cores_before_disconnect"));
+}
+
+#[test]
+fn replay_session_idle_timeout_cleans_up_and_exits_with_structured_evidence() {
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
+        .args([
+            "--fixture",
+            fixture(),
+            "session",
+            "serve",
+            "--target",
+            "STM32G431CBTx",
+            "--idle-timeout-ms",
+            "200",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "open",
+            "operation": "session.open",
+            "probe": "replay:stlink-v3:0039002A3432510433343034",
+            "target": "STM32G431CBTx",
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let opened = read_jsonl_response(&mut stdout);
+    let session_id = opened["data"]["session"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(opened["data"]["lease_policy"]["idle_timeout_ms"], 200);
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "breakpoint",
+            "operation": "breakpoints.set",
+            "session_id": session_id,
+            "core": 0,
+            "address": "0x08001234",
+            "slot": 0,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    assert_eq!(read_jsonl_response(&mut stdout)["ok"], true);
+
+    let idle_started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if idle_started.elapsed() > Duration::from_secs(5) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("session server did not exit after its idle timeout");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(idle_started.elapsed() >= Duration::from_millis(150));
+    assert!(status.success());
+    drop(stdin);
+    drop(stdout);
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    let event = stderr
+        .lines()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+        .expect("idle expiry writes a structured stderr event");
+    assert_eq!(event["event"], "session.idle_expired");
+    assert_eq!(event["idle_timeout_ms"], 200);
+    assert_eq!(event["action"], "close_and_exit");
+    assert_eq!(event["close"]["state"], "closed");
+    assert_eq!(event["close"]["disconnected"], true);
+    assert_eq!(
+        event["close"]["final_core_observations"][0]["state"],
+        "running"
+    );
+    assert!(
+        event["close"]["hardware_breakpoint_cleanup"][0]["after"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|slot| slot["address"].is_null())
+    );
+}
+
+#[test]
+fn session_idle_timeout_is_validated_before_backend_loading() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            "deliberately-missing.json",
+            "session",
+            "serve",
+            "--target",
+            "STM32G431CBTx",
+            "--idle-timeout-ms",
+            "99",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stderr
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["operation"], "session.serve");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["idle_timeout_ms"], 99);
 }
 
 fn read_jsonl_response(reader: &mut impl BufRead) -> Value {

@@ -140,8 +140,17 @@ therefore use the foreground JSONL session service rather than a short-lived
 CLI process:
 
 ```console
-cargo run -- --backend probe-rs session serve --target esp32s3
+cargo run -- --backend probe-rs session serve --target esp32s3 \
+  --idle-timeout-ms 300000
 ```
+
+An active lease expires after five idle minutes by default. Set
+`--idle-timeout-ms 0` to disable expiry; finite values must be
+100..=86400000 ms. `session.open` and `session.status` expose the effective
+`lease_policy`. The deadline starts only after a lease opens and restarts after
+each structurally valid request has finished and its response has been written.
+Blank, malformed, and oversized lines do not renew it. A request already in
+flight is never interrupted by the lease timer.
 
 Write one compact JSON request per stdin line. Start with `session.open` and an
 exact probe/target, then use the returned `session_id` for `session.status`,
@@ -185,10 +194,12 @@ the active lease and return structured R1 `effects` plus ordered operations.
 Memory reads keep the same target-region and 4096-byte bounds as the one-shot
 command. Finish with `server.shutdown`. Responses are one versioned JSON object
 per stdout line; diagnostics stay on stderr. Core responses are explicitly
-scoped to the active session. Close and stdin EOF first halt cores with managed
-breakpoints, clear and verify all of their slots, then run every observed core
-and disconnect. See [`docs/contracts.md`](docs/contracts.md) for the wire
-contract.
+scoped to the active session. Close, stdin EOF, and idle expiry first halt cores
+with managed breakpoints, clear and verify all of their slots, then run every
+observed core and disconnect. Successful expiry emits a versioned
+`session.idle_expired` lifecycle object with the complete close report on
+stderr, then exits with code 0. See [`docs/contracts.md`](docs/contracts.md) for
+the wire contract.
 
 Exercise the target's accepted reset policy without flashing it:
 
@@ -333,10 +344,11 @@ exercises, including pre-attach MMIO and size rejection plus serial heartbeat
 recovery, but are now native capability-gated because halted-origin teardown is
 not state preserving. OpenOCD, general ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
-watchpoints, idle lease expiry, asynchronous request cancellation, other
-physically accepted native segmented targets, and non-boot NVM writes are not
-yet exposed. The core status/halt/run/continue/continue-until-halt/step contract
-is complete in Replay. Its session-scoped native path plus slot-addressable
+watchpoints, asynchronous request cancellation, external crash/restart
+supervision, other physically accepted native segmented targets, and non-boot
+NVM writes are not yet exposed. The core
+status/halt/run/continue/continue-until-halt/step contract is complete in
+Replay. Its session-scoped native path, idle lease expiry, and slot-addressable
 hardware breakpoints are accepted on ESP32-S3 CPU0; live attach negotiates two
 comparator slots. Native one-shot
 commands that promise a final core state remain capability-gated because

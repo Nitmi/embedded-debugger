@@ -275,6 +275,22 @@ Run on 2026-08-13 through 2026-08-17 with probe-rs 0.32.0 on Windows:
   `target/hardware-acceptance/2026-08-17-esp32s3-continue-until-halt`. This
   accepts bounded halt-event and timeout semantics plus lease reuse on CPU0;
   it does not accept CPU1 or asynchronous cross-request cancellation.
+- On 2026-08-17, supervised active-lease idle expiry passed on the same exact
+  ESP32-S3 probe. A five-second read-only serial baseline observed complete
+  heartbeats `4239..4243`. The foreground server advertised
+  `idle_timeout_ms=1500` and `idle_timeout_action=close_and_exit`; CPU0 was
+  halted and stepped, then slot 0 was left active at `PC=0x42012A02`. With stdin
+  deliberately kept open and no close request sent, the process expired after
+  1835 ms, exited with code 0, and emitted `session.idle_expired` on stderr.
+  Its full close evidence preserved the active address in the before snapshot,
+  verified every comparator empty afterward, restored CPU0 to running, and
+  successfully disconnected. A six-second recovery monitor observed complete
+  heartbeats `4441..4446`, and a subsequent exact attach/disconnect probe test
+  succeeded. Both serial monitors used 115200 baud with DTR/RTS=false and
+  transmitted no bytes. Artifacts are under
+  `target/hardware-acceptance/2026-08-17-esp32s3-idle-expiry`. This accepts
+  between-request idle cleanup on CPU0; it does not imply in-flight request
+  cancellation, hard-kill recovery, or CPU1 acceptance.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.

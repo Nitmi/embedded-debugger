@@ -53,16 +53,25 @@ tool call recreates the teardown race and makes state continuity ambiguous.
    gate. The persistent service is the only first-class path for native
    probe-rs stateful control, bounded reads, and hardware breakpoints in this
    milestone.
+9. The foreground CLI supervises stdin through a bounded reader channel while
+   the main loop keeps exclusive backend ownership. An active lease expires
+   after 300000 ms by default; 0 disables expiry and finite values are bounded.
+   Structurally valid completed requests renew the deadline, malformed input
+   does not, and work already in flight is never interrupted. Expiry reuses the
+   normal guarded close path, emits a versioned lifecycle event with the full
+   close report on stderr, and exits.
 
 ## Consequences
 
 - CLI, future MCP, and Skills can share a small transport-neutral session owner
   instead of duplicating probe lifetime logic.
-- The service is intentionally single-client and foreground in this milestone;
-  process supervision, idle lease expiry, asynchronous cancellation, and a
+- The service is intentionally single-client and foreground in this milestone.
+  Its internal input/deadline supervisor handles graceful idle lease expiry,
+  but external crash/restart supervision, asynchronous cancellation, and a
   multi-client broker remain follow-up work. A bounded wait occupies the JSONL
   server until it observes a halt or reaches its timeout, so another request
-  cannot cancel it in the current synchronous transport.
+  cannot cancel it in the current synchronous transport and the idle timer does
+  not preempt it.
 - Closing a session has an explicit running-state policy. A future backend may
   add a capability-qualified restore policy, but it must not silently claim that
   `Session::drop` preserves a halted state.

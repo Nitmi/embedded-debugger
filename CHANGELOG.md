@@ -86,6 +86,15 @@ All notable changes to this project will be documented in this file.
   verify every managed slot, then resume all observed cores before disconnect.
   Cleanup evidence is returned in the close report, and resume is skipped if
   explicit breakpoint cleanup cannot be verified.
+- Supervised active-lease idle expiry for the foreground JSONL owner. The CLI
+  defaults to 300000 ms, accepts 100..=86400000 ms, and uses 0 to disable.
+  `session.open` and `session.status` expose the effective lease policy. A
+  structurally valid completed request renews the lease; malformed input does
+  not, and an in-flight request is never interrupted. Expiry reuses the guarded
+  breakpoint/core close policy, emits a versioned `session.idle_expired` stderr
+  event with complete cleanup evidence, and exits successfully. ESP32-S3 CPU0
+  passed physical expiry with an active comparator, running-state restoration,
+  probe release, and heartbeat recovery.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
   unwritten sector bytes, independent read-back verification, reset-and-halt,
   PC/SP/LR snapshot, resume, and disconnect.
@@ -106,11 +115,12 @@ All notable changes to this project will be documented in this file.
 - Native flashing is limited to readable boot NVM. Multi-core segmented
   execution is physically accepted only on ESP32-S3. RTT, arbitrary
   memory writes, Generic/MMIO reads, register writes, software/symbolic/
-  conditional breakpoints, watchpoints, idle lease expiry, and asynchronous
-  request cancellation are not implemented. Persistent hardware breakpoints are
-  physically accepted only on ESP32-S3 CPU0; native one-shot breakpoint
-  commands and CPU1 breakpoint control are not exposed. Memory reads are
-  limited to 4096 bytes and do not freeze other cores or DMA.
+  conditional breakpoints, watchpoints, asynchronous request cancellation, and
+  external crash/restart supervision are not implemented. Persistent hardware
+  breakpoints and idle lease expiry are physically accepted only on ESP32-S3
+  CPU0; native one-shot breakpoint commands and CPU1 breakpoint control are not
+  exposed. Memory reads are limited to 4096 bytes and do not freeze other cores
+  or DMA.
 - Native probe-rs one-shot live snapshot, register read, memory read, core
   status, core halt, core run, core continue, core continue-until-halt, and core
   step are exposed only as explicit `CAPABILITY_UNAVAILABLE` results. The
