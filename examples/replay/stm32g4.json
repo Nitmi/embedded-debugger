@@ -23,6 +23,7 @@
     "halt": true,
     "run": true,
     "continue_execution": true,
+    "continue_until_halt": true,
     "reset": true,
     "step": true,
     "core_status": true,
@@ -131,6 +132,10 @@
       "step_pcs": ["0x08001234", "0x08001236"],
       "continue_results": [
         {"state": "running", "halt_reason": null}
+      ],
+      "continue_until_halt_results": [
+        {"halt_after_ms": 75, "halt_reason": "breakpoint"},
+        {"halt_after_ms": null, "halt_reason": null}
       ]
     }
   ],

@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::Once, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::Once,
+    time::{Duration, Instant},
+};
 
 use probe_rs::{
     CoreInterface, CoreRegister, CoreStatus, CoreType, HaltReason, MemoryInterface, Permissions,
@@ -21,12 +25,14 @@ use crate::{
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
-        Address, Capabilities, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
+        Address, Capabilities, ContinueUntilHaltObservation, ContinueUntilHaltOptions,
+        ContinueUntilHaltOutcome, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
         CoreSnapshot, CoreState, FirmwareImageOptions, FirmwareSegmentInfo, FlashLayout,
         FlashRange, FlashReport, HardwareBreakpointAction, HardwareBreakpointObservation,
         HardwareBreakpointSlot, MAX_REGISTER_READS, MemoryCoreObservation, MemoryReadRange,
         MemoryReadResult, MemoryRegionInfo, MemoryRegionKind, PostFlashCoreObservation, ProbeInfo,
         RegisterCoreObservation, RegisterKind, RegisterReading, SessionInfo, TargetInfo,
+        validate_continue_until_halt_observation, validate_continue_until_halt_options,
         validate_hardware_breakpoint_observation, validate_memory_read_range,
     },
 };
@@ -85,7 +91,7 @@ impl ProbeRsBackend {
         let accepted_esp32s3_post_reset = target.name.eq_ignore_ascii_case("esp32s3");
         let accepted_esp32s3_segmented_flash = target.name.eq_ignore_ascii_case("esp32s3");
         let accepted_esp32s3_memory_read = target.name.eq_ignore_ascii_case("esp32s3");
-        let accepted_esp32s3_step = target.name.eq_ignore_ascii_case("esp32s3");
+        let accepted_esp32s3_core_control = target.name.eq_ignore_ascii_case("esp32s3");
         let flash = !target.flash_algorithms.is_empty();
         let target_info = TargetInfo {
             name: target.name.clone(),
@@ -101,11 +107,12 @@ impl ProbeRsBackend {
             verify: flash,
             halt: true,
             run: true,
-            continue_execution: single_core || accepted_esp32s3_step,
+            continue_execution: single_core || accepted_esp32s3_core_control,
+            continue_until_halt: single_core || accepted_esp32s3_core_control,
             reset: single_core || accepted_esp32s3_post_reset,
             // probe-rs implements Xtensa single-instruction stepping; this is
             // accepted for CPU0 on ESP32-S3 and for single-core targets.
-            step: single_core || accepted_esp32s3_step,
+            step: single_core || accepted_esp32s3_core_control,
             core_status: true,
             // A probe-rs Session may alter execution state while it is dropped. In
             // particular, Xtensa leave_debug_mode resumes a halted core.
@@ -1174,6 +1181,87 @@ impl DebugBackend for ProbeRsBackend {
         })
     }
 
+    fn continue_until_halt_in_session(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        options: ContinueUntilHaltOptions,
+    ) -> Result<ContinueUntilHaltObservation> {
+        validate_continue_until_halt_options(options).map_err(|problem| {
+            DebugError::config(
+                "invalid continue-until-halt timing options",
+                json!({"problem": problem, "options": options}),
+            )
+        })?;
+        if !session.capabilities.continue_until_halt
+            || !session.capabilities.continue_execution
+            || !session.capabilities.core_status
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "selected target cannot continue and wait for a halt event",
+                6,
+                json!({
+                    "capability": "continue_until_halt",
+                    "core_index": core_index,
+                }),
+            ));
+        }
+
+        let started = Instant::now();
+        let continuation =
+            self.control_core_in_session(session, core_index, CoreExecutionAction::Continue)?;
+        if continuation.state == CoreState::Halted {
+            return validated_continue_until_halt_observation(
+                &self.target_info,
+                continuation.clone(),
+                ContinueUntilHaltOutcome::Halted,
+                CoreState::Halted,
+                continuation.halt_reason.clone(),
+                options,
+                started,
+                0,
+            );
+        }
+
+        let timeout = Duration::from_millis(options.timeout_ms);
+        let poll_interval = Duration::from_millis(options.poll_interval_ms);
+        let mut poll_count = 0_u32;
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if !remaining.is_zero() {
+                std::thread::sleep(poll_interval.min(remaining));
+            }
+            let status =
+                self.control_core_in_session(session, core_index, CoreExecutionAction::Status)?;
+            poll_count += 1;
+            if status.state == CoreState::Halted {
+                return validated_continue_until_halt_observation(
+                    &self.target_info,
+                    continuation,
+                    ContinueUntilHaltOutcome::Halted,
+                    CoreState::Halted,
+                    status.halt_reason,
+                    options,
+                    started,
+                    poll_count,
+                );
+            }
+            if started.elapsed() >= timeout {
+                return validated_continue_until_halt_observation(
+                    &self.target_info,
+                    continuation,
+                    ContinueUntilHaltOutcome::TimedOut,
+                    CoreState::Running,
+                    None,
+                    options,
+                    started,
+                    poll_count,
+                );
+            }
+        }
+    }
+
     fn control_hardware_breakpoints_in_session(
         &mut self,
         session: &SessionInfo,
@@ -1941,6 +2029,38 @@ fn native_hardware_breakpoint_slots(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validated_continue_until_halt_observation(
+    target: &TargetInfo,
+    continuation: CoreExecutionObservation,
+    outcome: ContinueUntilHaltOutcome,
+    state: CoreState,
+    halt_reason: Option<String>,
+    options: ContinueUntilHaltOptions,
+    started: Instant,
+    poll_count: u32,
+) -> Result<ContinueUntilHaltObservation> {
+    let observation = ContinueUntilHaltObservation {
+        continuation,
+        outcome,
+        state,
+        halt_reason,
+        timeout_ms: options.timeout_ms,
+        poll_interval_ms: options.poll_interval_ms,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        poll_count,
+    };
+    validate_continue_until_halt_observation(target, &observation).map_err(|problem| {
+        DebugError::new(
+            ErrorCode::ProtocolError,
+            "probe-rs returned an invalid continue-until-halt observation",
+            6,
+            json!({"problem": problem, "observation": observation}),
+        )
+    })?;
+    Ok(observation)
+}
+
 fn restore_after_capture_error(
     active: &mut NativeSession,
     operation: &str,
@@ -2289,6 +2409,7 @@ mod tests {
 
         assert!(backend.capabilities().step);
         assert!(backend.capabilities().continue_execution);
+        assert!(backend.capabilities().continue_until_halt);
         assert_eq!(backend.capabilities().hardware_breakpoints, 0);
         assert!(supports_native_hardware_breakpoints(&backend.target));
         assert_eq!(backend.target().core_count, 2);

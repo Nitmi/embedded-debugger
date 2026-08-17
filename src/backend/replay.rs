@@ -13,12 +13,14 @@ use crate::{
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
-        Address, Capabilities, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
+        Address, Capabilities, ContinueUntilHaltObservation, ContinueUntilHaltOptions,
+        ContinueUntilHaltOutcome, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
         CoreSnapshot, CoreState, FirmwareSegmentInfo, FlashLayout, FlashRange, FlashReport,
         HardwareBreakpointAction, HardwareBreakpointObservation, HardwareBreakpointSlot,
         MAX_INLINE_MEMORY_READ_BYTES, MAX_REGISTER_READS, MemoryCoreObservation, MemoryReadRange,
         MemoryReadResult, MemoryRegionInfo, MemoryRegionKind, PostFlashCoreObservation, ProbeInfo,
         RegisterCoreObservation, RegisterReading, SessionInfo, TargetInfo,
+        validate_continue_until_halt_observation, validate_continue_until_halt_options,
         validate_core_execution_observation, validate_core_inventory,
         validate_hardware_breakpoint_observation, validate_memory_core_observation,
         validate_memory_read_range, validate_post_flash_core_inventory,
@@ -59,11 +61,19 @@ pub struct ReplayCoreState {
     pub step_pcs: Vec<Address>,
     #[serde(default)]
     pub continue_results: Vec<ReplayContinueResult>,
+    #[serde(default)]
+    pub continue_until_halt_results: Vec<ReplayContinueUntilHaltResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayContinueResult {
     pub state: CoreState,
+    pub halt_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayContinueUntilHaltResult {
+    pub halt_after_ms: Option<u64>,
     pub halt_reason: Option<String>,
 }
 
@@ -316,6 +326,76 @@ impl ReplayFixture {
                 {
                     return Err(DebugError::fixture(
                         "replay continue result evidence is invalid",
+                        json!({"core_index": core.index, "problem": problem}),
+                    ));
+                }
+            }
+        }
+        if self.capabilities.continue_until_halt
+            && (!self.capabilities.core_status || !self.capabilities.continue_execution)
+        {
+            return Err(DebugError::fixture(
+                "continue-until-halt capability requires core status and continue support",
+                json!({
+                    "capability": if !self.capabilities.core_status {
+                        "core_status"
+                    } else {
+                        "continue_execution"
+                    }
+                }),
+            ));
+        }
+        if self.capabilities.continue_until_halt
+            && self
+                .control_cores
+                .iter()
+                .any(|core| core.continue_until_halt_results.is_empty())
+        {
+            return Err(DebugError::fixture(
+                "continue-until-halt capability requires explicit event evidence for every control core",
+                json!({
+                    "capability": "continue_until_halt",
+                    "missing_core_indexes": self
+                        .control_cores
+                        .iter()
+                        .filter(|core| core.continue_until_halt_results.is_empty())
+                        .map(|core| core.index)
+                        .collect::<Vec<_>>()
+                }),
+            ));
+        }
+        for core in &self.control_cores {
+            for result in &core.continue_until_halt_results {
+                match result.halt_after_ms {
+                    Some(_)
+                        if !result
+                            .halt_reason
+                            .as_deref()
+                            .is_some_and(|reason| !reason.trim().is_empty()) =>
+                    {
+                        return Err(DebugError::fixture(
+                            "replay continue-until-halt event requires a halt reason",
+                            json!({"core_index": core.index, "event": result}),
+                        ));
+                    }
+                    None if result.halt_reason.is_some() => {
+                        return Err(DebugError::fixture(
+                            "replay continue-until-halt timeout evidence cannot contain a halt reason",
+                            json!({"core_index": core.index, "event": result}),
+                        ));
+                    }
+                    _ => {}
+                }
+                let observation = replay_continue_until_halt_observation(
+                    core,
+                    result,
+                    ContinueUntilHaltOptions::default(),
+                );
+                if let Err(problem) =
+                    validate_continue_until_halt_observation(&self.target, &observation)
+                {
+                    return Err(DebugError::fixture(
+                        "replay continue-until-halt event evidence is invalid",
                         json!({"core_index": core.index, "problem": problem}),
                     ));
                 }
@@ -1015,6 +1095,77 @@ impl DebugBackend for ReplayBackend {
         Ok(observation)
     }
 
+    fn continue_until_halt_in_session(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        options: ContinueUntilHaltOptions,
+    ) -> Result<ContinueUntilHaltObservation> {
+        self.ensure_session(session)?;
+        validate_continue_until_halt_options(options).map_err(|problem| {
+            DebugError::config(
+                "invalid continue-until-halt timing options",
+                json!({"problem": problem, "options": options}),
+            )
+        })?;
+        if !self.fixture.capabilities.continue_until_halt
+            || !self.fixture.capabilities.continue_execution
+            || !self.fixture.capabilities.core_status
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "replay fixture cannot continue and wait for a halt event",
+                6,
+                json!({"capability": "continue_until_halt"}),
+            ));
+        }
+        let position = self
+            .control_cores
+            .iter()
+            .position(|core| core.index == core_index)
+            .ok_or_else(|| {
+                DebugError::fixture(
+                    "replay fixture has no explicit continue-until-halt evidence for the requested core",
+                    json!({"core_index": core_index}),
+                )
+            })?;
+        if self.control_cores[position].state != CoreState::Halted {
+            return Err(DebugError::config(
+                "core.continue_until_halt requires the selected core to be halted",
+                json!({
+                    "core_index": core_index,
+                    "original_state": self.control_cores[position].state,
+                }),
+            ));
+        }
+        let result = self.control_cores[position]
+            .continue_until_halt_results
+            .first()
+            .cloned()
+            .ok_or_else(|| {
+                DebugError::fixture(
+                    "replay fixture has no remaining continue-until-halt event evidence for the requested core",
+                    json!({"core_index": core_index}),
+                )
+            })?;
+        let observation =
+            replay_continue_until_halt_observation(&self.control_cores[position], &result, options);
+        validate_continue_until_halt_observation(&self.fixture.target, &observation).map_err(
+            |problem| {
+                DebugError::fixture(
+                    "replay continue-until-halt result is invalid",
+                    json!({"core_index": core_index, "problem": problem}),
+                )
+            },
+        )?;
+        self.control_cores[position].state = observation.state;
+        self.control_cores[position].halt_reason = observation.halt_reason.clone();
+        self.control_cores[position]
+            .continue_until_halt_results
+            .remove(0);
+        Ok(observation)
+    }
+
     fn control_hardware_breakpoints_in_session(
         &mut self,
         session: &SessionInfo,
@@ -1416,6 +1567,75 @@ fn replay_breakpoint_slots(slots: &[Option<Address>]) -> Vec<HardwareBreakpointS
             address: *address,
         })
         .collect()
+}
+
+fn replay_continue_until_halt_observation(
+    core: &ReplayCoreState,
+    result: &ReplayContinueUntilHaltResult,
+    options: ContinueUntilHaltOptions,
+) -> ContinueUntilHaltObservation {
+    let immediate = result.halt_after_ms == Some(0);
+    let continuation = CoreExecutionObservation {
+        index: core.index,
+        name: core.name.clone(),
+        architecture: core.architecture.clone(),
+        action: CoreExecutionAction::Continue,
+        original_state: CoreState::Halted,
+        state: if immediate {
+            CoreState::Halted
+        } else {
+            CoreState::Running
+        },
+        state_changed: !immediate,
+        halt_reason: if immediate {
+            result.halt_reason.clone()
+        } else {
+            None
+        },
+        pc_before: None,
+        pc_after: None,
+    };
+    let halted_within_timeout = result
+        .halt_after_ms
+        .is_some_and(|delay| delay <= options.timeout_ms);
+    let (outcome, state, halt_reason, elapsed_ms, poll_count) = if halted_within_timeout {
+        let delay = result.halt_after_ms.expect("halt delay was checked");
+        let poll_count = if delay == 0 {
+            0
+        } else {
+            delay.div_ceil(options.poll_interval_ms) as u32
+        };
+        let elapsed_ms = if delay == 0 {
+            0
+        } else {
+            (u64::from(poll_count) * options.poll_interval_ms).min(options.timeout_ms)
+        };
+        (
+            ContinueUntilHaltOutcome::Halted,
+            CoreState::Halted,
+            result.halt_reason.clone(),
+            elapsed_ms,
+            poll_count,
+        )
+    } else {
+        (
+            ContinueUntilHaltOutcome::TimedOut,
+            CoreState::Running,
+            None,
+            options.timeout_ms,
+            options.timeout_ms.div_ceil(options.poll_interval_ms) as u32,
+        )
+    };
+    ContinueUntilHaltObservation {
+        continuation,
+        outcome,
+        state,
+        halt_reason,
+        timeout_ms: options.timeout_ms,
+        poll_interval_ms: options.poll_interval_ms,
+        elapsed_ms,
+        poll_count,
+    }
 }
 
 fn decode_memory_block(block: &ReplayMemoryBlock) -> Result<Vec<u8>> {
@@ -1897,6 +2117,91 @@ mod tests {
     }
 
     #[test]
+    fn continue_until_halt_uses_explicit_event_and_timeout_evidence() {
+        let fixture = fixture();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+        let options = ContinueUntilHaltOptions {
+            timeout_ms: 100,
+            poll_interval_ms: 25,
+        };
+
+        let halted = backend
+            .continue_until_halt_in_session(&session, 0, options)
+            .unwrap();
+        let timed_out = backend
+            .continue_until_halt_in_session(&session, 0, options)
+            .unwrap();
+
+        assert_eq!(halted.continuation.state, CoreState::Running);
+        assert_eq!(halted.outcome, ContinueUntilHaltOutcome::Halted);
+        assert_eq!(halted.state, CoreState::Halted);
+        assert_eq!(halted.halt_reason.as_deref(), Some("breakpoint"));
+        assert_eq!(halted.elapsed_ms, 75);
+        assert_eq!(halted.poll_count, 3);
+        assert_eq!(timed_out.outcome, ContinueUntilHaltOutcome::TimedOut);
+        assert_eq!(timed_out.state, CoreState::Running);
+        assert_eq!(timed_out.halt_reason, None);
+        assert_eq!(timed_out.elapsed_ms, 100);
+        assert_eq!(timed_out.poll_count, 4);
+        backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
+    fn continue_until_halt_rejects_invalid_state_and_options_without_consuming_evidence() {
+        let fixture = fixture();
+        let probe_id = fixture.probe.id.clone();
+        let target = fixture.target.name.clone();
+        let mut backend = ReplayBackend::new(fixture);
+        let session = backend.attach(&probe_id, &target).unwrap();
+        backend
+            .control_core_in_session(&session, 0, CoreExecutionAction::Run)
+            .unwrap();
+
+        let running_error = backend
+            .continue_until_halt_in_session(
+                &session,
+                0,
+                ContinueUntilHaltOptions {
+                    timeout_ms: 100,
+                    poll_interval_ms: 25,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(running_error.code, ErrorCode::ConfigInvalid);
+        backend
+            .control_core_in_session(&session, 0, CoreExecutionAction::Halt)
+            .unwrap();
+
+        let options_error = backend
+            .continue_until_halt_in_session(
+                &session,
+                0,
+                ContinueUntilHaltOptions {
+                    timeout_ms: 5,
+                    poll_interval_ms: 10,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(options_error.code, ErrorCode::ConfigInvalid);
+
+        let first_event = backend
+            .continue_until_halt_in_session(
+                &session,
+                0,
+                ContinueUntilHaltOptions {
+                    timeout_ms: 100,
+                    poll_interval_ms: 25,
+                },
+            )
+            .unwrap();
+        assert_eq!(first_event.outcome, ContinueUntilHaltOutcome::Halted);
+        backend.disconnect(&session).unwrap();
+    }
+
+    #[test]
     fn hardware_breakpoints_are_slot_addressable_verified_and_idempotent() {
         let fixture = fixture();
         let probe_id = fixture.probe.id.clone();
@@ -2098,12 +2403,14 @@ mod tests {
         let mut value = serde_json::to_value(fixture()).unwrap();
         let capabilities = value["capabilities"].as_object_mut().unwrap();
         capabilities.remove("core_status");
+        capabilities.remove("continue_until_halt");
         capabilities.remove("post_disconnect_core_state");
         value.as_object_mut().unwrap().remove("control_cores");
 
         let fixture: ReplayFixture = serde_json::from_value(value).unwrap();
 
         assert!(!fixture.capabilities.core_status);
+        assert!(!fixture.capabilities.continue_until_halt);
         assert!(!fixture.capabilities.post_disconnect_core_state);
         fixture.validate().unwrap();
     }

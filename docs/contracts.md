@@ -118,10 +118,23 @@ state remains halted. Halted observations may include a normalized
 `halt_reason`, while running observations must not. Halt/run set
 `effects.intentional_final_core_state_change_requested=true`.
 
+`core continue-until-halt --probe <exact-selector> --target <exact-target>
+--core <index> [--timeout-ms <ms>] [--poll-interval-ms <ms>]` extends Continue
+with a bounded wait. Timeout is 10..=60000 ms (default 5000); polling is
+10..=1000 ms (default 25) and cannot exceed the timeout. These options and the
+core index are validated before probe selection. `data.wait.continuation`
+contains the immediate Continue observation. The final `outcome` is `halted`
+or `timed_out`; `state`, `halt_reason`, `elapsed_ms`, and `poll_count` describe
+the bounded observation. A halted outcome requires a non-empty reason. A
+timed-out outcome is a successful complete report, requires `state="running"`
+and no halt reason, requires `elapsed_ms >= timeout_ms`, and does not synthesize
+an error or halt event.
+
 A backend must advertise both `core_status` and
 `post_disconnect_core_state` before any core-state command may select or attach
 a probe. Halt, run, continue, and step additionally require their matching
-capabilities.
+capabilities. Continue-until-halt additionally requires `continue_execution`
+and `continue_until_halt`.
 `core_status` alone means the backend can observe state while a session is
 alive; it is deliberately insufficient for a process that immediately tears
 that session down. Replay provides explicit `control_cores` evidence and
@@ -147,7 +160,8 @@ memory write. CPU0 is expected to run after the workflow. Secondary cores retain
 the running or halted state observed immediately after the target reset sequence.
 
 R1 debug control is not equivalent to side-effect-free target inspection.
-`probes test`, `core status|halt|run|continue|step`, `breakpoints.*`,
+`probes test`, `core status|halt|run|continue|continue-until-halt|step`,
+`breakpoints.*`,
 `registers read`, `memory read`, `snapshot capture`, and
 `snapshot reset-capture` return an `effects` object. It records whether the
 command requested reset, Flash, continue, a single instruction step, hardware
@@ -301,6 +315,7 @@ capacity negotiated from the live core rather than a target-name guess.
 {"schema_version":"1.0","request_id":"req-status","operation":"core.status","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-run","operation":"core.run","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-continue","operation":"core.continue","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-wait","operation":"core.continue_until_halt","session_id":"ses_<opaque>","core":0,"timeout_ms":5000,"poll_interval_ms":25}
 {"schema_version":"1.0","request_id":"req-step","operation":"core.step","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-breakpoint-list","operation":"breakpoints.list","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-breakpoint-set","operation":"breakpoints.set","session_id":"ses_<opaque>","core":0,"address":"0x420129D4","slot":0}
@@ -329,6 +344,17 @@ non-empty `halt_reason` explains the immediate stop. This lets a client
 distinguish a real breakpoint hit from a failed resume. The result sets
 `effects.execution_continue_requested=true` without claiming an intentional
 durable final state.
+
+`core.continue_until_halt` has the same halted-origin rule, then performs
+bounded polling. The option bounds and response fields match the one-shot
+contract, but the final state is scoped to the active lease and therefore does
+not require `post_disconnect_core_state`. A `timed_out` result is `ok=true`,
+leaves the core running, and keeps the same session ID usable for a later
+status, halt, breakpoint operation, or close. The service is synchronous and
+single-request: while this operation is polling, it cannot read a second JSONL
+request, so cross-request cancellation is not part of this transport version.
+The timeout is the current bounded stop mechanism; true asynchronous
+cancellation requires a concurrent owner or broker.
 
 `breakpoints.list` requires a non-zero `hardware_breakpoints` capability and
 returns every indexed comparator slot. It may be called while the core is

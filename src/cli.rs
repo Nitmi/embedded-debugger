@@ -13,7 +13,11 @@ use crate::{
     doctor,
     error::{DebugError, Result},
     firmware::{FirmwareFormat, FirmwareInputOptions, parse_esp_flash_size},
-    model::{Address, CoreExecutionAction, FlashRange},
+    model::{
+        Address, ContinueUntilHaltOptions, CoreExecutionAction,
+        DEFAULT_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS, DEFAULT_CONTINUE_UNTIL_HALT_TIMEOUT_MS,
+        FlashRange,
+    },
     service::{DebugService, inspect_evidence},
     session,
 };
@@ -256,7 +260,28 @@ pub enum CoreCommand {
     Halt(CoreSelection),
     Run(CoreSelection),
     Continue(CoreSelection),
+    ContinueUntilHalt(CoreContinueUntilHaltSelection),
     Step(CoreSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct CoreContinueUntilHaltSelection {
+    #[command(flatten)]
+    pub selection: CoreSelection,
+
+    #[arg(
+        long,
+        default_value_t = DEFAULT_CONTINUE_UNTIL_HALT_TIMEOUT_MS,
+        help = "bounded wait deadline in milliseconds (10..=60000)"
+    )]
+    pub timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = DEFAULT_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS,
+        help = "status polling interval in milliseconds (10..=1000 and no greater than timeout)"
+    )]
+    pub poll_interval_ms: u64,
 }
 
 #[derive(Debug, Args)]
@@ -336,6 +361,9 @@ impl Cli {
             Command::Core {
                 command: CoreCommand::Continue(_),
             } => "core.continue",
+            Command::Core {
+                command: CoreCommand::ContinueUntilHalt(_),
+            } => "core.continue_until_halt",
             Command::Core {
                 command: CoreCommand::Step(_),
             } => "core.step",
@@ -845,6 +873,9 @@ fn control_core(cli: &Cli, command: &CoreCommand) -> Result<CommandResult> {
         CoreCommand::Halt(selection) => (CoreExecutionAction::Halt, selection),
         CoreCommand::Run(selection) => (CoreExecutionAction::Run, selection),
         CoreCommand::Continue(selection) => (CoreExecutionAction::Continue, selection),
+        CoreCommand::ContinueUntilHalt(selection) => {
+            return continue_until_halt(cli, selection);
+        }
         CoreCommand::Step(selection) => (CoreExecutionAction::Step, selection),
     };
     let report = match cli.backend {
@@ -881,6 +912,62 @@ fn control_core(cli: &Cli, command: &CoreCommand) -> Result<CommandResult> {
         CoreExecutionAction::Step => "core.step",
     };
     Ok(CommandResult::serializable(operation, &report, human))
+}
+
+fn continue_until_halt(
+    cli: &Cli,
+    arguments: &CoreContinueUntilHaltSelection,
+) -> Result<CommandResult> {
+    let selection = &arguments.selection;
+    let options = ContinueUntilHaltOptions {
+        timeout_ms: arguments.timeout_ms,
+        poll_interval_ms: arguments.poll_interval_ms,
+    };
+    let report = match cli.backend {
+        BackendArg::Replay => {
+            let mut service =
+                DebugService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?);
+            service.continue_until_halt(
+                &selection.probe,
+                &selection.target,
+                selection.core,
+                options,
+            )?
+        }
+        BackendArg::ProbeRs => {
+            let backend = ProbeRsBackend::new(&selection.target)?;
+            let mut service = DebugService::new(backend);
+            service.continue_until_halt(
+                &selection.probe,
+                &selection.target,
+                selection.core,
+                options,
+            )?
+        }
+        BackendArg::Openocd => return Err(unsupported_openocd("continue_until_halt")),
+    };
+    let continuation = &report.wait.continuation;
+    let human = format!(
+        "Core {} ({}, {}) continue-until-halt\nimmediate={:?}, outcome={:?}, final={:?}, halt_reason={}\ntimeout={} ms, poll={} ms, elapsed={} ms, polls={}\nRisk: {}\nEffects: {}",
+        continuation.index,
+        continuation.name,
+        continuation.architecture,
+        continuation.state,
+        report.wait.outcome,
+        report.wait.state,
+        report.wait.halt_reason.as_deref().unwrap_or("none"),
+        report.wait.timeout_ms,
+        report.wait.poll_interval_ms,
+        report.wait.elapsed_ms,
+        report.wait.poll_count,
+        report.risk,
+        describe_debug_control_effects(&report.effects)
+    );
+    Ok(CommandResult::serializable(
+        "core.continue_until_halt",
+        &report,
+        human,
+    ))
 }
 
 fn describe_debug_control_effects(effects: &crate::model::DebugControlEffects) -> String {

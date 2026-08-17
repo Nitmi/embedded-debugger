@@ -7,8 +7,9 @@ use crate::{
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
-        Address, Capabilities, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
-        CoreSnapshot, FirmwareImageOptions, FlashLayout, FlashReport, FlashSegmentReport,
+        Address, Capabilities, ContinueUntilHaltObservation, ContinueUntilHaltOptions,
+        CoreExecutionAction, CoreExecutionObservation, CoreObservation, CoreSnapshot,
+        FirmwareImageOptions, FlashLayout, FlashReport, FlashSegmentReport,
         HardwareBreakpointAction, HardwareBreakpointObservation, MAX_INLINE_MEMORY_READ_BYTES,
         MemoryReadRange, MemoryReadResult, PostFlashCoreObservation, ProbeInfo,
         RegisterCoreObservation, SessionInfo, TargetInfo,
@@ -82,6 +83,16 @@ pub trait DebugBackend {
         core_index: u32,
         action: CoreExecutionAction,
     ) -> Result<CoreExecutionObservation>;
+    /// Continue a halted core and wait for either a halt event or a bounded timeout.
+    ///
+    /// A timeout is an observed successful outcome, not an unbounded backend failure;
+    /// the selected core remains running and the active session remains usable.
+    fn continue_until_halt_in_session(
+        &mut self,
+        session: &SessionInfo,
+        core_index: u32,
+        options: ContinueUntilHaltOptions,
+    ) -> Result<ContinueUntilHaltObservation>;
     /// Inspect or mutate hardware breakpoint comparators while `session` remains active.
     ///
     /// User-requested mutations must be rejected unless the selected core is already halted.

@@ -60,11 +60,11 @@ registers. On ESP32-S3, the current probe-rs sequence disables multiple
 watchdogs during attach/halt. This is why the command is R1 rather than R0.
 
 The versioned core-state contract is available through `core status`,
-`core halt`, `core run`, `core continue`, and `core step`. A successful one-shot
-response guarantees that `data.core.state` still describes the target after
-the debug session has disconnected; `data.core.original_state`,
-`state_changed`, and the structured `effects` make the transition explicit.
-This guarantee is advertised separately as
+`core halt`, `core run`, `core continue`, `core continue-until-halt`, and
+`core step`. A successful one-shot response guarantees that its final observed
+state still describes the target after the debug session has disconnected.
+Ordinary actions use `data.core`; the bounded wait uses `data.wait`. This
+guarantee is advertised separately as
 `capabilities.post_disconnect_core_state`.
 
 `core run` is strict: success means the immediate verification still observed
@@ -72,14 +72,21 @@ the core running. `core continue` instead requires a halted origin, resumes
 execution, and reports either an immediate running state or a new halted state
 with a non-empty halt reason. This distinction matters when a breakpoint is
 hit before a strict run verification can observe the transient running state.
+`core continue-until-halt` extends the event-oriented form with bounded status
+polling. It reports `outcome="halted"` with a reason or a successful
+`outcome="timed_out"` with the core still running. Timeout and poll interval are
+validated before probe selection, and timeout never pretends that a halt
+occurred. In the persistent JSONL path it also leaves the lease usable.
 `core step` also requires a halted origin, executes one target instruction, and
 must finish halted with `halt_reason="step"`, `pc_before`, `pc_after`, and
 `effects.instruction_step_requested=true`. Replay implements and tests all five
-actions, including repeatable idempotent halt/run, immediate breakpoint results,
-the halted step boundary, and state continuity within one backend instance.
+core-control actions plus the bounded wait, including repeatable idempotent
+halt/run, immediate and delayed breakpoint results, timeout, the halted step
+boundary, and state continuity within one backend instance.
 Native probe-rs exposes the session-scoped actions, register reads, and bounded
 memory reads through the foreground `session serve` owner while its exclusive
-lease remains active. ESP32-S3 continue and step are accepted on CPU0.
+lease remains active. ESP32-S3 continue, continue-until-halt, and step are
+accepted on CPU0.
 
 Read a bounded set of registers from one core while preserving that core's
 original running or halted state:
@@ -138,7 +145,8 @@ cargo run -- --backend probe-rs session serve --target esp32s3
 
 Write one compact JSON request per stdin line. Start with `session.open` and an
 exact probe/target, then use the returned `session_id` for `session.status`,
-`core.status`, `core.halt`, `core.run`, `core.continue`, `core.step`,
+`core.status`, `core.halt`, `core.run`, `core.continue`,
+`core.continue_until_halt`, `core.step`,
 `breakpoints.list`, `breakpoints.set`, `breakpoints.clear`,
 `breakpoints.clear_all`, `registers.read`, `memory.read`, and `session.close`.
 For example:
@@ -149,6 +157,7 @@ For example:
 {"schema_version":"1.0","request_id":"req-step","operation":"core.step","session_id":"ses_<opaque>","core":0}
 {"schema_version":"1.0","request_id":"req-breakpoint","operation":"breakpoints.set","session_id":"ses_<opaque>","core":0,"address":"0x420129D4","slot":0}
 {"schema_version":"1.0","request_id":"req-continue","operation":"core.continue","session_id":"ses_<opaque>","core":0}
+{"schema_version":"1.0","request_id":"req-wait","operation":"core.continue_until_halt","session_id":"ses_<opaque>","core":0,"timeout_ms":5000,"poll_interval_ms":25}
 {"schema_version":"1.0","request_id":"req-clear","operation":"breakpoints.clear","session_id":"ses_<opaque>","core":0,"slot":0}
 ```
 
@@ -157,6 +166,11 @@ that halted execution state within the active lease while advancing one
 instruction and reports the R1 instruction effect. `core.continue` is also
 halted-only, but unlike strict `core.run` it treats an immediate breakpoint hit
 as a successful observed result instead of a protocol failure.
+`core.continue_until_halt` additionally polls until a halt or its bounded
+deadline. A `timed_out` response is successful, leaves the core running, and
+keeps the lease usable. The current JSONL server processes one request at a
+time, so this request occupies the server until it returns; a second JSONL
+request cannot asynchronously cancel it.
 
 Hardware-breakpoint capacity is negotiated from the live core during
 `session.open`; ESP32-S3 CPU0 currently reports two accepted slots. Listing
@@ -319,11 +333,12 @@ exercises, including pre-attach MMIO and size rejection plus serial heartbeat
 recovery, but are now native capability-gated because halted-origin teardown is
 not state preserving. OpenOCD, general ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
-watchpoints, persistent-lease timeout/cancellation, other physically accepted
-native segmented targets, and non-boot NVM writes are not yet exposed. The core
-status/halt/run/continue/step contract is complete in Replay. Its session-scoped
-native path plus slot-addressable hardware breakpoints are accepted on
-ESP32-S3 CPU0; live attach negotiates two comparator slots. Native one-shot
+watchpoints, idle lease expiry, asynchronous request cancellation, other
+physically accepted native segmented targets, and non-boot NVM writes are not
+yet exposed. The core status/halt/run/continue/continue-until-halt/step contract
+is complete in Replay. Its session-scoped native path plus slot-addressable
+hardware breakpoints are accepted on ESP32-S3 CPU0; live attach negotiates two
+comparator slots. Native one-shot
 commands that promise a final core state remain capability-gated because
 probe-rs cannot guarantee every reported execution state across session
 teardown.

@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-14
-- Last updated: 2026-08-15
+- Last updated: 2026-08-17
 
 ## Context
 
@@ -25,12 +25,15 @@ tool call recreates the teardown race and makes state continuity ambiguous.
 4. A stale or foreign `session_id` is a protocol error. A second open is
    rejected while a lease is active. `server.shutdown` requires an explicit
    `session.close` first.
-5. In-session `core.status`, `core.halt`, `core.run`, `core.continue`, and
-   `core.step` use the backend's explicit `control_core_in_session` boundary.
+5. In-session `core.status`, `core.halt`, `core.run`, `core.continue`,
+   `core.continue_until_halt`, and `core.step` use explicit backend session
+   boundaries.
    `core.run` is a strict desired-state operation. `core.continue` requires a
    halted origin and accepts either an immediate running observation or a new
-   halted observation with a reason. `core.step` requires a halted origin and
-   finishes halted after one instruction. In-session `registers.read` and
+   halted observation with a reason. `core.continue_until_halt` adds bounded
+   polling and returns either a halt event or a successful timeout that leaves
+   the core running and the lease usable. `core.step` requires a halted origin
+   and finishes halted after one instruction. In-session `registers.read` and
    `memory.read` reuse the bounded read contracts while the same backend
    session remains alive. Every result reports `state_scope="active_session"`
    and does not claim a post-disconnect guarantee.
@@ -56,8 +59,10 @@ tool call recreates the teardown race and makes state continuity ambiguous.
 - CLI, future MCP, and Skills can share a small transport-neutral session owner
   instead of duplicating probe lifetime logic.
 - The service is intentionally single-client and foreground in this milestone;
-  process supervision, idle lease expiry, cancellation, and a multi-client
-  broker remain follow-up work.
+  process supervision, idle lease expiry, asynchronous cancellation, and a
+  multi-client broker remain follow-up work. A bounded wait occupies the JSONL
+  server until it observes a halt or reaches its timeout, so another request
+  cannot cancel it in the current synchronous transport.
 - Closing a session has an explicit running-state policy. A future backend may
   add a capability-qualified restore policy, but it must not silently claim that
   `Session::drop` preserves a halted state.
@@ -72,6 +77,10 @@ tool call recreates the teardown race and makes state continuity ambiguous.
   halt the core before the post-run status read. Returning that immediate halt
   as an observed success preserves the event instead of misclassifying it as a
   backend failure.
+- Continue-until-halt is separate from immediate Continue because an Agent
+  needs one bounded operation with explicit event/timeout evidence. Timeout is
+  a normal observation, not a transport or target failure, and preserves the
+  running lease for recovery or later control.
 - Hardware breakpoints remain owned by the lease. Explicit close cleanup is
   stronger than relying on probe-rs drop behavior and produces verifiable slot
   evidence for Agents. It cannot protect against power loss or a hard process

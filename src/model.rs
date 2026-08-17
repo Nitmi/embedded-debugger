@@ -116,6 +116,8 @@ pub struct Capabilities {
     pub run: bool,
     #[serde(default)]
     pub continue_execution: bool,
+    #[serde(default)]
+    pub continue_until_halt: bool,
     pub reset: bool,
     pub step: bool,
     #[serde(default)]
@@ -233,6 +235,47 @@ pub struct CoreExecutionObservation {
     pub pc_before: Option<Address>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pc_after: Option<Address>,
+}
+
+pub const DEFAULT_CONTINUE_UNTIL_HALT_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS: u64 = 25;
+pub const MIN_CONTINUE_UNTIL_HALT_TIMEOUT_MS: u64 = 10;
+pub const MAX_CONTINUE_UNTIL_HALT_TIMEOUT_MS: u64 = 60_000;
+pub const MIN_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS: u64 = 10;
+pub const MAX_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS: u64 = 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinueUntilHaltOptions {
+    pub timeout_ms: u64,
+    pub poll_interval_ms: u64,
+}
+
+impl Default for ContinueUntilHaltOptions {
+    fn default() -> Self {
+        Self {
+            timeout_ms: DEFAULT_CONTINUE_UNTIL_HALT_TIMEOUT_MS,
+            poll_interval_ms: DEFAULT_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinueUntilHaltOutcome {
+    Halted,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinueUntilHaltObservation {
+    pub continuation: CoreExecutionObservation,
+    pub outcome: ContinueUntilHaltOutcome,
+    pub state: CoreState,
+    pub halt_reason: Option<String>,
+    pub timeout_ms: u64,
+    pub poll_interval_ms: u64,
+    pub elapsed_ms: u64,
+    pub poll_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,6 +626,18 @@ pub struct CoreControlReport {
     pub complete: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinueUntilHaltReport {
+    pub wait_id: String,
+    pub observed_at: String,
+    pub risk: String,
+    pub session: SessionInfo,
+    pub effects: DebugControlEffects,
+    pub wait: ContinueUntilHaltObservation,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
 pub fn validate_core_execution_observation(
     target: &TargetInfo,
     core: &CoreExecutionObservation,
@@ -673,6 +728,104 @@ pub fn validate_core_execution_observation(
         return Err(format!(
             "core {} is running but still contains a halt reason",
             core.index
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_continue_until_halt_options(
+    options: ContinueUntilHaltOptions,
+) -> std::result::Result<(), String> {
+    if !(MIN_CONTINUE_UNTIL_HALT_TIMEOUT_MS..=MAX_CONTINUE_UNTIL_HALT_TIMEOUT_MS)
+        .contains(&options.timeout_ms)
+    {
+        return Err(format!(
+            "continue-until-halt timeout must be {MIN_CONTINUE_UNTIL_HALT_TIMEOUT_MS}..={MAX_CONTINUE_UNTIL_HALT_TIMEOUT_MS} ms"
+        ));
+    }
+    if !(MIN_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS..=MAX_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS)
+        .contains(&options.poll_interval_ms)
+    {
+        return Err(format!(
+            "continue-until-halt poll interval must be {MIN_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS}..={MAX_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS} ms"
+        ));
+    }
+    if options.poll_interval_ms > options.timeout_ms {
+        return Err("continue-until-halt poll interval must not exceed its timeout".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_continue_until_halt_observation(
+    target: &TargetInfo,
+    observation: &ContinueUntilHaltObservation,
+) -> std::result::Result<(), String> {
+    validate_continue_until_halt_options(ContinueUntilHaltOptions {
+        timeout_ms: observation.timeout_ms,
+        poll_interval_ms: observation.poll_interval_ms,
+    })?;
+    validate_core_execution_observation(target, &observation.continuation)?;
+    if observation.continuation.action != CoreExecutionAction::Continue {
+        return Err(format!(
+            "core {} continue-until-halt result does not contain a continue observation",
+            observation.continuation.index
+        ));
+    }
+    if observation.state == CoreState::Unknown {
+        return Err(format!(
+            "core {} continue-until-halt result contains an unknown final state",
+            observation.continuation.index
+        ));
+    }
+    match observation.outcome {
+        ContinueUntilHaltOutcome::Halted => {
+            if observation.state != CoreState::Halted {
+                return Err(format!(
+                    "core {} halted wait outcome did not finish halted",
+                    observation.continuation.index
+                ));
+            }
+            if !observation
+                .halt_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+            {
+                return Err(format!(
+                    "core {} halted wait outcome requires a halt reason",
+                    observation.continuation.index
+                ));
+            }
+        }
+        ContinueUntilHaltOutcome::TimedOut => {
+            if observation.state != CoreState::Running || observation.halt_reason.is_some() {
+                return Err(format!(
+                    "core {} timed-out wait must report a running core without a halt reason",
+                    observation.continuation.index
+                ));
+            }
+            if observation.elapsed_ms < observation.timeout_ms {
+                return Err(format!(
+                    "core {} timed-out wait returned before its deadline",
+                    observation.continuation.index
+                ));
+            }
+        }
+    }
+    if observation.continuation.state == CoreState::Halted {
+        if observation.outcome != ContinueUntilHaltOutcome::Halted
+            || observation.state != CoreState::Halted
+            || observation.halt_reason != observation.continuation.halt_reason
+            || observation.poll_count != 0
+        {
+            return Err(format!(
+                "core {} immediate continue halt has inconsistent wait evidence",
+                observation.continuation.index
+            ));
+        }
+    } else if observation.poll_count == 0 {
+        return Err(format!(
+            "core {} non-immediate wait result requires at least one status poll",
+            observation.continuation.index
         ));
     }
     Ok(())
@@ -1577,6 +1730,91 @@ mod tests {
             validate_core_execution_observation(&target, &observation)
                 .unwrap_err()
                 .contains("requires a halt reason")
+        );
+    }
+
+    #[test]
+    fn continue_until_halt_observation_distinguishes_halt_and_timeout() {
+        let target = TargetInfo {
+            name: "single".to_string(),
+            architecture: "armv7em".to_string(),
+            core_count: 1,
+        };
+        let continuation = CoreExecutionObservation {
+            index: 0,
+            name: "core0".to_string(),
+            architecture: "armv7em".to_string(),
+            action: CoreExecutionAction::Continue,
+            original_state: CoreState::Halted,
+            state: CoreState::Running,
+            state_changed: true,
+            halt_reason: None,
+            pc_before: None,
+            pc_after: None,
+        };
+        let mut observation = ContinueUntilHaltObservation {
+            continuation: continuation.clone(),
+            outcome: ContinueUntilHaltOutcome::Halted,
+            state: CoreState::Halted,
+            halt_reason: Some("breakpoint".to_string()),
+            timeout_ms: 100,
+            poll_interval_ms: 25,
+            elapsed_ms: 75,
+            poll_count: 3,
+        };
+
+        assert!(validate_continue_until_halt_observation(&target, &observation).is_ok());
+
+        observation.outcome = ContinueUntilHaltOutcome::TimedOut;
+        observation.state = CoreState::Running;
+        observation.halt_reason = None;
+        observation.elapsed_ms = 100;
+        observation.poll_count = 4;
+        assert!(validate_continue_until_halt_observation(&target, &observation).is_ok());
+
+        observation.elapsed_ms = 99;
+        assert!(
+            validate_continue_until_halt_observation(&target, &observation)
+                .unwrap_err()
+                .contains("before its deadline")
+        );
+        observation.elapsed_ms = 100;
+
+        observation.poll_count = 0;
+        assert!(
+            validate_continue_until_halt_observation(&target, &observation)
+                .unwrap_err()
+                .contains("at least one status poll")
+        );
+
+        observation.continuation = CoreExecutionObservation {
+            state: CoreState::Halted,
+            state_changed: false,
+            halt_reason: Some("breakpoint".to_string()),
+            ..continuation
+        };
+        observation.outcome = ContinueUntilHaltOutcome::Halted;
+        observation.state = CoreState::Halted;
+        observation.halt_reason = Some("breakpoint".to_string());
+        observation.elapsed_ms = 0;
+        observation.poll_count = 0;
+        assert!(validate_continue_until_halt_observation(&target, &observation).is_ok());
+
+        assert!(
+            validate_continue_until_halt_options(ContinueUntilHaltOptions {
+                timeout_ms: 5,
+                poll_interval_ms: 10,
+            })
+            .unwrap_err()
+            .contains("timeout")
+        );
+        assert!(
+            validate_continue_until_halt_options(ContinueUntilHaltOptions {
+                timeout_ms: 100,
+                poll_interval_ms: 101,
+            })
+            .unwrap_err()
+            .contains("must not exceed")
         );
     }
 

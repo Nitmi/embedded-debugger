@@ -33,7 +33,7 @@ device support must also complete this checklist on representative hardware.
 
 ## Current result
 
-Run on 2026-08-13 through 2026-08-15 with probe-rs 0.32.0 on Windows:
+Run on 2026-08-13 through 2026-08-17 with probe-rs 0.32.0 on Windows:
 
 - nRF52840: J-Link `1366:1061:001050282192`, detected target
   `nRF52840_xxAA`, silicon `NRF52840_xxAA_REV2`. Product-level `probes test`
@@ -257,6 +257,24 @@ Run on 2026-08-13 through 2026-08-15 with probe-rs 0.32.0 on Windows:
   This accepts session-scoped CPU0 hardware breakpoints and immediate-result
   continue semantics, not CPU1, software/symbolic/conditional breakpoints,
   watchpoints, or durable breakpoint ownership after a hard process kill.
+- On 2026-08-17, bounded `core.continue_until_halt` passed both native result
+  paths on the same exact ESP32-S3 probe. A read-only serial baseline observed
+  complete heartbeats `174..178`. In one persistent lease, CPU0 was halted and
+  stepped, slot 0 was set to the resulting `PC=0x42012A2A`, and the wait
+  returned `halted`, `halt_reason=breakpoint`, `elapsed_ms=3`, and
+  `poll_count=0`; `registers.read(pc)` matched the breakpoint address exactly.
+  After clearing the slot, a 300 ms wait with 50 ms polling returned the
+  successful outcome `timed_out`, `state=running`, `elapsed_ms=301`, and
+  `poll_count=6`. The same session then reported CPU0 running, accepted a new
+  halt, restored running, and closed with policy
+  `halt_clear_hardware_breakpoints_run_observed_cores_before_disconnect`.
+  The server exited cleanly, a new attach/disconnect probe test succeeded, and
+  a six-second recovery monitor observed complete heartbeats `330..335`.
+  Both monitors used 115200 baud with DTR/RTS=false and transmitted no bytes.
+  Artifacts are under
+  `target/hardware-acceptance/2026-08-17-esp32s3-continue-until-halt`. This
+  accepts bounded halt-event and timeout semantics plus lease reuse on CPU0;
+  it does not accept CPU1 or asynchronous cross-request cancellation.
 - Serial baseline at 115200 baud with DTR and RTS held false: nRF `COM16`
   emitted seven `Z` bytes in three seconds; nRF `COM15` and ESP32-S3 `COM3`
   were silent. No bytes were transmitted.

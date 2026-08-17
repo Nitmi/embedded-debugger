@@ -16,11 +16,13 @@ use crate::{
     error::{DebugError, ErrorCode, Result},
     firmware::{self, FirmwareFormat, FirmwareInputOptions},
     model::{
-        Address, ArtifactReference, CoreControlReport, CoreExecutionAction, DebugControlEffects,
-        EvidenceBundle, FirmwareImageOptions, FirmwareSegmentInfo, FlashExecution,
-        FlashExecutionBlocker, FlashExecutionReadiness, FlashPlan, FlashPolicy, FlashRange,
-        MAX_REGISTER_READS, MemoryReadReport, OperationRecord, PlannedAction, ProbeInfo,
-        ProbeTestReport, RegisterReadReport, ResetCaptureReport, SnapshotCaptureReport,
+        Address, ArtifactReference, ContinueUntilHaltOptions, ContinueUntilHaltReport,
+        CoreControlReport, CoreExecutionAction, DebugControlEffects, EvidenceBundle,
+        FirmwareImageOptions, FirmwareSegmentInfo, FlashExecution, FlashExecutionBlocker,
+        FlashExecutionReadiness, FlashPlan, FlashPolicy, FlashRange, MAX_REGISTER_READS,
+        MemoryReadReport, OperationRecord, PlannedAction, ProbeInfo, ProbeTestReport,
+        RegisterReadReport, ResetCaptureReport, SnapshotCaptureReport,
+        validate_continue_until_halt_observation, validate_continue_until_halt_options,
         validate_core_execution_observation, validate_core_inventory,
         validate_memory_core_observation, validate_memory_read_range,
         validate_post_flash_core_inventory, validate_register_core_observation,
@@ -463,6 +465,128 @@ impl<B: DebugBackend> DebugService<B> {
                 },
             ),
             core,
+            operations,
+            complete: true,
+        })
+    }
+
+    pub fn continue_until_halt(
+        &mut self,
+        probe_id: &str,
+        target: &str,
+        core_index: u32,
+        options: ContinueUntilHaltOptions,
+    ) -> Result<ContinueUntilHaltReport> {
+        let target_info = self.backend.target().clone();
+        if !self.backend.matches_target(target) {
+            return Err(DebugError::unavailable(
+                ErrorCode::TargetUnavailable,
+                "requested target is not available from the selected backend",
+                json!({"requested": target, "available": target_info.name}),
+            ));
+        }
+        if core_index >= target_info.core_count {
+            return Err(DebugError::config(
+                "requested core index is outside the target core inventory",
+                json!({
+                    "core_index": core_index,
+                    "core_count": target_info.core_count,
+                    "target": target_info.name,
+                }),
+            ));
+        }
+        validate_continue_until_halt_options(options).map_err(|problem| {
+            DebugError::config(
+                "invalid continue-until-halt timing options",
+                json!({"problem": problem, "options": options}),
+            )
+        })?;
+        let capabilities = self.backend.capabilities();
+        let required_capability = if !capabilities.core_status {
+            Some("core_status")
+        } else if !capabilities.continue_execution {
+            Some("continue_execution")
+        } else if !capabilities.continue_until_halt {
+            Some("continue_until_halt")
+        } else {
+            (!capabilities.post_disconnect_core_state).then_some("post_disconnect_core_state")
+        };
+        if let Some(capability) = required_capability {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "selected backend cannot continue and wait for a halt event",
+                6,
+                json!({
+                    "backend": self.backend.name(),
+                    "capability": capability,
+                }),
+            ));
+        }
+
+        let probe = select_probe(&self.backend.list_probes()?, Some(probe_id))?;
+        let session = self.backend.attach(&probe.id, &target_info.name)?;
+        let wait_result = self
+            .backend
+            .continue_until_halt_in_session(&session, core_index, options);
+        let disconnect_result = self.backend.disconnect(&session);
+        let wait = match (wait_result, disconnect_result) {
+            (Err(error), Err(cleanup_error)) => {
+                return Err(with_cleanup_failure(error, cleanup_error));
+            }
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+            (Ok(wait), Ok(())) => wait,
+        };
+        if wait.continuation.index != core_index {
+            return Err(DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned a different continue-until-halt core than requested",
+                6,
+                json!({
+                    "requested_core": core_index,
+                    "received_core": wait.continuation.index,
+                }),
+            ));
+        }
+        validate_continue_until_halt_observation(&target_info, &wait).map_err(|problem| {
+            DebugError::new(
+                ErrorCode::ProtocolError,
+                "backend returned an invalid continue-until-halt observation",
+                6,
+                json!({"problem": problem, "wait": wait}),
+            )
+        })?;
+
+        let mut operations = vec![
+            operation(1, "session.attach"),
+            operation(2, "core.verify_halted"),
+            operation(3, "core.continue_execution"),
+        ];
+        if wait.poll_count > 0 {
+            operations.push(operation(4, "core.poll_until_halted_or_timeout"));
+        }
+        operations.push(operation(
+            operations.len() as u32 + 1,
+            "core.observe_halt_or_timeout",
+        ));
+        operations.push(operation(
+            operations.len() as u32 + 1,
+            "session.disconnect_preserving_core_state",
+        ));
+
+        Ok(ContinueUntilHaltReport {
+            wait_id: format!("wait_{}", Uuid::new_v4().simple()),
+            observed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            session,
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    execution_continue_requested: true,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
+            wait,
             operations,
             complete: true,
         })
@@ -1898,6 +2022,61 @@ mod tests {
     }
 
     #[test]
+    fn continue_until_halt_reports_a_bounded_replay_event() {
+        let replay = fixture();
+        let probe_id = replay.probe.id.clone();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let report = service
+            .continue_until_halt(
+                &probe_id,
+                &target,
+                0,
+                ContinueUntilHaltOptions {
+                    timeout_ms: 100,
+                    poll_interval_ms: 25,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            report.wait.outcome,
+            crate::model::ContinueUntilHaltOutcome::Halted
+        );
+        assert_eq!(report.wait.state, CoreState::Halted);
+        assert_eq!(report.wait.halt_reason.as_deref(), Some("breakpoint"));
+        assert_eq!(report.wait.poll_count, 3);
+        assert!(report.effects.execution_continue_requested);
+        assert!(!report.effects.intentional_final_core_state_change_requested);
+        assert_eq!(
+            report.operations.last().unwrap().operation,
+            "session.disconnect_preserving_core_state"
+        );
+    }
+
+    #[test]
+    fn invalid_continue_until_halt_options_are_rejected_before_probe_selection() {
+        let replay = fixture();
+        let target = replay.target.name.clone();
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+
+        let error = service
+            .continue_until_halt(
+                "deliberately-invalid",
+                &target,
+                0,
+                ContinueUntilHaltOptions {
+                    timeout_ms: 5,
+                    poll_interval_ms: 10,
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+    }
+
+    #[test]
     fn missing_post_disconnect_core_state_is_rejected_before_probe_selection() {
         let mut replay = fixture();
         replay.capabilities.post_disconnect_core_state = false;
@@ -1928,6 +2107,23 @@ mod tests {
         assert_eq!(status_error.code, ErrorCode::CapabilityUnavailable);
         assert_eq!(
             status_error.details["capability"],
+            "post_disconnect_core_state"
+        );
+
+        let wait_error = service
+            .continue_until_halt(
+                "deliberately-invalid",
+                &target,
+                0,
+                ContinueUntilHaltOptions {
+                    timeout_ms: 100,
+                    poll_interval_ms: 25,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(wait_error.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(
+            wait_error.details["capability"],
             "post_disconnect_core_state"
         );
 

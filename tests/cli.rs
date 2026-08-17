@@ -124,6 +124,86 @@ fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
         "{}",
         serde_json::json!({
             "schema_version": "1.0",
+            "request_id": "continue-until-halt",
+            "operation": "core.continue_until_halt",
+            "session_id": session_id,
+            "core": 0,
+            "timeout_ms": 100,
+            "poll_interval_ms": 25,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let waited = read_jsonl_response(&mut stdout);
+    assert_eq!(waited["ok"], true);
+    assert_eq!(waited["operation"], "core.continue_until_halt");
+    assert_eq!(waited["data"]["wait"]["outcome"], "halted");
+    assert_eq!(waited["data"]["wait"]["state"], "halted");
+    assert_eq!(waited["data"]["wait"]["halt_reason"], "breakpoint");
+    assert_eq!(waited["data"]["wait"]["elapsed_ms"], 75);
+    assert_eq!(waited["data"]["wait"]["poll_count"], 3);
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
+            "request_id": "continue-until-timeout",
+            "operation": "core.continue_until_halt",
+            "session_id": session_id,
+            "core": 0,
+            "timeout_ms": 100,
+            "poll_interval_ms": 25,
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let timed_out = read_jsonl_response(&mut stdout);
+    assert_eq!(timed_out["ok"], true);
+    assert_eq!(timed_out["data"]["wait"]["outcome"], "timed_out");
+    assert_eq!(timed_out["data"]["wait"]["state"], "running");
+    assert_eq!(timed_out["data"]["wait"]["halt_reason"], Value::Null);
+    assert_eq!(timed_out["data"]["wait"]["elapsed_ms"], 100);
+    assert_eq!(timed_out["data"]["wait"]["poll_count"], 4);
+    assert_eq!(timed_out["data"]["complete"], true);
+    assert!(
+        timed_out["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("single-request JSONL server"))
+    );
+
+    for (request_id, operation, expected_state) in [
+        ("status-after-timeout", "core.status", "running"),
+        ("halt-after-timeout", "core.halt", "halted"),
+    ] {
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({
+                "schema_version": "1.0",
+                "request_id": request_id,
+                "operation": operation,
+                "session_id": session_id,
+                "core": 0,
+            })
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+        let response = read_jsonl_response(&mut stdout);
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["data"]["core"]["state"], expected_state);
+    }
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "schema_version": "1.0",
             "request_id": "breakpoints-list",
             "operation": "breakpoints.list",
             "session_id": session_id,
@@ -1109,6 +1189,90 @@ fn replay_core_continue_reports_the_observed_immediate_result() {
 }
 
 #[test]
+fn replay_core_continue_until_halt_reports_a_bounded_halt_event() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "core",
+            "continue-until-halt",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--timeout-ms",
+            "100",
+            "--poll-interval-ms",
+            "25",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "core.continue_until_halt");
+    assert_eq!(result["data"]["wait"]["outcome"], "halted");
+    assert_eq!(result["data"]["wait"]["state"], "halted");
+    assert_eq!(result["data"]["wait"]["halt_reason"], "breakpoint");
+    assert_eq!(result["data"]["wait"]["timeout_ms"], 100);
+    assert_eq!(result["data"]["wait"]["poll_interval_ms"], 25);
+    assert_eq!(result["data"]["wait"]["elapsed_ms"], 75);
+    assert_eq!(result["data"]["wait"]["poll_count"], 3);
+    assert_eq!(
+        result["data"]["effects"]["execution_continue_requested"],
+        true
+    );
+    assert_eq!(
+        result["data"]["effects"]["intentional_final_core_state_change_requested"],
+        false
+    );
+    assert_eq!(
+        result["data"]["operations"][3]["operation"],
+        "core.poll_until_halted_or_timeout"
+    );
+    assert_eq!(
+        result["data"]["operations"][5]["operation"],
+        "session.disconnect_preserving_core_state"
+    );
+}
+
+#[test]
+fn core_continue_until_halt_rejects_invalid_timing_before_probe_selection() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "core",
+            "continue-until-halt",
+            "--probe",
+            "deliberately-invalid",
+            "--target",
+            "STM32G431CBTx",
+            "--timeout-ms",
+            "5",
+            "--poll-interval-ms",
+            "10",
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["operation"], "core.continue_until_halt");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["options"]["timeout_ms"], 5);
+}
+
+#[test]
 fn core_control_rejects_an_invalid_index_before_probe_selection() {
     let output = Command::cargo_bin("embedded-debugger")
         .unwrap()
@@ -1164,6 +1328,44 @@ fn native_one_shot_core_state_is_gated_before_probe_selection() {
 
     assert_eq!(result["ok"], false);
     assert_eq!(result["operation"], "core.status");
+    assert_eq!(result["error"]["code"], "CAPABILITY_UNAVAILABLE");
+    assert_eq!(
+        result["error"]["details"]["capability"],
+        "post_disconnect_core_state"
+    );
+    assert_eq!(result["error"]["details"]["backend"], "probe-rs");
+}
+
+#[test]
+fn native_one_shot_continue_until_halt_is_gated_before_probe_selection() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--backend",
+            "probe-rs",
+            "core",
+            "continue-until-halt",
+            "--probe",
+            "deliberately-invalid",
+            "--target",
+            "esp32s3",
+            "--core",
+            "0",
+            "--timeout-ms",
+            "100",
+            "--poll-interval-ms",
+            "25",
+            "--json",
+        ])
+        .assert()
+        .code(6)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["operation"], "core.continue_until_halt");
     assert_eq!(result["error"]["code"], "CAPABILITY_UNAVAILABLE");
     assert_eq!(
         result["error"]["details"]["capability"],

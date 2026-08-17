@@ -13,12 +13,14 @@ use crate::{
     backend::{DebugBackend, validate_hardware_breakpoint_request},
     error::{DebugError, ErrorCode, Result},
     model::{
-        Address, CoreExecutionAction, CoreExecutionObservation, DebugControlEffects,
-        HardwareBreakpointAction, HardwareBreakpointObservation, MemoryCoreObservation,
-        MemoryReadRange, OperationRecord, RegisterCoreObservation, SessionInfo,
-        validate_core_execution_observation, validate_hardware_breakpoint_observation,
-        validate_memory_core_observation, validate_memory_read_range,
-        validate_register_core_observation,
+        Address, ContinueUntilHaltObservation, ContinueUntilHaltOptions, CoreExecutionAction,
+        CoreExecutionObservation, DEFAULT_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS,
+        DEFAULT_CONTINUE_UNTIL_HALT_TIMEOUT_MS, DebugControlEffects, HardwareBreakpointAction,
+        HardwareBreakpointObservation, MemoryCoreObservation, MemoryReadRange, OperationRecord,
+        RegisterCoreObservation, SessionInfo, validate_continue_until_halt_observation,
+        validate_continue_until_halt_options, validate_core_execution_observation,
+        validate_hardware_breakpoint_observation, validate_memory_core_observation,
+        validate_memory_read_range, validate_register_core_observation,
     },
     service::{
         DebugControlEffectRequest, debug_control_effects, select_probe, sha256_bytes,
@@ -64,6 +66,18 @@ pub struct SessionCoreControlReport {
     pub risk: String,
     pub effects: DebugControlEffects,
     pub core: CoreExecutionObservation,
+    pub operations: Vec<OperationRecord>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionContinueUntilHaltReport {
+    pub observed_at: String,
+    pub state_scope: &'static str,
+    pub session_id: String,
+    pub risk: String,
+    pub effects: DebugControlEffects,
+    pub wait: ContinueUntilHaltObservation,
     pub operations: Vec<OperationRecord>,
     pub complete: bool,
 }
@@ -270,6 +284,86 @@ impl<B: DebugBackend> SessionService<B> {
             ),
             core,
             operations: in_session_core_operations(action),
+            complete: true,
+        })
+    }
+
+    pub fn continue_until_halt(
+        &mut self,
+        session_id: &str,
+        core_index: u32,
+        options: ContinueUntilHaltOptions,
+    ) -> Result<SessionContinueUntilHaltReport> {
+        let session = self.require_session(session_id)?.info.clone();
+        validate_session_core_index(&session, core_index)?;
+        validate_continue_until_halt_options(options).map_err(|problem| {
+            DebugError::config(
+                "invalid continue-until-halt timing options",
+                json!({"problem": problem, "options": options}),
+            )
+        })?;
+        require_capabilities(
+            self.backend.name(),
+            "core.continue_until_halt",
+            &[
+                ("core_status", session.capabilities.core_status),
+                (
+                    "continue_execution",
+                    session.capabilities.continue_execution,
+                ),
+                (
+                    "continue_until_halt",
+                    session.capabilities.continue_until_halt,
+                ),
+            ],
+        )?;
+
+        let wait = self
+            .backend
+            .continue_until_halt_in_session(&session, core_index, options)?;
+        if wait.continuation.index != core_index {
+            return Err(protocol_error(
+                "backend returned a different continue-until-halt core than requested",
+                json!({
+                    "requested_core": core_index,
+                    "received_core": wait.continuation.index,
+                }),
+            ));
+        }
+        validate_continue_until_halt_observation(&session.target, &wait).map_err(|problem| {
+            protocol_error(
+                "backend returned an invalid in-session continue-until-halt observation",
+                json!({"problem": problem, "wait": wait}),
+            )
+        })?;
+        self.track_observed_core(core_index);
+
+        let mut operations = vec![
+            session_operation(1, "core.verify_halted"),
+            session_operation(2, "core.continue_execution"),
+        ];
+        if wait.poll_count > 0 {
+            operations.push(session_operation(3, "core.poll_until_halted_or_timeout"));
+        }
+        operations.push(session_operation(
+            operations.len() as u32 + 1,
+            "core.observe_halt_or_timeout",
+        ));
+
+        Ok(SessionContinueUntilHaltReport {
+            observed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            state_scope: "active_session",
+            session_id: session.session_id,
+            risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            effects: debug_control_effects(
+                &self.backend,
+                DebugControlEffectRequest {
+                    execution_continue_requested: true,
+                    ..DebugControlEffectRequest::default()
+                },
+            ),
+            wait,
+            operations,
             complete: true,
         })
     }
@@ -821,6 +915,16 @@ enum SessionOperation {
         #[serde(default)]
         core: u32,
     },
+    #[serde(rename = "core.continue_until_halt")]
+    CoreContinueUntilHalt {
+        session_id: String,
+        #[serde(default)]
+        core: u32,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+        #[serde(default)]
+        poll_interval_ms: Option<u64>,
+    },
     #[serde(rename = "core.step")]
     CoreStep {
         session_id: String,
@@ -886,6 +990,7 @@ impl SessionOperation {
             Self::CoreHalt { .. } => "core.halt",
             Self::CoreRun { .. } => "core.run",
             Self::CoreContinue { .. } => "core.continue",
+            Self::CoreContinueUntilHalt { .. } => "core.continue_until_halt",
             Self::CoreStep { .. } => "core.step",
             Self::BreakpointsList { .. } => "breakpoints.list",
             Self::BreakpointsSet { .. } => "breakpoints.set",
@@ -1106,6 +1211,29 @@ fn handle_request<B: DebugBackend>(
             vec![
                 SESSION_STATE_WARNING.to_string(),
                 "Continuing a halted core may immediately hit a breakpoint and return halted; the response reports the observed result rather than promising a durable running state.".to_string(),
+            ],
+            false,
+        ),
+        SessionOperation::CoreContinueUntilHalt {
+            session_id,
+            core,
+            timeout_ms,
+            poll_interval_ms,
+        } => (
+            serde_json::to_value(service.continue_until_halt(
+                session_id,
+                *core,
+                ContinueUntilHaltOptions {
+                    timeout_ms: timeout_ms
+                        .unwrap_or(DEFAULT_CONTINUE_UNTIL_HALT_TIMEOUT_MS),
+                    poll_interval_ms: poll_interval_ms
+                        .unwrap_or(DEFAULT_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS),
+                },
+            )?)
+            .expect("session continue-until-halt report always serializes"),
+            vec![
+                SESSION_STATE_WARNING.to_string(),
+                "This bounded request occupies the single-request JSONL server until a halt event or timeout. A timed_out outcome leaves the core running and the same lease available for a later halt, breakpoint change, or close.".to_string(),
             ],
             false,
         ),
@@ -1726,6 +1854,88 @@ mod tests {
             !continued
                 .effects
                 .intentional_final_core_state_change_requested
+        );
+        service.close(&session_id).unwrap();
+    }
+
+    #[test]
+    fn persistent_continue_until_halt_reports_event_then_timeout_and_keeps_the_lease() {
+        let mut fixture = ReplayFixture::load(Path::new("examples/replay/stm32g4.json")).unwrap();
+        fixture.capabilities.post_disconnect_core_state = false;
+        let mut service = SessionService::new(ReplayBackend::new(fixture));
+        let opened = service
+            .open("replay:stlink-v3:0039002A3432510433343034", "STM32G431CBTx")
+            .unwrap();
+        let session_id = opened.session.session_id;
+        let options = ContinueUntilHaltOptions {
+            timeout_ms: 100,
+            poll_interval_ms: 25,
+        };
+
+        let halted = service
+            .continue_until_halt(&session_id, 0, options)
+            .unwrap();
+        let timed_out = service
+            .continue_until_halt(&session_id, 0, options)
+            .unwrap();
+        let halted_after_timeout = service
+            .control_core(&session_id, 0, CoreExecutionAction::Halt)
+            .unwrap();
+
+        assert_eq!(
+            halted.wait.outcome,
+            crate::model::ContinueUntilHaltOutcome::Halted
+        );
+        assert_eq!(halted.wait.state, CoreState::Halted);
+        assert_eq!(halted.wait.poll_count, 3);
+        assert!(halted.effects.execution_continue_requested);
+        assert_eq!(
+            timed_out.wait.outcome,
+            crate::model::ContinueUntilHaltOutcome::TimedOut
+        );
+        assert_eq!(timed_out.wait.state, CoreState::Running);
+        assert_eq!(timed_out.wait.poll_count, 4);
+        assert_eq!(halted_after_timeout.core.state, CoreState::Halted);
+        assert_eq!(
+            service.status(&session_id).unwrap().observed_core_indexes,
+            vec![0]
+        );
+        service.close(&session_id).unwrap();
+    }
+
+    #[test]
+    fn invalid_persistent_continue_until_halt_options_do_not_consume_event_evidence() {
+        let mut service = service();
+        let opened = service
+            .open("replay:stlink-v3:0039002A3432510433343034", "STM32G431CBTx")
+            .unwrap();
+        let session_id = opened.session.session_id;
+
+        let error = service
+            .continue_until_halt(
+                &session_id,
+                0,
+                ContinueUntilHaltOptions {
+                    timeout_ms: 5,
+                    poll_interval_ms: 10,
+                },
+            )
+            .unwrap_err();
+        let valid = service
+            .continue_until_halt(
+                &session_id,
+                0,
+                ContinueUntilHaltOptions {
+                    timeout_ms: 100,
+                    poll_interval_ms: 25,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(
+            valid.wait.outcome,
+            crate::model::ContinueUntilHaltOutcome::Halted
         );
         service.close(&session_id).unwrap();
     }

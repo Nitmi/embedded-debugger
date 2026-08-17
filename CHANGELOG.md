@@ -69,6 +69,12 @@ All notable changes to this project will be documented in this file.
   failure produced when a breakpoint is hit before strict `core run`
   verification. ESP32-S3 CPU0 passed an immediate hardware-breakpoint hit with
   exact PC evidence.
+- Bounded `core continue-until-halt` CLI and `core.continue_until_halt` JSONL
+  support with validated 10..=60000 ms deadlines, 10..=1000 ms polling,
+  explicit `halted` versus successful `timed_out` outcomes, elapsed time and
+  poll evidence, deterministic Replay event queues, and a reusable running
+  lease after timeout. ESP32-S3 CPU0 passed both an exact-PC hardware-breakpoint
+  hit and a 300 ms no-breakpoint timeout in one native session.
 - Persistent JSONL `breakpoints.list`, `breakpoints.set`, `breakpoints.clear`,
   and `breakpoints.clear_all` with live capacity negotiation, complete indexed
   before/after slot inventories, optional explicit slot selection, lowest-free
@@ -100,16 +106,17 @@ All notable changes to this project will be documented in this file.
 - Native flashing is limited to readable boot NVM. Multi-core segmented
   execution is physically accepted only on ESP32-S3. RTT, arbitrary
   memory writes, Generic/MMIO reads, register writes, software/symbolic/
-  conditional breakpoints, watchpoints, and persistent lease
-  timeout/cancellation are not implemented. Persistent hardware breakpoints are
+  conditional breakpoints, watchpoints, idle lease expiry, and asynchronous
+  request cancellation are not implemented. Persistent hardware breakpoints are
   physically accepted only on ESP32-S3 CPU0; native one-shot breakpoint
   commands and CPU1 breakpoint control are not exposed. Memory reads are
   limited to 4096 bytes and do not freeze other cores or DMA.
 - Native probe-rs one-shot live snapshot, register read, memory read, core
-  status, core halt, core run, core continue, and core step are exposed only as
-  explicit `CAPABILITY_UNAVAILABLE` results. The persistent JSONL owner now
-  provides session-scoped status/halt/run/continue/step, hardware breakpoints,
-  and bounded register and memory reads while the lease is alive. probe-rs 0.32
+  status, core halt, core run, core continue, core continue-until-halt, and core
+  step are exposed only as explicit `CAPABILITY_UNAVAILABLE` results. The
+  persistent JSONL owner now provides session-scoped
+  status/halt/run/continue/continue-until-halt/step, hardware breakpoints, and
+  bounded register and memory reads while the lease is alive. probe-rs 0.32
   teardown resumes halted Xtensa cores and disables Cortex-M halting debug, so
   the one-shot commands remain gated.
 - Native attach/disconnect is verified on nRF52840/J-Link and ESP32-S3/native
