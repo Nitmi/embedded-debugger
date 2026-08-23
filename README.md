@@ -15,7 +15,8 @@ discover -> select exact probe/target -> flash plan -> confirm digest
 
 Replay is a product backend, not a throwaway mock: it powers CI, regression
 fixtures, issue reports, and offline Agent analysis. The OpenOCD target backend
-remains a future fallback, but its bounded host inspection layer is available:
+is being enabled in guarded checkpoints. Host inspection and a managed server
+lifecycle are available:
 
 ```console
 cargo run -- openocd inspect \
@@ -34,6 +35,35 @@ server launch, Tcl RPC, GDB/MI, target operations, and flash disabled. Repeating
 `--config` or `--search` preserves argument order; duplicate paths and paths
 containing `#` are rejected. Use `--timeout-ms` to override the 2000 ms version
 deadline within 100..=30000 ms.
+
+Executing an OpenOCD configuration is a different risk boundary because `.cfg`
+files are executable Tcl. First generate a launch plan, review its disclosed
+limits, and then return the exact digest:
+
+```console
+cargo run -- openocd server plan \
+  --executable openocd \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --json
+
+cargo run -- openocd server test \
+  --executable openocd \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --confirm <confirm_digest> \
+  --json
+```
+
+`server test` is conservatively `R2_DEVICE_WRITE`: configuration Tcl can access
+the host and target even though the tool itself adds only loopback binding,
+dynamic GDB/Tcl ports, a Tcl `version` readiness query, and `shutdown`. The
+digest binds the selected executable file and version, top-level config hashes,
+search directory paths, and lifecycle deadlines. It does not bind search tree
+contents, transitively sourced files, or Tcl semantics. Runtime logs stay on
+stderr and in bounded summaries; telnet is disabled, and the complete process
+tree is isolated and cleaned up. This checkpoint exposes the dynamic GDB
+endpoint but does not yet claim GDB/MI, target operations, or flash.
 
 Native probe discovery is available through the embedded probe-rs library:
 
@@ -373,7 +403,8 @@ See [docs/contracts.md](docs/contracts.md),
 [ADR-0002](docs/decisions/0002-core-state-follows-session-lifetime.md),
 [ADR-0003](docs/decisions/0003-persistent-session-jsonl-lease.md), and
 [ADR-0004](docs/decisions/0004-fail-closed-mcp-supervision.md), and
-[ADR-0005](docs/decisions/0005-openocd-host-inspection-boundary.md).
+[ADR-0005](docs/decisions/0005-openocd-host-inspection-boundary.md), and
+[ADR-0006](docs/decisions/0006-guarded-openocd-server-lifecycle.md).
 
 ## Current status
 
@@ -395,7 +426,11 @@ heartbeat checks all succeeded. System-reset snapshots also passed. Live
 snapshots and bounded register and RAM/NVM reads passed running-origin ESP32-S3
 exercises, including pre-attach MMIO and size rejection plus serial heartbeat
 recovery, but are now native capability-gated because halted-origin teardown is
-not state preserving. OpenOCD server/Tcl/GDB-MI target operations, general
+not state preserving. OpenOCD host inspection and guarded managed-server
+planning are implemented. The server launcher fixes loopback-only dynamic
+endpoints, disables telnet, proves Tcl readiness, performs graceful shutdown,
+bounds logs, and enforces process-tree cleanup; physical ESP32-S3 acceptance is
+pending exact plan confirmation. OpenOCD GDB/MI target operations, general
 ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
 watchpoints, asynchronous request cancellation, durable crash recovery,

@@ -1315,7 +1315,7 @@ fn openocd_inspect_returns_a_host_only_versioned_contract() {
     );
     assert_eq!(
         result["data"]["server_enablement_requirements"]["implemented"],
-        false
+        true
     );
     assert_eq!(
         result["data"]["server_enablement_requirements"]["bind_address"],
@@ -1334,6 +1334,162 @@ fn openocd_inspect_returns_a_host_only_versioned_contract() {
     assert_eq!(result["data"]["capabilities"]["gdb_mi"], false);
     assert_eq!(result["data"]["capabilities"]["target_operations"], false);
     assert_eq!(result["data"]["capabilities"]["flash"], false);
+}
+
+#[test]
+fn openocd_server_plan_returns_a_guarded_versioned_contract() {
+    let directory = tempdir().unwrap();
+    let executable = write_fake_openocd(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let make_plan = || {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .arg("openocd")
+            .arg("server")
+            .arg("plan")
+            .arg("--executable")
+            .arg(&executable)
+            .arg("--config")
+            .arg(&config)
+            .arg("--search")
+            .arg(directory.path())
+            .arg("--json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Value>(&output).unwrap()
+    };
+    let first = make_plan();
+    let second = make_plan();
+
+    assert_eq!(first["schema_version"], "1.0");
+    assert_eq!(first["operation"], "openocd.server.plan");
+    assert_eq!(first["data"]["backend"], "openocd");
+    assert_eq!(first["data"]["operation"], "openocd.server.test");
+    assert_eq!(first["data"]["risk"], "R2_DEVICE_WRITE");
+    assert_eq!(first["data"]["complete"], true);
+    assert_eq!(
+        first["data"]["lifecycle"]["process_isolation"],
+        if cfg!(windows) {
+            "windows_job_object"
+        } else {
+            "unix_process_group"
+        }
+    );
+    assert_eq!(
+        first["data"]["effects"]["configuration_tcl_execution_required"],
+        true
+    );
+    assert_eq!(
+        first["data"]["effects"]["device_write_possible_from_configuration"],
+        true
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["top_level_configuration_hashes_bound"],
+        true
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["transitive_sources_bound"],
+        false
+    );
+    assert_eq!(
+        first["data"]["executable_file"]["sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        first["data"]["confirm_digest"],
+        second["data"]["confirm_digest"]
+    );
+}
+
+#[test]
+fn openocd_server_test_rejects_a_stale_digest_before_configuration_execution() {
+    let directory = tempdir().unwrap();
+    let executable = write_fake_openocd(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("server")
+        .arg("test")
+        .arg("--executable")
+        .arg(&executable)
+        .arg("--config")
+        .arg(&config)
+        .arg("--confirm")
+        .arg("00".repeat(32))
+        .arg("--json")
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.server.test");
+    assert_eq!(result["error"]["code"], "CONFIRMATION_MISMATCH");
+    assert_eq!(
+        result["error"]["suggested_actions"][0]["action"],
+        "review_openocd_server_plan"
+    );
+}
+
+#[test]
+fn openocd_server_validates_timeouts_before_filesystem_inputs() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "openocd",
+            "server",
+            "plan",
+            "--executable",
+            "deliberately-missing-openocd",
+            "--config",
+            "deliberately-missing.cfg",
+            "--startup-timeout-ms",
+            "99",
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.server.plan");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["timeout_kind"], "startup");
+    assert_eq!(result["error"]["details"]["timeout_ms"], 99);
+}
+
+#[test]
+fn openocd_server_requires_an_explicit_top_level_config() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args(["openocd", "server", "plan", "--json"])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.server.plan");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(
+        result["error"]["details"]["required_argument"],
+        "--config <FILE>"
+    );
 }
 
 #[test]

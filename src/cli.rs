@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::{
     backend::{
         DebugBackend,
-        openocd::{self, OpenOcdInspectOptions},
+        openocd::{self, OpenOcdInspectOptions, OpenOcdServerOptions},
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
     },
@@ -98,6 +98,10 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum OpenOcdCommand {
     Inspect(OpenOcdInspectSelection),
+    Server {
+        #[command(subcommand)]
+        command: OpenOcdServerCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -117,6 +121,54 @@ pub struct OpenOcdInspectSelection {
         help = "bounded OpenOCD --version deadline in milliseconds (100..=30000)"
     )]
     pub timeout_ms: u64,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdServerCommand {
+    Plan(OpenOcdServerSelection),
+    Test(OpenOcdServerTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdServerSelection {
+    #[arg(long, default_value = "openocd", value_name = "PATH")]
+    pub executable: PathBuf,
+
+    #[arg(long = "config", value_name = "FILE")]
+    pub config_files: Vec<PathBuf>,
+
+    #[arg(long = "search", value_name = "DIR")]
+    pub search_dirs: Vec<PathBuf>,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_VERSION_TIMEOUT_MS,
+        help = "bounded OpenOCD --version deadline in milliseconds (100..=30000)"
+    )]
+    pub version_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
+        help = "bounded server readiness deadline in milliseconds (100..=60000)"
+    )]
+    pub startup_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS,
+        help = "bounded graceful shutdown deadline in milliseconds (100..=30000)"
+    )]
+    pub shutdown_timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdServerTestSelection {
+    #[command(flatten)]
+    pub server: OpenOcdServerSelection,
+
+    #[arg(long, help = "exact confirm_digest returned by openocd server plan")]
+    pub confirm: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -470,7 +522,21 @@ impl Cli {
             Command::Session { .. } => "session.serve",
             Command::Mcp { .. } => "mcp.serve",
             Command::Supervisor { .. } => "supervisor.mcp",
-            Command::Openocd { .. } => "openocd.inspect",
+            Command::Openocd {
+                command: OpenOcdCommand::Inspect(_),
+            } => "openocd.inspect",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Server {
+                        command: OpenOcdServerCommand::Plan(_),
+                    },
+            } => "openocd.server.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Server {
+                        command: OpenOcdServerCommand::Test(_),
+                    },
+            } => "openocd.server.test",
         }
     }
 
@@ -665,6 +731,48 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report.executable.resolved,
                     report.executable.version_line,
                     report.configuration.top_level_files.len(),
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Server {
+                    command: OpenOcdServerCommand::Plan(selection),
+                },
+        } => {
+            let report = openocd::plan_server(&openocd_server_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.server.plan",
+                &report,
+                format!(
+                    "OpenOCD managed server plan ready\nRisk: {}\nExecutable: {}\nTop-level configs: {}\nConfirm digest: {}",
+                    report.risk,
+                    report.executable.resolved,
+                    report.configuration.top_level_files.len(),
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Server {
+                    command: OpenOcdServerCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_server(
+                &openocd_server_options(&selection.server),
+                &selection.confirm,
+            )?;
+            Ok(CommandResult::serializable(
+                "openocd.server.test",
+                &report,
+                format!(
+                    "OpenOCD managed lifecycle complete\nTcl: {}:{}\nGDB: {}:{}\nVersion: {}\nShutdown: graceful",
+                    report.readiness.bind_address,
+                    report.readiness.tcl_port,
+                    report.readiness.bind_address,
+                    report.readiness.gdb_port,
+                    report.readiness.tcl_version_response,
                 ),
             ))
         }
@@ -1277,6 +1385,17 @@ fn parse_length(value: &str) -> std::result::Result<u64, String> {
     Address::parse(value)
         .map(|parsed| parsed.0)
         .map_err(|_| "length must be a decimal integer or a 0x-prefixed hexadecimal string".into())
+}
+
+fn openocd_server_options(selection: &OpenOcdServerSelection) -> OpenOcdServerOptions {
+    OpenOcdServerOptions {
+        executable: selection.executable.clone(),
+        config_files: selection.config_files.clone(),
+        search_dirs: selection.search_dirs.clone(),
+        version_timeout_ms: selection.version_timeout_ms,
+        startup_timeout_ms: selection.startup_timeout_ms,
+        shutdown_timeout_ms: selection.shutdown_timeout_ms,
+    }
 }
 
 fn unsupported_openocd(capability: &str) -> DebugError {

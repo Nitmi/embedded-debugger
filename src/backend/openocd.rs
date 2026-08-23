@@ -16,6 +16,15 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{DebugError, ErrorCode, Result, SuggestedAction};
 
+mod server;
+
+pub use server::{
+    DEFAULT_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS, DEFAULT_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
+    MAX_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS, MAX_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
+    MIN_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS, MIN_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
+    OpenOcdServerOptions, OpenOcdServerPlan, OpenOcdServerTestReport, plan_server, test_server,
+};
+
 pub const DEFAULT_OPENOCD_VERSION_TIMEOUT_MS: u64 = 2_000;
 pub const MIN_OPENOCD_VERSION_TIMEOUT_MS: u64 = 100;
 pub const MAX_OPENOCD_VERSION_TIMEOUT_MS: u64 = 30_000;
@@ -133,7 +142,7 @@ fn complete_host_inspection(
         executable,
         configuration,
         server_enablement_requirements: OpenOcdServerEnablementRequirements {
-            implemented: false,
+            implemented: true,
             bind_address: "127.0.0.1".to_string(),
             gdb_port_allocation: "dynamic".to_string(),
             tcl_port_allocation: "dynamic".to_string(),

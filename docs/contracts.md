@@ -78,9 +78,52 @@ The capability fields `config_semantic_validation`, `server_launch`, `tcl_rpc`,
 `gdb_mi`, `target_operations`, and `flash` remain false. The requirements name
 loopback binding, dynamic GDB/Tcl ports, a disabled telnet server, Tcl RPC
 readiness, the Tcl `0x1a` message terminator, the `shutdown` command, and
-process-tree cleanup. However,
-`server_enablement_requirements.implemented=false` prevents them from being
-mistaken for current guarantees.
+process-tree cleanup. `server_enablement_requirements.implemented=true` means
+the separate guarded server lifecycle below implements those requirements. The
+inspection operation's own server and target capability fields remain false.
+
+## Guarded OpenOCD server lifecycle
+
+`openocd server plan` accepts the same executable, repeatable `--config`, and
+repeatable `--search` inputs plus independently bounded version, startup, and
+shutdown deadlines. At least one explicit top-level config is required. Version
+timeout is 100..=30000 ms (default 2000), startup is 100..=60000 ms (default
+10000), and shutdown is 100..=30000 ms (default 3000). Scalar and count bounds
+are rejected before filesystem access.
+
+Planning is host-side, but its returned execution risk is conservatively
+`R2_DEVICE_WRITE`: OpenOCD configuration is executable Tcl and may reset or
+write a target, execute a host command, or perform other behavior not requested
+by this tool. The plan hashes the exact selected executable (maximum 512 MiB),
+binds its recognized version, and reuses the canonical top-level config
+manifests. Its `confirm_digest` also binds ordered search directory paths and
+all lifecycle policy fields. It explicitly reports that search directory
+contents, transitive sources, and Tcl semantics are neither bound nor verified.
+
+`openocd server test --confirm <DIGEST>` recomputes the complete plan and fails
+with `CONFIRMATION_MISMATCH` before configuration execution unless the digest is
+exact. It does not accept arbitrary `-c` or Tcl input. The launcher binds to
+`127.0.0.1`, asks the operating system for GDB and Tcl ports with port zero,
+disables telnet, and passes only canonical search directories and top-level
+configs. OpenOCD stdout and stderr are drained concurrently, forwarded to
+stderr, hashed completely, and retained up to 256 KiB per stream. Log lines are
+limited to 16 KiB and a bounded event queue; truncation, oversized lines,
+dropped events, or incomplete drains are `PROTOCOL_ERROR`.
+
+Readiness requires observing both dynamic endpoint announcements and receiving
+a recognizable OpenOCD `version` response over Tcl RPC. Tcl requests and
+responses use byte `0x1a` framing and responses are limited to 64 KiB. The test
+then sends `shutdown` and requires a successful graceful process exit within
+the shutdown deadline. A Windows Job Object or Unix process group covers the
+complete descendant tree; timeout and drop paths force termination. The result
+contains endpoint identities, readiness and shutdown timings, complete bounded
+log summaries, effects, confirmation limits, and `complete=true`.
+
+This checkpoint advertises `server_launch=true`, `tcl_rpc=true`, and
+`dynamic_gdb_endpoint=true` only in the server-test result. `gdb_mi`,
+`target_operations`, and `flash` remain false. A listening GDB socket and a Tcl
+version response do not prove target examination, CPU state preservation, or
+debugger semantics.
 
 `probes test --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` operation. It opens the selected probe, attaches to the
