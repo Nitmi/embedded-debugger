@@ -12,6 +12,13 @@ All notable changes to this project will be documented in this file.
   rejection, 4 MiB per-file limits, SHA-256 manifests, and explicit disabled
   server/Tcl/GDB-MI/target capability fields. `doctor` now uses the same bounded
   OpenOCD version probe.
+- Guarded `openocd server plan/test` with executable and top-level config
+  SHA-256 confirmation, explicit unbound Tcl/source semantics, loopback-only
+  dynamic GDB/Tcl endpoints, disabled telnet, framed Tcl version readiness and
+  shutdown, bounded concurrent logs, and Windows Job Object / Unix process-group
+  cleanup. ESP32-S3 native USB-JTAG passed the Windows lifecycle, probe-release,
+  and UART-recovery checks; CPU1 examination remains unqualified and GDB/MI,
+  target operations, and OpenOCD flash remain disabled.
 - Versioned success and error envelopes for Agent-safe CLI automation.
 - Stable error codes and exit codes.
 - Backend capability model and deterministic Replay backend.

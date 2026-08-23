@@ -475,3 +475,51 @@ cleanup, private MCP handshake restoration, stale-session rejection, and a new
 lease on one outer stdio connection. It deliberately does not claim hard-kill
 cleanup, in-flight operation recovery, request replay, CPU1 control, or durable
 target-state recovery.
+
+## Guarded OpenOCD server lifecycle acceptance (2026-08-23)
+
+- The connected fixture was the exact ESP32-S3 native USB-JTAG device
+  `303A:1001 / E0:72:A1:D4:1F:DC`, also exposed as COM3. No OpenOCD,
+  probe-rs, or embedded-debugger process was running before execution.
+- The selected official Espressif executable identified itself as
+  `Open On-Chip Debugger v0.12.0-esp32-20260703 (2026-07-03-13:40)`.
+  Its size was 5,235,200 bytes and SHA-256 was
+  `58ceca283262cd313fdb6b4ba94195b01502a15dc61b6ae0b986077449010179`.
+  The top-level `board/esp32s3-builtin.cfg` was 411 bytes with SHA-256
+  `62f5bb4f81cf28455bab48d158227c3f4f280dcaab0838e0472c4249e7696611`.
+- `openocd server plan` was recomputed immediately before execution. Its exact
+  confirmed digest was
+  `c91af0e92eff4ada06c093dc46e4e92406ebff9023455eb5e3236698b8707b30`.
+  The run retained the `R2_DEVICE_WRITE` classification because search-tree
+  contents, transitive Tcl sources, and configuration semantics are not bound
+  or statically verified.
+- The managed launcher bound only `127.0.0.1`, disabled telnet, selected Tcl
+  port 2961 and GDB port 2962 dynamically, and proved Tcl readiness with a
+  framed `version` response in 89 ms. The exact USB-JTAG serial was logged.
+- Both ESP32-S3 JTAG taps were found. OpenOCD reported CPU0 examination success,
+  but CPU1 examination failed with `Unexpected OCD_ID = 00000000`. This is
+  retained as a target limitation; the acceptance does not qualify CPU1,
+  GDB/MI, target operations, or OpenOCD flash.
+- The launcher sent framed Tcl `shutdown`. OpenOCD exited with code 0 in 10 ms;
+  `graceful=true`, `forced_process_tree_kill=false`,
+  `process_tree_cleanup_complete=true`, and both output streams drained without
+  truncation, oversized lines, dropped events, or read errors. The complete
+  stderr stream was 1,201 bytes with SHA-256
+  `f3dd032bc67ad78369d39d804c41d332089696d993b7608f80100cf62581af7f`.
+- Process and TCP checks found no remaining OpenOCD/probe/debugger process and
+  no listener on ports 2961 or 2962. A subsequent exact native probe-rs
+  attach/disconnect succeeded, proving the USB/JTAG interface was released.
+- A five-second `baud` monitor immediately after OpenOCD, at 115200 with DTR and
+  RTS held false and no transmitted bytes, received complete heartbeats
+  `18341..18343`. The sample immediately after the probe-rs release check crossed
+  a partial UART/log boundary, so a final five-second sample was taken and
+  received complete heartbeats `18381..18384`. Baud preserved log and JSONL
+  artifacts under
+  `target/hardware-acceptance/2026-08-23-openocd-managed-lifecycle`.
+
+This accepts the guarded OpenOCD server lifecycle on Windows for the exact
+ESP32-S3/native USB-JTAG fixture: confirmation, process isolation, dynamic
+endpoint discovery, Tcl readiness, graceful shutdown, descendant cleanup,
+probe release, and runtime recovery all passed. It does not accept arbitrary
+configuration as benign, claim target-state preservation, or enable GDB/MI,
+CPU1 control, target operations, or flash.

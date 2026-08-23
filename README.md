@@ -429,8 +429,11 @@ recovery, but are now native capability-gated because halted-origin teardown is
 not state preserving. OpenOCD host inspection and guarded managed-server
 planning are implemented. The server launcher fixes loopback-only dynamic
 endpoints, disables telnet, proves Tcl readiness, performs graceful shutdown,
-bounds logs, and enforces process-tree cleanup; physical ESP32-S3 acceptance is
-pending exact plan confirmation. OpenOCD GDB/MI target operations, general
+bounds logs, and enforces process-tree cleanup. Its exact-confirmation Windows
+lifecycle passed on ESP32-S3 native USB-JTAG, including dynamic endpoints, Tcl
+version/shutdown, exit and port cleanup, probe-rs reattach, and UART heartbeat
+recovery. OpenOCD reported CPU0 examination success but CPU1 examination
+failure, so GDB/MI target operations, general
 ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
 watchpoints, asynchronous request cancellation, durable crash recovery,
