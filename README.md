@@ -14,8 +14,26 @@ discover -> select exact probe/target -> flash plan -> confirm digest
 ```
 
 Replay is a product backend, not a throwaway mock: it powers CI, regression
-fixtures, issue reports, and offline Agent analysis. OpenOCD remains a future
-fallback backend.
+fixtures, issue reports, and offline Agent analysis. The OpenOCD target backend
+remains a future fallback, but its bounded host inspection layer is available:
+
+```console
+cargo run -- openocd inspect \
+  --executable openocd \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --json
+```
+
+`openocd inspect` resolves one exact executable, runs only `--version` with a
+bounded deadline and output limit, and canonicalizes and hashes the explicitly
+listed top-level configuration files. It does not execute OpenOCD configuration
+Tcl, connect to a probe, allocate ports, or touch a target. The response is
+therefore `scope="host_only"`, `risk="R0_READ_ONLY"`, and explicitly keeps
+server launch, Tcl RPC, GDB/MI, target operations, and flash disabled. Repeating
+`--config` or `--search` preserves argument order; duplicate paths and paths
+containing `#` are rejected. Use `--timeout-ms` to override the 2000 ms version
+deadline within 100..=30000 ms.
 
 Native probe discovery is available through the embedded probe-rs library:
 
@@ -354,7 +372,8 @@ See [docs/contracts.md](docs/contracts.md),
 [ADR-0001](docs/decisions/0001-cli-first-control-plane.md),
 [ADR-0002](docs/decisions/0002-core-state-follows-session-lifetime.md),
 [ADR-0003](docs/decisions/0003-persistent-session-jsonl-lease.md), and
-[ADR-0004](docs/decisions/0004-fail-closed-mcp-supervision.md).
+[ADR-0004](docs/decisions/0004-fail-closed-mcp-supervision.md), and
+[ADR-0005](docs/decisions/0005-openocd-host-inspection-boundary.md).
 
 ## Current status
 
@@ -376,7 +395,8 @@ heartbeat checks all succeeded. System-reset snapshots also passed. Live
 snapshots and bounded register and RAM/NVM reads passed running-origin ESP32-S3
 exercises, including pre-attach MMIO and size rejection plus serial heartbeat
 recovery, but are now native capability-gated because halted-origin teardown is
-not state preserving. OpenOCD, general ELF/HEX loading, RTT, memory writes,
+not state preserving. OpenOCD server/Tcl/GDB-MI target operations, general
+ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
 watchpoints, asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,

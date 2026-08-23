@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use crate::{
     backend::{
         DebugBackend,
+        openocd::{self, OpenOcdInspectOptions},
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
     },
@@ -88,6 +89,34 @@ pub enum Command {
         #[command(subcommand)]
         command: SupervisorCommand,
     },
+    Openocd {
+        #[command(subcommand)]
+        command: OpenOcdCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdCommand {
+    Inspect(OpenOcdInspectSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdInspectSelection {
+    #[arg(long, default_value = "openocd", value_name = "PATH")]
+    pub executable: PathBuf,
+
+    #[arg(long = "config", value_name = "FILE")]
+    pub config_files: Vec<PathBuf>,
+
+    #[arg(long = "search", value_name = "DIR")]
+    pub search_dirs: Vec<PathBuf>,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_VERSION_TIMEOUT_MS,
+        help = "bounded OpenOCD --version deadline in milliseconds (100..=30000)"
+    )]
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -441,6 +470,7 @@ impl Cli {
             Command::Session { .. } => "session.serve",
             Command::Mcp { .. } => "mcp.serve",
             Command::Supervisor { .. } => "supervisor.mcp",
+            Command::Openocd { .. } => "openocd.inspect",
         }
     }
 
@@ -612,9 +642,29 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                 "doctor",
                 &report,
                 format!(
-                    "Replay backend: ready\nprobe-rs guarded flash: ready (embedded library)\nprobe-rs CLI: {}\nOpenOCD: {}",
+                    "Replay backend: ready\nprobe-rs guarded flash: ready (embedded library)\nprobe-rs CLI: {}\nOpenOCD host inspection: ready\nOpenOCD executable: {}",
                     availability(&report, "probe-rs-cli"),
                     availability(&report, "openocd")
+                ),
+            ))
+        }
+        Command::Openocd {
+            command: OpenOcdCommand::Inspect(selection),
+        } => {
+            let report = openocd::inspect(&OpenOcdInspectOptions {
+                executable: selection.executable.clone(),
+                config_files: selection.config_files.clone(),
+                search_dirs: selection.search_dirs.clone(),
+                timeout_ms: selection.timeout_ms,
+            })?;
+            Ok(CommandResult::serializable(
+                "openocd.inspect",
+                &report,
+                format!(
+                    "OpenOCD host inspection complete\nExecutable: {}\nVersion: {}\nTop-level configs: {}\nTarget operations: disabled",
+                    report.executable.resolved,
+                    report.executable.version_line,
+                    report.configuration.top_level_files.len(),
                 ),
             ))
         }
@@ -1247,6 +1297,6 @@ fn availability(report: &doctor::DoctorReport, name: &str) -> &'static str {
     {
         "available"
     } else {
-        "not found (optional for Replay)"
+        "not found"
     }
 }

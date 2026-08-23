@@ -2,6 +2,8 @@ use std::process::Command;
 
 use serde::Serialize;
 
+use crate::backend::openocd;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolCheck {
     pub name: String,
@@ -19,6 +21,7 @@ pub struct DoctorReport {
     pub replay_available: bool,
     pub probe_rs_discovery_available: bool,
     pub probe_rs_guarded_flash_available: bool,
+    pub openocd_host_inspection_available: bool,
     pub tools: Vec<ToolCheck>,
 }
 
@@ -30,12 +33,7 @@ pub fn inspect() -> DoctorReport {
             false,
             "The probe-rs CLI is optional; install it for manual diagnostics and comparison.",
         ),
-        inspect_tool(
-            "openocd",
-            "openocd",
-            false,
-            "Install a suitable OpenOCD distribution for fallback targets.",
-        ),
+        inspect_openocd(),
     ];
     DoctorReport {
         status: "replay_and_probe_rs_guarded_flash_ready".to_string(),
@@ -43,7 +41,35 @@ pub fn inspect() -> DoctorReport {
         replay_available: true,
         probe_rs_discovery_available: true,
         probe_rs_guarded_flash_available: true,
+        openocd_host_inspection_available: true,
         tools,
+    }
+}
+
+fn inspect_openocd() -> ToolCheck {
+    match openocd::inspect_executable(
+        std::path::Path::new("openocd"),
+        openocd::DEFAULT_OPENOCD_VERSION_TIMEOUT_MS,
+    ) {
+        Ok(inspection) => ToolCheck {
+            name: "openocd".to_string(),
+            executable: inspection.resolved,
+            required: false,
+            available: true,
+            version: Some(inspection.version_line),
+            remediation: None,
+        },
+        Err(_) => ToolCheck {
+            name: "openocd".to_string(),
+            executable: "openocd".to_string(),
+            required: false,
+            available: false,
+            version: None,
+            remediation: Some(
+                "Install a suitable OpenOCD distribution or use openocd inspect --executable <PATH>."
+                    .to_string(),
+            ),
+        },
     }
 }
 

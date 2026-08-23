@@ -40,6 +40,47 @@ JSON stdout.
 `doctor` reports capabilities compiled into this binary separately from
 optional external executables. Native probe-rs discovery and guarded flashing
 do not require the standalone `probe-rs` CLI to be installed.
+`openocd_host_inspection_available=true` means this binary can perform the
+bounded host inspection described below; it does not mean an OpenOCD executable
+or target backend is available.
+
+## OpenOCD host inspection
+
+`openocd inspect [--executable <PATH>] [--config <FILE>...] [--search <DIR>...]
+[--timeout-ms <MS>]` is a host-only `R0_READ_ONLY` operation. The executable
+defaults to `openocd` and is resolved to one exact regular file from `PATH`, or
+from the explicit path. No alternate backend is selected when resolution or
+identity checking fails.
+
+The command validates scalar bounds before filesystem access. The version
+deadline defaults to 2000 ms and must be 100..=30000 ms. It launches only the
+resolved executable with `--version`, closes stdin, drains stdout and stderr
+independently, retains at most 64 KiB from each stream, and kills the child on
+deadline expiry. Success requires exit code zero, completely drained and
+untruncated output, and a line beginning with `Open On-Chip Debugger` or
+`OpenOCD `. Timeout is a retryable `TIMEOUT`; a missing or unsuccessful tool is
+`CAPABILITY_UNAVAILABLE`; a selected executable with the wrong identity is
+`CONFIG_INVALID`; output truncation or an incomplete stream is
+`PROTOCOL_ERROR`.
+
+At most 64 top-level configuration files and 64 search directories may be
+provided. Each is canonicalized, must have the requested filesystem type, must
+not duplicate an earlier canonical path, and must not contain `#`. Argument
+order is preserved. Every top-level file is limited to 4 MiB and returned with
+its canonical path, exact byte length, and lowercase SHA-256. These checks do
+not parse or execute the configuration because OpenOCD configuration is Tcl;
+therefore `semantic_validation=false` and `sourced_files_resolved=false` are
+mandatory. Hashes cover only the explicitly listed top-level files.
+
+A successful result has `scope="host_only"`, `complete=true`, the executable
+and configuration manifests, and the requirements for later server enablement.
+The capability fields `config_semantic_validation`, `server_launch`, `tcl_rpc`,
+`gdb_mi`, `target_operations`, and `flash` remain false. The requirements name
+loopback binding, dynamic GDB/Tcl ports, a disabled telnet server, Tcl RPC
+readiness, the Tcl `0x1a` message terminator, the `shutdown` command, and
+process-tree cleanup. However,
+`server_enablement_requirements.implemented=false` prevents them from being
+mistaken for current guarantees.
 
 `probes test --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` operation. It opens the selected probe, attaches to the

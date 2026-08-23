@@ -1,3 +1,4 @@
+pub mod openocd;
 pub mod probe_rs;
 pub mod replay;
 

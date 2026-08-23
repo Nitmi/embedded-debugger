@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
+    path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     thread,
     time::{Duration, Instant},
@@ -14,6 +15,34 @@ mod support;
 
 fn fixture() -> &'static str {
     "examples/replay/stm32g4.json"
+}
+
+fn write_fake_openocd(directory: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let executable = directory.join("fake-openocd.cmd");
+        fs::write(
+            &executable,
+            "@echo off\r\necho Open On-Chip Debugger 0.12.0-test\r\n",
+        )
+        .unwrap();
+        executable
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = directory.join("fake-openocd");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' 'Open On-Chip Debugger 0.12.0-test'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        executable
+    }
 }
 
 fn spawn_replay_supervisor(idle_timeout_ms: u64, max_restarts: u32) -> std::process::Child {
@@ -1228,9 +1257,165 @@ fn doctor_json_uses_versioned_envelope() {
     assert_eq!(result["data"]["replay_available"], true);
     assert_eq!(result["data"]["probe_rs_discovery_available"], true);
     assert_eq!(result["data"]["probe_rs_guarded_flash_available"], true);
+    assert_eq!(result["data"]["openocd_host_inspection_available"], true);
     assert_eq!(result["data"]["tools"][0]["name"], "probe-rs-cli");
     assert_eq!(result["data"]["tools"][0]["required"], false);
     assert!(result["operation_id"].as_str().unwrap().starts_with("op_"));
+}
+
+#[test]
+fn openocd_inspect_returns_a_host_only_versioned_contract() {
+    let directory = tempdir().unwrap();
+    let executable = write_fake_openocd(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("inspect")
+        .arg("--executable")
+        .arg(&executable)
+        .arg("--config")
+        .arg(&config)
+        .arg("--search")
+        .arg(directory.path())
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["schema_version"], "1.0");
+    assert_eq!(result["operation"], "openocd.inspect");
+    assert_eq!(result["data"]["backend"], "openocd");
+    assert_eq!(result["data"]["scope"], "host_only");
+    assert_eq!(result["data"]["risk"], "R0_READ_ONLY");
+    assert_eq!(result["data"]["complete"], true);
+    assert_eq!(
+        result["data"]["executable"]["version_line"],
+        "Open On-Chip Debugger 0.12.0-test"
+    );
+    assert_eq!(
+        result["data"]["configuration"]["top_level_files"][0]["bytes"],
+        19
+    );
+    assert_eq!(
+        result["data"]["configuration"]["top_level_files"][0]["sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        result["data"]["configuration"]["semantic_validation"],
+        false
+    );
+    assert_eq!(
+        result["data"]["server_enablement_requirements"]["implemented"],
+        false
+    );
+    assert_eq!(
+        result["data"]["server_enablement_requirements"]["bind_address"],
+        "127.0.0.1"
+    );
+    assert_eq!(
+        result["data"]["server_enablement_requirements"]["tcl_message_terminator"],
+        "0x1a"
+    );
+    assert_eq!(
+        result["data"]["server_enablement_requirements"]["graceful_shutdown"],
+        "shutdown"
+    );
+    assert_eq!(result["data"]["capabilities"]["server_launch"], false);
+    assert_eq!(result["data"]["capabilities"]["tcl_rpc"], false);
+    assert_eq!(result["data"]["capabilities"]["gdb_mi"], false);
+    assert_eq!(result["data"]["capabilities"]["target_operations"], false);
+    assert_eq!(result["data"]["capabilities"]["flash"], false);
+}
+
+#[test]
+fn openocd_inspect_rejects_bad_timeout_before_filesystem_or_path_lookup() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "openocd",
+            "inspect",
+            "--executable",
+            "deliberately-missing-openocd",
+            "--config",
+            "deliberately-missing.cfg",
+            "--timeout-ms",
+            "99",
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.inspect");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["timeout_ms"], 99);
+}
+
+#[test]
+fn openocd_inspect_reports_a_missing_host_tool_without_backend_fallback() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "openocd",
+            "inspect",
+            "--executable",
+            "deliberately-missing-openocd-for-contract-test",
+            "--json",
+        ])
+        .assert()
+        .code(4)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["error"]["code"], "CAPABILITY_UNAVAILABLE");
+    assert_eq!(
+        result["error"]["details"]["capability"],
+        "host_tool_discovery"
+    );
+    assert_eq!(
+        result["error"]["suggested_actions"][0]["action"],
+        "install_or_select_openocd"
+    );
+}
+
+#[test]
+fn openocd_inspect_rejects_an_executable_with_the_wrong_identity() {
+    let executable = assert_cmd::cargo::cargo_bin!("embedded-debugger");
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("inspect")
+        .arg("--executable")
+        .arg(executable)
+        .arg("--json")
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("did not identify itself")
+    );
 }
 
 #[test]

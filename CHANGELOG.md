@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Bounded `openocd inspect` host diagnostics with exact executable resolution,
+  OpenOCD identity checking, a 100..=30000 ms version deadline, 64 KiB output
+  limits, canonical top-level configuration/search paths, duplicate and `#`
+  rejection, 4 MiB per-file limits, SHA-256 manifests, and explicit disabled
+  server/Tcl/GDB-MI/target capability fields. `doctor` now uses the same bounded
+  OpenOCD version probe.
 - Versioned success and error envelopes for Agent-safe CLI automation.
 - Stable error codes and exit codes.
 - Backend capability model and deterministic Replay backend.
@@ -145,9 +151,11 @@ All notable changes to this project will be documented in this file.
 
 ### Known limitations
 
-- OpenOCD is not implemented. The MCP adapter currently exposes only the
-  persistent session contract; flash planning/execution and one-shot commands
-  remain CLI operations.
+- OpenOCD host inspection is implemented, but configuration Tcl execution,
+  server lifecycle, Tcl RPC, GDB/MI, target discovery/control, and flashing are
+  not. The MCP adapter currently exposes only the probe-rs/Replay persistent
+  session contract; flash planning/execution and one-shot commands remain CLI
+  operations.
 - Native raw BIN requires an explicit base address; Replay uses the fixture
   address unless the same address is supplied. ESP-IDF ELF requires explicit
   format and flash capacity inputs and is physically accepted only on ESP32-S3.
