@@ -100,6 +100,12 @@ All notable changes to this project will be documented in this file.
   stable embedded-debugger envelopes, and Replay subprocess coverage for the
   open/close lifecycle. Added the `embedded-debugger` Skill plus Agent Plugins
   and Codex companion manifests.
+- Native ESP32-S3 MCP stdio smoke acceptance using the exact USB-JTAG probe:
+  handshake and tool discovery, persistent `session.open`, CPU0
+  `core.status=running`, complete/disconnected `session.close`, and standard
+  `shutdown` all passed with exit code 0 and empty stderr. This is transport
+  lifecycle coverage, not a replacement for the existing operation-specific
+  hardware acceptance.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
   unwritten sector bytes, independent read-back verification, reset-and-halt,
   PC/SP/LR snapshot, resume, and disconnect.

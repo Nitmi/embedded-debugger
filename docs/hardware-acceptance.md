@@ -373,3 +373,26 @@ USB-JTAG fixture. Bounded register and RAM/NVM reads on CPU0 passed only as
 running-origin implementation exercises with pre-attach safety rejection and
 post-read heartbeat recovery. They are now capability-gated for native one-shot
 use until halted-origin teardown can be guaranteed.
+
+## MCP stdio smoke acceptance (2026-08-23)
+
+- The exact native ESP32-S3 USB-JTAG probe `303a:1001:E0:72:A1:D4:1F:DC` was
+  enumerated by the embedded probe-rs backend and selected with target
+  `esp32s3`.
+- A real `mcp serve --idle-timeout-ms 0` subprocess completed the MCP stdio
+  handshake and persistent tool lifecycle. The server advertised protocol
+  version `2025-06-18` and one `embedded_debugger_request` tool.
+- `session.open` returned `ok=true`, an opaque lease ID, the native capability
+  matrix, and two negotiated ESP32-S3 CPU0 hardware-breakpoint slots. The
+  operation remained R1 and disclosed probe-rs attach effects; no flash,
+  reset, breakpoint mutation, memory write, or serial bytes were requested by
+  this smoke test.
+- `core.status` on CPU0 returned `ok=true`, `state="running"`, and
+  `state_scope="active_session"`. `session.close` returned
+  `complete=true` and `disconnected=true`; standard MCP `shutdown` then
+  completed with process exit code 0 and empty stderr.
+
+This is a transport and lifecycle acceptance, not a full hardware debugging
+qualification. Continue, step, registers, memory, breakpoints, idle expiry,
+and flash remain covered by their existing JSONL/CLI acceptance cases and
+should be exercised through a real MCP client in a later dedicated run.

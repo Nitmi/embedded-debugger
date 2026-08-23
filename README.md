@@ -374,8 +374,10 @@ comparator slots. Native one-shot
 commands that promise a final core state remain capability-gated because
 probe-rs cannot guarantee every reported execution state across session
 teardown. The MCP stdio adapter and the `skills/embedded-debugger` Skill now
-expose the same persistent session contract to Agent clients; Replay can run
-the complete MCP handshake and open/close lifecycle without hardware.
+expose the same persistent session contract to Agent clients. Replay covers
+the complete handshake and open/close lifecycle offline, and the same
+handshake, CPU0 status, close, and shutdown path has passed a native ESP32-S3
+USB-JTAG smoke run.
 See `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 
