@@ -379,7 +379,8 @@ the complete handshake and open/close lifecycle offline, and the same
 handshake, CPU0 status, close, and shutdown path has passed a native ESP32-S3
 USB-JTAG smoke run. A second native lease also passed MCP register and mapped
 NVM reads, CPU0 halt/status/step/run, immediate hardware-breakpoint hit and
-exact PC verification, comparator clear, and complete close/disconnect.
+exact PC verification, comparator clear, complete close/disconnect, bounded
+continue-until-halt event/timeout results, and supervised idle expiry cleanup.
 See `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 

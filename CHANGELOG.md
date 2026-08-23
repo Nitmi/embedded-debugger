@@ -111,6 +111,11 @@ All notable changes to this project will be documented in this file.
   hardware-breakpoint hit with exact PC verification, explicit comparator
   clear, complete close/disconnect, and MCP shutdown all passed. The run did
   not flash, reset, write memory, or transmit serial data.
+- Native ESP32-S3 MCP bounded-wait and idle-lease acceptance: a breakpoint wait
+  returned `halted/breakpoint` with exact PC evidence, a no-event wait returned
+  successful `timed_out/running` with six polls, and a separate 1500 ms idle
+  lease automatically cleared an active comparator, restored CPU0 running,
+  disconnected, emitted `session.idle_expired`, and exited 0.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
   unwritten sector bytes, independent read-back verification, reset-and-halt,
   PC/SP/LR snapshot, resume, and disconnect.

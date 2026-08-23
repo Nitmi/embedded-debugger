@@ -422,5 +422,27 @@ the currently qualified CPU0 reads, control, breakpoint, and cleanup paths.
 This accepts the MCP mapping for the currently qualified ESP32-S3 CPU0
 session operations: bounded register/memory reads, halt/status/run/step,
 hardware breakpoints, immediate continue, and explicit cleanup. It does not
-yet qualify MCP `continue_until_halt`, idle expiry, CPU1 control, asynchronous
-cancellation, flash, or OpenOCD.
+qualify CPU1 control, asynchronous cancellation, flash, or OpenOCD.
+
+## MCP bounded wait and idle expiry acceptance (2026-08-23)
+
+- A native MCP lease on the exact ESP32-S3 probe exercised
+  `core.continue_until_halt` through both result paths. With slot 0 set at the
+  current `PC=0x420129D4`, the bounded wait returned
+  `outcome=halted`, `state=halted`, `halt_reason=breakpoint`,
+  `elapsed_ms=4`, and `poll_count=0`; a follow-up register read matched the
+  PC exactly. After clearing the comparator, a 300 ms wait with 50 ms polling
+  returned the successful `outcome=timed_out`, `state=running`,
+  `elapsed_ms=301`, and `poll_count=6`. The same lease remained usable for
+  status and explicit close, which completed and disconnected.
+- A separate native MCP subprocess used `--idle-timeout-ms 1500`, halted CPU0,
+  and left slot 0 active at `0x420129FF` without sending another request. It
+  exited after 1879 ms with `session.idle_expired` and
+  `action=close_and_exit` on stderr. The structured close evidence reported
+  `complete=true`, `disconnected=true`, slot 0 changing from
+  `0x420129FF` to empty, all comparator slots empty afterward, and CPU0
+  `running`; process exit code was 0.
+
+This accepts MCP bounded wait event/timeout semantics, lease reuse after a
+timeout, and supervised idle cleanup on ESP32-S3 CPU0. It does not qualify
+CPU1 control, asynchronous cancellation, flash, or OpenOCD.
