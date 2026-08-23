@@ -35,6 +35,8 @@ const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const CLOSE_POLICY: &str = "halt_clear_hardware_breakpoints_run_observed_cores_before_disconnect";
 const IDLE_TIMEOUT_ACTION: &str = "close_and_exit";
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MCP_TOOL_NAME: &str = "embedded_debugger_request";
 const SESSION_STATE_WARNING: &str = "Core state is guaranteed only while this debug session remains open; closing the session or terminating the process may change target state.";
 const HALT_SIDE_EFFECT_WARNING: &str = "Halting a running core may interrupt in-flight peripheral or external I/O; resuming later cannot roll back effects already emitted.";
 const STEP_SIDE_EFFECT_WARNING: &str = "Stepping executes one target instruction while halted; it may mutate registers, memory, peripherals, and external I/O.";
@@ -1178,6 +1180,25 @@ where
     serve_jsonl_events(backend, receiver, output, diagnostics, options)
 }
 
+pub fn serve_mcp_stdio<B, W, D>(
+    backend: B,
+    output: W,
+    diagnostics: D,
+    options: SessionServerOptions,
+) -> Result<()>
+where
+    B: DebugBackend,
+    W: Write,
+    D: Write,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("embedded-debugger-mcp-stdin".to_string())
+        .spawn(move || read_stdio_events(sender))
+        .map_err(|error| DebugError::io("start MCP stdin supervisor", None, &error))?;
+    serve_mcp_events(backend, receiver, output, diagnostics, options)
+}
+
 fn serve_jsonl_loop<B: DebugBackend>(
     service: &mut SessionService<B>,
     input: &mut impl BufRead,
@@ -1213,6 +1234,23 @@ where
 {
     let mut service = SessionService::with_server_options(backend, options);
     let result = serve_jsonl_event_loop(&mut service, &receiver, &mut output, options);
+    finish_session_server(result, &mut service, &mut diagnostics)
+}
+
+fn serve_mcp_events<B, W, D>(
+    backend: B,
+    receiver: Receiver<SessionInputEvent>,
+    mut output: W,
+    mut diagnostics: D,
+    options: SessionServerOptions,
+) -> Result<()>
+where
+    B: DebugBackend,
+    W: Write,
+    D: Write,
+{
+    let mut service = SessionService::with_server_options(backend, options);
+    let result = serve_mcp_event_loop(&mut service, &receiver, &mut output, options);
     finish_session_server(result, &mut service, &mut diagnostics)
 }
 
@@ -1282,6 +1320,72 @@ fn serve_jsonl_event_loop<B: DebugBackend>(
     }
 }
 
+fn serve_mcp_event_loop<B: DebugBackend>(
+    service: &mut SessionService<B>,
+    receiver: &Receiver<SessionInputEvent>,
+    output: &mut impl Write,
+    options: SessionServerOptions,
+) -> Result<SessionLoopExit> {
+    let idle_timeout = options.idle_timeout_ms().map(Duration::from_millis);
+    let mut idle_deadline = None;
+
+    loop {
+        let event = if service.has_active_session() {
+            if let Some(timeout) = idle_timeout {
+                let deadline = idle_deadline.get_or_insert_with(|| Instant::now() + timeout);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(SessionLoopExit::IdleTimeout {
+                        idle_timeout_ms: options
+                            .idle_timeout_ms()
+                            .expect("enabled timeout always has milliseconds"),
+                    });
+                }
+                match receiver.recv_timeout(remaining) {
+                    Ok(event) => event,
+                    Err(RecvTimeoutError::Timeout) => {
+                        return Ok(SessionLoopExit::IdleTimeout {
+                            idle_timeout_ms: options
+                                .idle_timeout_ms()
+                                .expect("enabled timeout always has milliseconds"),
+                        });
+                    }
+                    Err(RecvTimeoutError::Disconnected) => SessionInputEvent::End,
+                }
+            } else {
+                receiver.recv().unwrap_or(SessionInputEvent::End)
+            }
+        } else {
+            idle_deadline = None;
+            receiver.recv().unwrap_or(SessionInputEvent::End)
+        };
+
+        match event {
+            SessionInputEvent::Line(line) => {
+                let processed = process_mcp_line(service, output, &line)?;
+                if processed.shutdown {
+                    return Ok(SessionLoopExit::Shutdown);
+                }
+                if !service.has_active_session() {
+                    idle_deadline = None;
+                } else if processed.valid_request
+                    && let Some(timeout) = idle_timeout
+                {
+                    idle_deadline = Some(Instant::now() + timeout);
+                }
+            }
+            SessionInputEvent::End => return Ok(SessionLoopExit::TransportEnded),
+            SessionInputEvent::Error(error) => {
+                return Err(DebugError::io(
+                    "read supervised MCP JSON-RPC request",
+                    None,
+                    &error,
+                ));
+            }
+        }
+    }
+}
+
 fn process_jsonl_line<B: DebugBackend>(
     service: &mut SessionService<B>,
     output: &mut impl Write,
@@ -1338,6 +1442,301 @@ fn process_jsonl_line<B: DebugBackend>(
         valid_request: true,
         shutdown,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct McpJsonRpcRequest {
+    jsonrpc: String,
+    #[serde(default)]
+    id: Option<Value>,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+fn process_mcp_line<B: DebugBackend>(
+    service: &mut SessionService<B>,
+    output: &mut impl Write,
+    line: &str,
+) -> Result<ProcessedLine> {
+    if line.trim().is_empty() {
+        return Ok(ProcessedLine {
+            valid_request: false,
+            shutdown: false,
+        });
+    }
+    if line.len() > MAX_REQUEST_LINE_BYTES {
+        write_mcp_error(
+            output,
+            None,
+            -32600,
+            "MCP JSON-RPC line exceeds the request limit",
+            json!({
+                "maximum_bytes": MAX_REQUEST_LINE_BYTES,
+                "received_bytes": line.len(),
+            }),
+        )?;
+        return Ok(ProcessedLine {
+            valid_request: false,
+            shutdown: false,
+        });
+    }
+
+    let request: McpJsonRpcRequest = match serde_json::from_str(line) {
+        Ok(request) => request,
+        Err(error) => {
+            write_mcp_error(
+                output,
+                None,
+                -32600,
+                "invalid JSON-RPC request",
+                json!({
+                    "cause": error.to_string(),
+                }),
+            )?;
+            return Ok(ProcessedLine {
+                valid_request: false,
+                shutdown: false,
+            });
+        }
+    };
+    if request.jsonrpc != "2.0" || request.method.trim().is_empty() {
+        write_mcp_error(
+            output,
+            request.id.as_ref(),
+            -32600,
+            "JSON-RPC request must use jsonrpc=2.0 and a non-empty method",
+            json!({"expected_jsonrpc": "2.0"}),
+        )?;
+        return Ok(ProcessedLine {
+            valid_request: false,
+            shutdown: false,
+        });
+    }
+
+    let mut shutdown = false;
+    match request.method.as_str() {
+        "notifications/initialized" => {}
+        "initialize" => {
+            if let Some(id) = request.id.as_ref() {
+                write_mcp_result(
+                    output,
+                    id,
+                    json!({
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {"tools": {"listChanged": false}},
+                        "serverInfo": {
+                            "name": "embedded-debugger",
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                        "instructions": "Use embedded_debugger_request with exact probe and target identities. Close the debug session explicitly; R1 effects and active-session state scope are part of every response.",
+                    }),
+                )?;
+            }
+        }
+        "ping" => {
+            if let Some(id) = request.id.as_ref() {
+                write_mcp_result(output, id, json!({}))?;
+            }
+        }
+        "tools/list" => {
+            if let Some(id) = request.id.as_ref() {
+                write_mcp_result(output, id, json!({"tools": [mcp_request_tool()]}))?;
+            }
+        }
+        "tools/call" => match call_mcp_tool(service, &request.params) {
+            Ok(result) => {
+                if let Some(id) = request.id.as_ref() {
+                    let is_error = result["ok"] != true;
+                    write_mcp_result(
+                        output,
+                        id,
+                        json!({
+                            "content": [{
+                                "type": "text",
+                                "text": serde_json::to_string(&result)
+                                    .expect("MCP tool result always serializes"),
+                            }],
+                            "structuredContent": result,
+                            "isError": is_error,
+                        }),
+                    )?;
+                }
+                shutdown = result["operation"] == "server.shutdown"
+                    && result["ok"] == true
+                    && result["data"]["shutdown"] == true;
+            }
+            Err(error) => {
+                if let Some(id) = request.id.as_ref() {
+                    write_mcp_error(
+                        output,
+                        Some(id),
+                        -32602,
+                        &error.message,
+                        json!({
+                            "embedded_error": {
+                                "code": error.code,
+                                "details": error.details,
+                                "suggested_actions": error.suggested_actions,
+                            }
+                        }),
+                    )?;
+                }
+            }
+        },
+        "shutdown" => {
+            if let Some(id) = request.id.as_ref() {
+                write_mcp_result(output, id, json!({}))?;
+            }
+            shutdown = true;
+        }
+        _ => {
+            if let Some(id) = request.id.as_ref() {
+                write_mcp_error(
+                    output,
+                    Some(id),
+                    -32601,
+                    "method not found",
+                    json!({"method": request.method}),
+                )?;
+            }
+        }
+    }
+
+    Ok(ProcessedLine {
+        valid_request: true,
+        shutdown,
+    })
+}
+
+fn call_mcp_tool<B: DebugBackend>(
+    service: &mut SessionService<B>,
+    params: &Value,
+) -> Result<Value> {
+    let object = params.as_object().ok_or_else(|| {
+        protocol_error(
+            "MCP tools/call params must be an object",
+            json!({"expected": "object"}),
+        )
+    })?;
+    if object.get("name").and_then(Value::as_str) != Some(MCP_TOOL_NAME) {
+        return Err(protocol_error(
+            "unknown MCP tool",
+            json!({"tool": object.get("name")}),
+        ));
+    }
+    let arguments = object
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let mut request = arguments.as_object().cloned().ok_or_else(|| {
+        protocol_error(
+            "MCP tool arguments must be an object",
+            json!({"tool": MCP_TOOL_NAME}),
+        )
+    })?;
+    if request.get("operation").and_then(Value::as_str).is_none() {
+        return Err(protocol_error(
+            "MCP tool arguments require an operation",
+            json!({"tool": MCP_TOOL_NAME, "required": "operation"}),
+        ));
+    }
+    request.insert("schema_version".to_string(), json!(SCHEMA_VERSION));
+    request.insert(
+        "request_id".to_string(),
+        json!(format!("mcp-{}", Uuid::new_v4().simple())),
+    );
+    let line = serde_json::to_string(&Value::Object(request)).map_err(|error| {
+        DebugError::new(
+            ErrorCode::Internal,
+            "failed to serialize MCP tool request",
+            10,
+            json!({"cause": error.to_string()}),
+        )
+    })?;
+    let mut response = Vec::new();
+    process_jsonl_line(service, &mut response, &line)?;
+    serde_json::from_slice(&response).map_err(|error| {
+        DebugError::new(
+            ErrorCode::Internal,
+            "failed to decode the session response for MCP",
+            10,
+            json!({"cause": error.to_string()}),
+        )
+    })
+}
+
+fn mcp_request_tool() -> Value {
+    json!({
+        "name": MCP_TOOL_NAME,
+        "description": "Execute one validated embedded-debugger session operation. Start with session.open using exact probe and target identities, reuse the returned session_id, and finish with session.close. Flashing and one-shot commands remain CLI operations; this tool exposes the persistent active-session contract only.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["operation"],
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": [
+                        "session.open", "session.status", "core.status", "core.halt",
+                        "core.run", "core.continue", "core.continue_until_halt", "core.step",
+                        "breakpoints.list", "breakpoints.set", "breakpoints.clear",
+                        "breakpoints.clear_all", "registers.read", "memory.read",
+                        "session.close"
+                    ]
+                },
+                "probe": {"type": "string", "description": "Exact probe selector from probes.list."},
+                "target": {"type": "string", "description": "Exact target name."},
+                "session_id": {"type": "string", "description": "Opaque session ID returned by session.open."},
+                "core": {"type": "integer", "minimum": 0, "description": "Zero-based core index."},
+                "address": {"type": "string", "pattern": "^(0x)?[0-9a-fA-F]+$", "description": "Hexadecimal target address."},
+                "length": {"type": "integer", "minimum": 1, "maximum": 4096},
+                "slot": {"type": "integer", "minimum": 0},
+                "names": {"type": "array", "maxItems": 64, "items": {"type": "string"}},
+                "timeout_ms": {"type": "integer", "minimum": 10, "maximum": 60000},
+                "poll_interval_ms": {"type": "integer", "minimum": 10, "maximum": 1000}
+            }
+        }
+    })
+}
+
+fn write_mcp_result(output: &mut impl Write, id: &Value, result: Value) -> Result<()> {
+    write_mcp_value(
+        output,
+        &json!({"jsonrpc": "2.0", "id": id, "result": result}),
+    )
+}
+
+fn write_mcp_error(
+    output: &mut impl Write,
+    id: Option<&Value>,
+    code: i64,
+    message: &str,
+    data: Value,
+) -> Result<()> {
+    write_mcp_value(
+        output,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id.cloned().unwrap_or(Value::Null),
+            "error": {"code": code, "message": message, "data": data},
+        }),
+    )
+}
+
+fn write_mcp_value(output: &mut impl Write, value: &Value) -> Result<()> {
+    serde_json::to_writer(&mut *output, value).map_err(|error| {
+        DebugError::new(
+            ErrorCode::Internal,
+            "failed to serialize MCP JSON-RPC response",
+            10,
+            json!({"cause": error.to_string()}),
+        )
+    })?;
+    output
+        .write_all(b"\n")
+        .and_then(|_| output.flush())
+        .map_err(|error| DebugError::io("write MCP JSON-RPC response", None, &error))
 }
 
 fn read_stdio_events(sender: SyncSender<SessionInputEvent>) {
@@ -2426,6 +2825,195 @@ mod tests {
         assert_eq!(responses[1]["error"]["details"]["expected"], "1.0");
         assert_eq!(responses[2]["ok"], true);
         assert_eq!(responses[2]["operation"], "server.shutdown");
+    }
+
+    #[test]
+    fn mcp_protocol_lists_one_contract_tool_and_reuses_session_json() {
+        let backend = ReplayBackend::from_path(Path::new("examples/replay/stm32g4.json")).unwrap();
+        let options = SessionServerOptions::disabled();
+        let mut service = SessionService::with_server_options(backend, options);
+        let mut output = Vec::new();
+
+        let initialized = process_mcp_line(
+            &mut service,
+            &mut output,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        )
+        .unwrap();
+        assert!(initialized.valid_request);
+        let initialize: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            initialize["result"]["protocolVersion"],
+            MCP_PROTOCOL_VERSION
+        );
+        output.clear();
+
+        process_mcp_line(
+            &mut service,
+            &mut output,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        )
+        .unwrap();
+        let tools: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(tools["result"]["tools"][0]["name"], MCP_TOOL_NAME);
+        assert_eq!(
+            tools["result"]["tools"][0]["inputSchema"]["required"][0],
+            "operation"
+        );
+        output.clear();
+
+        process_mcp_line(
+            &mut service,
+            &mut output,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": MCP_TOOL_NAME,
+                    "arguments": {
+                        "operation": "session.open",
+                        "probe": "replay:stlink-v3:0039002A3432510433343034",
+                        "target": "STM32G431CBTx"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let open_response: Value = serde_json::from_slice(&output).unwrap();
+        let open_envelope = &open_response["result"]["structuredContent"];
+        assert_eq!(open_envelope["ok"], true);
+        let session_id = open_envelope["data"]["session"]["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        output.clear();
+
+        process_mcp_line(
+            &mut service,
+            &mut output,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": MCP_TOOL_NAME,
+                    "arguments": {"operation": "session.close", "session_id": session_id}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let close_response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            close_response["result"]["structuredContent"]["data"]["state"],
+            "closed"
+        );
+    }
+
+    #[test]
+    fn mcp_tool_argument_errors_are_json_rpc_errors_and_keep_serving() {
+        let backend = ReplayBackend::from_path(Path::new("examples/replay/stm32g4.json")).unwrap();
+        let mut service = SessionService::new(backend);
+        let mut output = Vec::new();
+
+        let processed = process_mcp_line(
+            &mut service,
+            &mut output,
+            r#"{"jsonrpc":"2.0","id":"bad","method":"tools/call","params":{"name":"unknown","arguments":{}}}"#,
+        )
+        .unwrap();
+        assert!(processed.valid_request);
+        let error: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(error["error"]["code"], -32602);
+        assert_eq!(error["id"], "bad");
+        output.clear();
+
+        let processed = process_mcp_line(
+            &mut service,
+            &mut output,
+            r#"{"jsonrpc":"2.0","id":"ping","method":"ping","params":{}}"#,
+        )
+        .unwrap();
+        assert!(processed.valid_request);
+        let ping: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(ping["result"], json!({}));
+    }
+
+    #[test]
+    fn mcp_oversized_lines_are_rejected_without_touching_the_session() {
+        let backend = ReplayBackend::from_path(Path::new("examples/replay/stm32g4.json")).unwrap();
+        let mut service = SessionService::new(backend);
+        let mut output = Vec::new();
+        let oversized = format!(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"x\":\"{}\"}}",
+            "x".repeat(MAX_REQUEST_LINE_BYTES)
+        );
+
+        let processed = process_mcp_line(&mut service, &mut output, &oversized).unwrap();
+        assert!(!processed.valid_request);
+        assert!(!service.has_active_session());
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(
+            response["error"]["data"]["maximum_bytes"],
+            MAX_REQUEST_LINE_BYTES
+        );
+    }
+
+    #[test]
+    fn mcp_notifications_execute_tools_without_emitting_responses() {
+        let backend = ReplayBackend::from_path(Path::new("examples/replay/stm32g4.json")).unwrap();
+        let mut service = SessionService::new(backend);
+        let mut output = Vec::new();
+
+        process_mcp_line(
+            &mut service,
+            &mut output,
+            r#"{"jsonrpc":"2.0","method":"unknown"}"#,
+        )
+        .unwrap();
+        assert!(output.is_empty());
+
+        process_mcp_line(
+            &mut service,
+            &mut output,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": MCP_TOOL_NAME,
+                    "arguments": {
+                        "operation": "session.open",
+                        "probe": "replay:stlink-v3:0039002A3432510433343034",
+                        "target": "STM32G431CBTx"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(output.is_empty());
+        assert!(service.has_active_session());
+        let session_id = service.active.as_ref().unwrap().info.session_id.clone();
+
+        process_mcp_line(
+            &mut service,
+            &mut output,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": MCP_TOOL_NAME,
+                    "arguments": {"operation": "session.close", "session_id": session_id}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(output.is_empty());
+        assert!(!service.has_active_session());
     }
 
     #[test]

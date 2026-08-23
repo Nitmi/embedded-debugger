@@ -80,11 +80,36 @@ pub enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
     Serve(SessionServeSelection),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    Serve(McpServeSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct McpServeSelection {
+    #[arg(
+        long,
+        help = "exact target used to initialize a native probe-rs backend; Replay may omit it"
+    )]
+    pub target: Option<String>,
+
+    #[arg(
+        long,
+        default_value_t = session::DEFAULT_SESSION_IDLE_TIMEOUT_MS,
+        help = "close the active lease and exit after this many idle milliseconds; 0 disables (100..=86400000)"
+    )]
+    pub idle_timeout_ms: u64,
 }
 
 #[derive(Debug, Args)]
@@ -375,11 +400,16 @@ impl Cli {
                 command: CoreCommand::Step(_),
             } => "core.step",
             Command::Session { .. } => "session.serve",
+            Command::Mcp { .. } => "mcp.serve",
         }
     }
 
     pub fn is_session_server(&self) -> bool {
         matches!(self.command, Command::Session { .. })
+    }
+
+    pub fn is_mcp_server(&self) -> bool {
+        matches!(self.command, Command::Mcp { .. })
     }
 }
 
@@ -409,6 +439,38 @@ pub fn serve_session_stdio(cli: &Cli) -> Result<()> {
     }
 }
 
+pub fn serve_mcp_stdio(cli: &Cli) -> Result<()> {
+    let Command::Mcp {
+        command: McpCommand::Serve(selection),
+    } = &cli.command
+    else {
+        return Err(DebugError::new(
+            crate::error::ErrorCode::ProtocolError,
+            "requested command is not the MCP stdio server",
+            6,
+            json!({"operation": cli.operation_name()}),
+        ));
+    };
+    let options = session::SessionServerOptions::from_idle_timeout_ms(selection.idle_timeout_ms)?;
+
+    match cli.backend {
+        BackendArg::Replay => serve_mcp_backend(
+            ReplayBackend::from_path(replay_fixture_path(cli)?)?,
+            options,
+        ),
+        BackendArg::ProbeRs => {
+            let target = selection.target.as_deref().ok_or_else(|| {
+                DebugError::config(
+                    "MCP probe-rs server requires an exact target",
+                    json!({"required_argument": "--target"}),
+                )
+            })?;
+            serve_mcp_backend(ProbeRsBackend::new(target)?, options)
+        }
+        BackendArg::Openocd => Err(unsupported_openocd("mcp_server")),
+    }
+}
+
 fn serve_session_backend<B: DebugBackend>(
     backend: B,
     options: session::SessionServerOptions,
@@ -416,6 +478,15 @@ fn serve_session_backend<B: DebugBackend>(
     let stdout = io::stdout();
     let stderr = io::stderr();
     session::serve_stdio_jsonl(backend, stdout.lock(), stderr.lock(), options)
+}
+
+fn serve_mcp_backend<B: DebugBackend>(
+    backend: B,
+    options: session::SessionServerOptions,
+) -> Result<()> {
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+    session::serve_mcp_stdio(backend, stdout.lock(), stderr.lock(), options)
 }
 
 pub fn execute(cli: &Cli) -> Result<CommandResult> {
@@ -463,6 +534,12 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
             "session serve is a streaming command and must own stdin/stdout",
             6,
             json!({"operation": "session.serve"}),
+        )),
+        Command::Mcp { .. } => Err(DebugError::new(
+            crate::error::ErrorCode::ProtocolError,
+            "MCP serve is a streaming command and must own stdin/stdout",
+            6,
+            json!({"operation": "mcp.serve"}),
         )),
         Command::Probes {
             command: ProbeCommand::List,

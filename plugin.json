@@ -1,0 +1,23 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "embedded-debugger",
+  "version": "0.1.0",
+  "description": "Agent-safe embedded flashing and debugging through structured CLI, Skill, and MCP session contracts.",
+  "author": {
+    "name": "Nitmi",
+    "url": "https://github.com/Nitmi"
+  },
+  "homepage": "https://github.com/Nitmi/embedded-debugger",
+  "repository": "https://github.com/Nitmi/embedded-debugger",
+  "license": "MIT",
+  "keywords": [
+    "embedded",
+    "debugging",
+    "probe-rs",
+    "hardware",
+    "agent",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json"
+}

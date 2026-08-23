@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "embedded-debugger": {
+      "type": "stdio",
+      "command": "embedded-debugger",
+      "args": [
+        "--backend",
+        "probe-rs",
+        "mcp",
+        "serve",
+        "--target",
+        "esp32s3"
+      ]
+    }
+  }
+}

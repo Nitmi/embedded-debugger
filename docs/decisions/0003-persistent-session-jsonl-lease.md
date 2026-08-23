@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-14
-- Last updated: 2026-08-17
+- Last updated: 2026-08-23
 
 ## Context
 
@@ -60,11 +60,16 @@ tool call recreates the teardown race and makes state continuity ambiguous.
    does not, and work already in flight is never interrupted. Expiry reuses the
    normal guarded close path, emits a versioned lifecycle event with the full
    close report on stderr, and exits.
+10. Add `mcp serve` as a thin JSON-RPC adapter over the same session owner.
+    MCP exposes one `embedded_debugger_request` tool whose arguments map to the
+    persistent JSONL contract; it does not duplicate backend semantics or
+    expose flash/one-shot operations before their lifecycle guarantees are
+    suitable for a long-lived tool call.
 
 ## Consequences
 
-- CLI, future MCP, and Skills can share a small transport-neutral session owner
-  instead of duplicating probe lifetime logic.
+- CLI, MCP, and Skills share a small transport-neutral session owner instead of
+  duplicating probe lifetime logic.
 - The service is intentionally single-client and foreground in this milestone.
   Its internal input/deadline supervisor handles graceful idle lease expiry,
   but external crash/restart supervision, asynchronous cancellation, and a
@@ -94,5 +99,6 @@ tool call recreates the teardown race and makes state continuity ambiguous.
   stronger than relying on probe-rs drop behavior and produces verifiable slot
   evidence for Agents. It cannot protect against power loss or a hard process
   kill, so backend teardown remains the last best-effort layer.
-- The JSONL transport is easy to launch from an Agent and easy to replace with
-  MCP stdio or a local authenticated socket without changing domain operations.
+- The JSONL transport remains easy to launch directly, while MCP stdio provides
+  the standard Agent-facing discovery and tool-call handshake without changing
+  domain operations.

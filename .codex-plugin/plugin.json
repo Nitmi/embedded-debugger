@@ -1,0 +1,29 @@
+{
+  "name": "embedded-debugger",
+  "version": "0.1.0",
+  "description": "Agent-safe embedded flashing and debugging through structured CLI, Skill, and MCP session contracts.",
+  "author": {
+    "name": "Nitmi",
+    "url": "https://github.com/Nitmi"
+  },
+  "homepage": "https://github.com/Nitmi/embedded-debugger",
+  "repository": "https://github.com/Nitmi/embedded-debugger",
+  "license": "MIT",
+  "keywords": ["embedded", "debugging", "probe-rs", "hardware", "agent", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Embedded Debugger",
+    "shortDescription": "Safely inspect and control embedded debug sessions",
+    "longDescription": "Use exact probe and target identities with bounded core control, register and memory reads, hardware breakpoints, structured effects, and verified session cleanup.",
+    "developerName": "Nitmi",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Hardware"],
+    "websiteURL": "https://github.com/Nitmi/embedded-debugger",
+    "defaultPrompt": [
+      "Inspect this embedded target safely and preserve structured evidence.",
+      "Open a bounded debug session and report core state and effects.",
+      "Use Replay to validate an embedded debugging workflow offline."
+    ]
+  }
+}

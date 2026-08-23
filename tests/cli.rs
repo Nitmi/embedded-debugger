@@ -457,6 +457,125 @@ fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
 }
 
 #[test]
+fn replay_mcp_server_supports_initialize_and_persistent_session_tool_calls() {
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
+        .args([
+            "--fixture",
+            fixture(),
+            "mcp",
+            "serve",
+            "--idle-timeout-ms",
+            "0",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let initialize = read_jsonl_response(&mut stdout);
+    assert_eq!(initialize["result"]["protocolVersion"], "2025-06-18");
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let tools = read_jsonl_response(&mut stdout);
+    assert_eq!(
+        tools["result"]["tools"][0]["name"],
+        "embedded_debugger_request"
+    );
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "embedded_debugger_request",
+                "arguments": {
+                    "operation": "session.open",
+                    "probe": "replay:stlink-v3:0039002A3432510433343034",
+                    "target": "STM32G431CBTx"
+                }
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let open = read_jsonl_response(&mut stdout);
+    assert_eq!(open["result"]["isError"], false);
+    let open_envelope: Value =
+        serde_json::from_str(open["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let session_id = open_envelope["data"]["session"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "embedded_debugger_request",
+                "arguments": {"operation": "session.close", "session_id": session_id}
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let close = read_jsonl_response(&mut stdout);
+    assert_eq!(
+        close["result"]["structuredContent"]["data"]["state"],
+        "closed"
+    );
+
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"jsonrpc": "2.0", "id": 5, "method": "shutdown"})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    assert_eq!(
+        read_jsonl_response(&mut stdout)["result"],
+        serde_json::json!({})
+    );
+
+    drop(stdin);
+    drop(stdout);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+}
+
+#[test]
 fn replay_session_halted_only_mutations_reject_running_core_and_keep_serving() {
     let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
         .args([

@@ -201,6 +201,26 @@ observed core and disconnect. Successful expiry emits a versioned
 stderr, then exits with code 0. See [`docs/contracts.md`](docs/contracts.md) for
 the wire contract.
 
+### MCP stdio adapter
+
+The local MCP entry point is a thin JSON-RPC adapter over the same persistent
+session owner; it does not introduce a second hardware API or cleanup policy:
+
+```console
+embedded-debugger --backend probe-rs mcp serve --target esp32s3 \
+  --idle-timeout-ms 300000
+```
+
+After `initialize`, call `tools/list` and use the single
+`embedded_debugger_request` tool. Its arguments are the persistent JSONL
+fields with a required `operation`, so `session.open` returns the opaque
+`session_id` used by later `core.*`, `breakpoints.*`, `registers.read`,
+`memory.read`, and `session.close` calls. The tool returns the normal
+versioned envelope in both `structuredContent` and text content; operation
+failures retain the same stable error codes. Flash planning/execution and
+one-shot commands remain CLI operations. Plugin manifests are provided in
+`mcp.json` (Agent Plugins) and `.mcp.json` (Codex plugin validation).
+
 Exercise the target's accepted reset policy without flashing it:
 
 ```console
@@ -353,7 +373,9 @@ hardware breakpoints are accepted on ESP32-S3 CPU0; live attach negotiates two
 comparator slots. Native one-shot
 commands that promise a final core state remain capability-gated because
 probe-rs cannot guarantee every reported execution state across session
-teardown.
+teardown. The MCP stdio adapter and the `skills/embedded-debugger` Skill now
+expose the same persistent session contract to Agent clients; Replay can run
+the complete MCP handshake and open/close lifecycle without hardware.
 See `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 

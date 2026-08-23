@@ -95,6 +95,11 @@ All notable changes to this project will be documented in this file.
   event with complete cleanup evidence, and exits successfully. ESP32-S3 CPU0
   passed physical expiry with an active comparator, running-state restoration,
   probe release, and heartbeat recovery.
+- MCP stdio JSON-RPC adapter backed by the persistent JSONL session owner,
+  including `initialize`, `tools/list`, `tools/call`, bounded argument schema,
+  stable embedded-debugger envelopes, and Replay subprocess coverage for the
+  open/close lifecycle. Added the `embedded-debugger` Skill plus Agent Plugins
+  and Codex companion manifests.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
   unwritten sector bytes, independent read-back verification, reset-and-halt,
   PC/SP/LR snapshot, resume, and disconnect.
@@ -107,7 +112,9 @@ All notable changes to this project will be documented in this file.
 
 ### Known limitations
 
-- OpenOCD and MCP adapters are not implemented.
+- OpenOCD is not implemented. The MCP adapter currently exposes only the
+  persistent session contract; flash planning/execution and one-shot commands
+  remain CLI operations.
 - Native raw BIN requires an explicit base address; Replay uses the fixture
   address unless the same address is supplied. ESP-IDF ELF requires explicit
   format and flash capacity inputs and is physically accepted only on ESP32-S3.

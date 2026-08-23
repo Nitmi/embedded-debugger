@@ -1,0 +1,4 @@
+interface:
+  display_name: "Embedded Debugger"
+  short_description: "Safely inspect and control embedded debug sessions"
+  default_prompt: "Use $embedded-debugger to inspect or control an embedded target through the validated session contract."

@@ -430,6 +430,47 @@ application ELF normalization is the only format-aware path; execution is
 available only to backends and targets whose capability matrix satisfies the
 entire guarded workflow.
 
+## MCP stdio adapter
+
+`mcp serve` is a JSON-RPC transport over the same single-owner session service.
+It does not duplicate backend behavior, relax capability gates, or create a
+second cleanup policy. The server supports MCP `initialize`, `ping`,
+`notifications/initialized`, `tools/list`, `tools/call`, and `shutdown`.
+Each input line is limited to 64 KiB; oversized or malformed lines return a
+JSON-RPC `-32600` error without renewing an active idle lease.
+
+`tools/list` returns one tool named `embedded_debugger_request`. Its required
+`operation` and optional fields map directly to the persistent JSONL request
+contract; the adapter adds `schema_version` and a generated `request_id` before
+dispatching to the existing session service:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "tools/call",
+  "params": {
+    "name": "embedded_debugger_request",
+    "arguments": {
+      "operation": "session.open",
+      "probe": "replay:stlink-v3:0039002A3432510433343034",
+      "target": "STM32G431CBTx"
+    }
+  }
+}
+```
+
+The tool result contains the normal versioned embedded-debugger envelope in
+both `structuredContent` and a text content item. An operation-level failure is
+therefore an MCP tool result with `isError=true` and the original stable error
+code. Invalid JSON-RPC method or tool argument shapes are transport errors
+(`-32600`, `-32601`, or `-32602`) and do not terminate the server. The adapter
+exposes `session.open`, `session.status`, `core.*`, `breakpoints.*`,
+`registers.read`, `memory.read`, and `session.close`; flash and one-shot
+commands remain CLI-only until their lifecycle guarantees are suitable for a
+long-lived Agent tool call. Idle lease expiry, request ordering, session IDs,
+and close evidence have exactly the JSONL semantics above.
+
 ## Compatibility
 
 Readers must reject unsupported major schema versions. New optional fields may

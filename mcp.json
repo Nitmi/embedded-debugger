@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "embedded-debugger": {
+      "type": "stdio",
+      "command": "embedded-debugger",
+      "args": [
+        "--backend",
+        "probe-rs",
+        "mcp",
+        "serve",
+        "--target",
+        "esp32s3"
+      ]
+    }
+  }
+}
