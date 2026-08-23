@@ -392,7 +392,35 @@ use until halted-origin teardown can be guaranteed.
   `complete=true` and `disconnected=true`; standard MCP `shutdown` then
   completed with process exit code 0 and empty stderr.
 
-This is a transport and lifecycle acceptance, not a full hardware debugging
-qualification. Continue, step, registers, memory, breakpoints, idle expiry,
-and flash remain covered by their existing JSONL/CLI acceptance cases and
-should be exercised through a real MCP client in a later dedicated run.
+This is a transport and lifecycle acceptance, not by itself a full hardware
+debugging qualification. The operation-level MCP acceptance below exercises
+the currently qualified CPU0 reads, control, breakpoint, and cleanup paths.
+
+## MCP operation acceptance (2026-08-23)
+
+- A second native `mcp serve --idle-timeout-ms 0` run used the same exact probe
+  and target in one lease (`ses_f23879060fe34588ab92b05c0f9ab2c5`). The open
+  capability matrix reported `register_read=true`, `memory_read=true`,
+  `step=true`, and two hardware-breakpoint slots.
+- Running-origin `registers.read` returned `pc`, `sp`, and canonical `a0` for
+  the requested `lr` alias, with `ok=true`. `memory.read` returned 32 bytes
+  from mapped NVM at `0x42000000`, with SHA-256
+  `6e5c379f5b716afd7e4915e5881f62d44034c8b6ece90d8490df9f25cc6ce5af`.
+- CPU0 `core.halt` and `core.status` both reported `halted`. `core.step`
+  completed in the same active session with `pc_before=0x420129F5`,
+  `pc_after=0x420129F7`, `halt_reason=step`, and the explicit instruction
+  effect. `core.run` and a later status restored `running`.
+- After halting again, `breakpoints.set` placed slot 0 at the current
+  `0x420129FD`; `breakpoints.list` returned both indexed slots. `core.continue`
+  immediately stopped with `halt_reason=breakpoint`, and a follow-up register
+  read matched `pc=0x420129FD` exactly. `breakpoints.clear` succeeded, followed
+  by a verified running state.
+- `session.close` returned `complete=true` and `disconnected=true`; MCP
+  `shutdown` returned `{}`, the process exited 0, and stderr was empty. The
+  run did not flash, reset, write memory, or transmit serial data.
+
+This accepts the MCP mapping for the currently qualified ESP32-S3 CPU0
+session operations: bounded register/memory reads, halt/status/run/step,
+hardware breakpoints, immediate continue, and explicit cleanup. It does not
+yet qualify MCP `continue_until_halt`, idle expiry, CPU1 control, asynchronous
+cancellation, flash, or OpenOCD.

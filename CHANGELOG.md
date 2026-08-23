@@ -106,6 +106,11 @@ All notable changes to this project will be documented in this file.
   `shutdown` all passed with exit code 0 and empty stderr. This is transport
   lifecycle coverage, not a replacement for the existing operation-specific
   hardware acceptance.
+- Native ESP32-S3 MCP operation acceptance in one persistent lease: running
+  register and mapped-NVM reads, CPU0 halt/status/step/run, an immediate
+  hardware-breakpoint hit with exact PC verification, explicit comparator
+  clear, complete close/disconnect, and MCP shutdown all passed. The run did
+  not flash, reset, write memory, or transmit serial data.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
   unwritten sector bytes, independent read-back verification, reset-and-halt,
   PC/SP/LR snapshot, resume, and disconnect.
