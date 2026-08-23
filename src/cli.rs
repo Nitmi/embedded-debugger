@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf};
+use std::{ffi::OsString, io, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -19,7 +19,7 @@ use crate::{
         FlashRange,
     },
     service::{DebugService, inspect_evidence},
-    session,
+    session, supervisor,
 };
 
 #[derive(Debug, Parser)]
@@ -84,6 +84,10 @@ pub enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+    Supervisor {
+        #[command(subcommand)]
+        command: SupervisorCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -94,6 +98,11 @@ pub enum SessionCommand {
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
     Serve(McpServeSelection),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SupervisorCommand {
+    Mcp(SupervisorMcpSelection),
 }
 
 #[derive(Debug, Args)]
@@ -110,6 +119,36 @@ pub struct McpServeSelection {
         help = "close the active lease and exit after this many idle milliseconds; 0 disables (100..=86400000)"
     )]
     pub idle_timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct SupervisorMcpSelection {
+    #[arg(
+        long,
+        help = "exact target used to initialize a native probe-rs backend; Replay may omit it"
+    )]
+    pub target: Option<String>,
+
+    #[arg(
+        long,
+        default_value_t = session::DEFAULT_SESSION_IDLE_TIMEOUT_MS,
+        help = "child MCP lease idle timeout in milliseconds; 0 disables (100..=86400000)"
+    )]
+    pub idle_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = supervisor::default_max_restarts(),
+        help = "maximum child restarts after an unexpected exit (0..=32)"
+    )]
+    pub max_restarts: u32,
+
+    #[arg(
+        long,
+        default_value_t = supervisor::default_restart_delay_ms(),
+        help = "delay between child restarts in milliseconds (0..=60000)"
+    )]
+    pub restart_delay_ms: u64,
 }
 
 #[derive(Debug, Args)]
@@ -401,6 +440,7 @@ impl Cli {
             } => "core.step",
             Command::Session { .. } => "session.serve",
             Command::Mcp { .. } => "mcp.serve",
+            Command::Supervisor { .. } => "supervisor.mcp",
         }
     }
 
@@ -410,6 +450,10 @@ impl Cli {
 
     pub fn is_mcp_server(&self) -> bool {
         matches!(self.command, Command::Mcp { .. })
+    }
+
+    pub fn is_supervisor_server(&self) -> bool {
+        matches!(self.command, Command::Supervisor { .. })
     }
 }
 
@@ -489,6 +533,77 @@ fn serve_mcp_backend<B: DebugBackend>(
     session::serve_mcp_stdio(backend, stdout.lock(), stderr.lock(), options)
 }
 
+pub fn serve_supervisor_mcp(cli: &Cli) -> Result<()> {
+    let Command::Supervisor {
+        command: SupervisorCommand::Mcp(selection),
+    } = &cli.command
+    else {
+        return Err(DebugError::new(
+            crate::error::ErrorCode::ProtocolError,
+            "requested command is not the MCP supervisor",
+            6,
+            json!({"operation": cli.operation_name()}),
+        ));
+    };
+    session::SessionServerOptions::from_idle_timeout_ms(selection.idle_timeout_ms)?;
+    let supervisor_options = supervisor::SupervisorOptions::from_values(
+        selection.max_restarts,
+        selection.restart_delay_ms,
+    )?;
+    if cli.backend == BackendArg::Openocd {
+        return Err(unsupported_openocd("mcp_supervisor"));
+    }
+    if cli.backend == BackendArg::ProbeRs && selection.target.is_none() {
+        return Err(DebugError::config(
+            "MCP supervisor with probe-rs requires an exact target",
+            json!({"required_argument": "--target"}),
+        ));
+    }
+    match cli.backend {
+        BackendArg::Replay => {
+            ReplayBackend::from_path(replay_fixture_path(cli)?)?;
+        }
+        BackendArg::ProbeRs => {
+            ProbeRsBackend::new(
+                selection
+                    .target
+                    .as_deref()
+                    .expect("probe-rs supervisor target was validated"),
+            )?;
+        }
+        BackendArg::Openocd => unreachable!("OpenOCD supervisor was rejected above"),
+    }
+
+    let executable = std::env::current_exe().map_err(|error| {
+        DebugError::io(
+            "locate embedded-debugger executable for supervisor",
+            None,
+            &error,
+        )
+    })?;
+    let mut child_args = vec![
+        OsString::from("--backend"),
+        OsString::from(match cli.backend {
+            BackendArg::Replay => "replay",
+            BackendArg::ProbeRs => "probe-rs",
+            BackendArg::Openocd => "openocd",
+        }),
+    ];
+    if let Some(fixture) = &cli.fixture {
+        child_args.push(OsString::from("--fixture"));
+        child_args.push(fixture.as_os_str().to_os_string());
+    }
+    child_args.extend([OsString::from("mcp"), OsString::from("serve")]);
+    if let Some(target) = &selection.target {
+        child_args.push(OsString::from("--target"));
+        child_args.push(OsString::from(target));
+    }
+    child_args.push(OsString::from("--idle-timeout-ms"));
+    child_args.push(OsString::from(selection.idle_timeout_ms.to_string()));
+
+    supervisor::serve_mcp(&executable, &child_args, supervisor_options)
+}
+
 pub fn execute(cli: &Cli) -> Result<CommandResult> {
     match &cli.command {
         Command::Doctor => {
@@ -540,6 +655,12 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
             "MCP serve is a streaming command and must own stdin/stdout",
             6,
             json!({"operation": "mcp.serve"}),
+        )),
+        Command::Supervisor { .. } => Err(DebugError::new(
+            crate::error::ErrorCode::ProtocolError,
+            "MCP supervisor is a streaming command and must own stdin/stdout",
+            6,
+            json!({"operation": "supervisor.mcp"}),
         )),
         Command::Probes {
             command: ProbeCommand::List,

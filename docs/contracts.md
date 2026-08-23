@@ -422,8 +422,9 @@ to stderr, and exits with code 0. The event contains `idle_timeout_ms`,
 cleanup fails, stderr instead receives
 `session.idle_expiry_cleanup_failed` with the structured error and the process
 returns the mapped failure code. An OS-level hard kill or power loss cannot run
-this path and still relies on backend teardown behavior; automatic external
-restart is outside this service contract.
+this path and still relies on backend teardown behavior. The separate MCP
+supervisor below can replace a failed process, but it cannot retroactively prove
+that target cleanup completed.
 
 General ELF and Intel HEX loading are not yet part of this contract. ESP-IDF
 application ELF normalization is the only format-aware path; execution is
@@ -470,6 +471,46 @@ exposes `session.open`, `session.status`, `core.*`, `breakpoints.*`,
 commands remain CLI-only until their lifecycle guarantees are suitable for a
 long-lived Agent tool call. Idle lease expiry, request ordering, session IDs,
 and close evidence have exactly the JSONL semantics above.
+
+## MCP subprocess supervisor
+
+`supervisor mcp` is the preferred Agent/plugin entry point. It validates the
+selected backend, fixture or target, child idle timeout, and bounded restart
+policy before spawning the existing `mcp serve` command. Defaults are three
+restarts and a 250 ms delay; `max_restarts` must be 0..=32 and
+`restart_delay_ms` 0..=60000. A value of zero disables the corresponding
+restart count or delay. OpenOCD remains an explicit unsupported backend.
+
+The supervisor is a transparent JSONL stdio proxy during normal operation.
+Client request IDs remain in flight until a matching child response is drained.
+A duplicate in-flight ID is rejected as `-32003`. Expected MCP shutdown and
+parent stdin EOF close the child transport and never trigger a restart.
+
+If the child exits unexpectedly, every request that still lacks a response is
+completed exactly once with JSON-RPC `-32001`. Its data contains the child
+generation, exit details, and `restart_required=true`; its message states that
+target state is indeterminate. The supervisor never replays those requests,
+including reads, because an R1 target operation may already have executed even
+when its response was lost.
+
+After the first successful connection initialization, the supervisor caches
+only the original MCP `initialize` request and an observed
+`notifications/initialized` notification. Each replacement child is a new
+private MCP connection, so that side-effect-free handshake is its first
+interaction and uses a supervisor-private request ID. The internal response is
+not forwarded to the external client. This preserves the standard external MCP
+lifecycle: the client does not send a second `initialize` on its existing
+connection. An external request that arrives during the private handshake is
+rejected without forwarding as retryable `-32002`.
+
+The replacement child starts without a debug lease. An old `session_id`
+therefore receives the ordinary session `PROTOCOL_ERROR`; the caller must open
+a new exact probe/target lease and explicitly inspect or recover the target.
+Structured `supervisor.child_exited`, `supervisor.child_restarted`, and
+`supervisor.child_ready` events are written to stderr. Reaching the restart
+limit terminates the supervisor with an `INTERNAL` error and exit code 10.
+None of these process guarantees claim that a hard-killed child cleared
+breakpoints, restored core state, completed a write, or disconnected cleanly.
 
 ## Compatibility
 

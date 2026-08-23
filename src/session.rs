@@ -31,7 +31,7 @@ use crate::{
     },
 };
 
-const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
+pub const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const CLOSE_POLICY: &str = "halt_clear_hardware_breakpoints_run_observed_cores_before_disconnect";
 const IDLE_TIMEOUT_ACTION: &str = "close_and_exit";

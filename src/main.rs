@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use embedded_debugger::{
-    cli::{Cli, execute, serve_mcp_stdio, serve_session_stdio},
+    cli::{Cli, execute, serve_mcp_stdio, serve_session_stdio, serve_supervisor_mcp},
     envelope::{ErrorEnvelope, SuccessEnvelope},
 };
 
@@ -32,6 +32,20 @@ fn main() -> ExitCode {
                     "{}",
                     serde_json::to_string(&envelope)
                         .expect("MCP startup error envelope always serializes")
+                );
+                ExitCode::from(u8::try_from(error.exit_code).unwrap_or(10))
+            }
+        };
+    }
+    if cli.is_supervisor_server() {
+        return match serve_supervisor_mcp(&cli) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let envelope = ErrorEnvelope::new(operation, &error);
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&envelope)
+                        .expect("supervisor startup error envelope always serializes")
                 );
                 ExitCode::from(u8::try_from(error.exit_code).unwrap_or(10))
             }

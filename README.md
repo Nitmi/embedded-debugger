@@ -201,14 +201,15 @@ observed core and disconnect. Successful expiry emits a versioned
 stderr, then exits with code 0. See [`docs/contracts.md`](docs/contracts.md) for
 the wire contract.
 
-### MCP stdio adapter
+### MCP stdio adapter and supervisor
 
-The local MCP entry point is a thin JSON-RPC adapter over the same persistent
-session owner; it does not introduce a second hardware API or cleanup policy:
+The preferred Agent entry point is a bounded supervisor around the thin MCP
+adapter. The child still uses the same persistent session owner; neither layer
+introduces a second hardware API or cleanup policy:
 
 ```console
-embedded-debugger --backend probe-rs mcp serve --target esp32s3 \
-  --idle-timeout-ms 300000
+embedded-debugger --backend probe-rs supervisor mcp --target esp32s3 \
+  --idle-timeout-ms 300000 --max-restarts 3 --restart-delay-ms 250
 ```
 
 After `initialize`, call `tools/list` and use the single
@@ -220,6 +221,18 @@ versioned envelope in both `structuredContent` and text content; operation
 failures retain the same stable error codes. Flash planning/execution and
 one-shot commands remain CLI operations. Plugin manifests are provided in
 `mcp.json` (Agent Plugins) and `.mcp.json` (Codex plugin validation).
+
+On an unexpected child exit, every unanswered request receives JSON-RPC
+`-32001` with an explicit indeterminate-target warning and is never replayed.
+The supervisor starts a fresh child within its bounded restart budget and
+privately restores only the side-effect-free MCP initialize handshake. The
+external client remains on one standards-compliant lifecycle; an old
+`session_id` is rejected by the fresh owner and must be replaced through a new
+exact `session.open`. Requests arriving during the short private handshake get
+retryable `-32002` without being forwarded. Structured restart events stay on
+stderr. A hard child kill can still leave target state unknown, so restart is
+availability recovery, not proof of core or breakpoint cleanup. Run `mcp serve`
+directly only when a process manager already owns this lifecycle.
 
 Exercise the target's accepted reset policy without flashing it:
 
@@ -339,8 +352,9 @@ explicit blockers until their own physical acceptance is complete.
 
 See [docs/contracts.md](docs/contracts.md),
 [ADR-0001](docs/decisions/0001-cli-first-control-plane.md),
-[ADR-0002](docs/decisions/0002-core-state-follows-session-lifetime.md), and
-[ADR-0003](docs/decisions/0003-persistent-session-jsonl-lease.md).
+[ADR-0002](docs/decisions/0002-core-state-follows-session-lifetime.md),
+[ADR-0003](docs/decisions/0003-persistent-session-jsonl-lease.md), and
+[ADR-0004](docs/decisions/0004-fail-closed-mcp-supervision.md).
 
 ## Current status
 
@@ -364,9 +378,9 @@ exercises, including pre-attach MMIO and size rejection plus serial heartbeat
 recovery, but are now native capability-gated because halted-origin teardown is
 not state preserving. OpenOCD, general ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
-watchpoints, asynchronous request cancellation, external crash/restart
-supervision, other physically accepted native segmented targets, and non-boot
-NVM writes are not yet exposed. The core
+watchpoints, asynchronous request cancellation, durable crash recovery,
+multi-client arbitration, other physically accepted native segmented targets,
+and non-boot NVM writes are not yet exposed. The core
 status/halt/run/continue/continue-until-halt/step contract is complete in
 Replay. Its session-scoped native path, idle lease expiry, and slot-addressable
 hardware breakpoints are accepted on ESP32-S3 CPU0; live attach negotiates two
@@ -381,6 +395,11 @@ USB-JTAG smoke run. A second native lease also passed MCP register and mapped
 NVM reads, CPU0 halt/status/step/run, immediate hardware-breakpoint hit and
 exact PC verification, comparator clear, complete close/disconnect, bounded
 continue-until-halt event/timeout results, and supervised idle expiry cleanup.
+The bounded MCP subprocess supervisor now passes Replay coverage for transparent
+proxying, standards-compatible private handshake restoration, stale-session
+rejection, startup validation, and restart exhaustion. The same outer-connection
+recovery, stale-session rejection, new lease, complete close/disconnect, and
+probe release path passed native ESP32-S3 idle-child replacement acceptance.
 See `CHANGELOG.md` and
 [docs/hardware-acceptance.md](docs/hardware-acceptance.md).
 

@@ -100,6 +100,16 @@ All notable changes to this project will be documented in this file.
   stable embedded-debugger envelopes, and Replay subprocess coverage for the
   open/close lifecycle. Added the `embedded-debugger` Skill plus Agent Plugins
   and Codex companion manifests.
+- Bounded `supervisor mcp` process recovery with startup prevalidation, a
+  configurable 0..=32 restart budget and 0..=60000 ms delay, transparent MCP
+  proxying, duplicate in-flight ID rejection, and structured lifecycle events.
+  Unanswered requests fail once as target-state-indeterminate and are never
+  replayed. A replacement child privately restores only the successful MCP
+  initialize handshake, preserving the external client's single standard
+  lifecycle; stale debug session IDs remain explicitly invalid. Replay covers
+  normal shutdown, idle-child recovery, stale-session rejection, restart
+  exhaustion, and bad-configuration fail-fast behavior. Plugin manifests now
+  launch this supervisor by default.
 - Native ESP32-S3 MCP stdio smoke acceptance using the exact USB-JTAG probe:
   handshake and tool discovery, persistent `session.open`, CPU0
   `core.status=running`, complete/disconnected `session.close`, and standard
@@ -116,6 +126,13 @@ All notable changes to this project will be documented in this file.
   successful `timed_out/running` with six polls, and a separate 1500 ms idle
   lease automatically cleared an active comparator, restored CPU0 running,
   disconnected, emitted `session.idle_expired`, and exited 0.
+- Native ESP32-S3 MCP supervisor acceptance on the exact USB-JTAG probe: after
+  a 1500 ms active-lease idle cleanup, the child was replaced and privately
+  reinitialized while the outer connection stayed open. Ping succeeded without
+  a second client initialize, the old lease returned `PROTOCOL_ERROR`, a new
+  lease opened with CPU0 running, close/disconnect and shutdown completed, the
+  supervisor exited 0, and a subsequent exact attach/disconnect succeeded. No
+  flash, reset, memory write, or breakpoint mutation was requested.
 - Native single-core probe-rs attach, affected-sector flash, preservation of
   unwritten sector bytes, independent read-back verification, reset-and-halt,
   PC/SP/LR snapshot, resume, and disconnect.
@@ -139,7 +156,9 @@ All notable changes to this project will be documented in this file.
   execution is physically accepted only on ESP32-S3. RTT, arbitrary
   memory writes, Generic/MMIO reads, register writes, software/symbolic/
   conditional breakpoints, watchpoints, asynchronous request cancellation, and
-  external crash/restart supervision are not implemented. Persistent hardware
+  durable crash recovery or multi-client arbitration are not implemented. The
+  supervisor can replace an MCP child but cannot prove target cleanup after a
+  hard kill. Persistent hardware
   breakpoints and idle lease expiry are physically accepted only on ESP32-S3
   CPU0; native one-shot breakpoint commands and CPU1 breakpoint control are not
   exposed. Memory reads are limited to 4096 bytes and do not freeze other cores

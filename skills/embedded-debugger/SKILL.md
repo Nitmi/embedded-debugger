@@ -33,6 +33,14 @@ stderr. A session response is scoped to the active lease; do not claim that a
 halt or breakpoint survives process teardown unless a separate acceptance
 result proves it.
 
+The plugin launches the bounded MCP supervisor. If its child exits before a
+tool response, treat JSON-RPC `-32001` as an indeterminate target outcome and
+never repeat the operation automatically. The supervisor restores only the MCP
+handshake. Any old `session_id` is stale after a restart, so inspect the error,
+open a new exact probe/target lease, and recover explicitly. A retryable
+`-32002` means the replacement child is still completing that private
+handshake; the rejected request was not forwarded.
+
 ## Safety boundaries
 
 - Treat halt, run, step, continue, register reads, memory reads, and breakpoint changes as R1 reversible control, not side-effect-free inspection. Report the response `effects` and warnings.

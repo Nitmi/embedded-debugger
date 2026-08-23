@@ -72,7 +72,8 @@ tool call recreates the teardown race and makes state continuity ambiguous.
   duplicating probe lifetime logic.
 - The service is intentionally single-client and foreground in this milestone.
   Its internal input/deadline supervisor handles graceful idle lease expiry,
-  but external crash/restart supervision, asynchronous cancellation, and a
+  while ADR-0004 adds bounded MCP child restart without replaying target
+  requests. Durable crash recovery, asynchronous cancellation, and a
   multi-client broker remain follow-up work. A bounded wait occupies the JSONL
   server until it observes a halt or reaches its timeout, so another request
   cannot cancel it in the current synchronous transport and the idle timer does

@@ -2,16 +2,19 @@
 
 ## Launch
 
-The local stdio server owns one backend instance and one debug lease:
+The plugin entry point is the bounded stdio supervisor. Its child owns one
+backend instance and one debug lease:
 
 ```console
-embedded-debugger --backend probe-rs mcp serve --target esp32s3 --idle-timeout-ms 300000
+embedded-debugger --backend probe-rs supervisor mcp --target esp32s3 \
+  --idle-timeout-ms 300000 --max-restarts 3 --restart-delay-ms 250
 ```
 
 For contract tests, use Replay and its fixture:
 
 ```console
-embedded-debugger --fixture examples/replay/stm32g4.json mcp serve --idle-timeout-ms 0
+embedded-debugger --fixture examples/replay/stm32g4.json supervisor mcp \
+  --idle-timeout-ms 0 --max-restarts 1 --restart-delay-ms 0
 ```
 
 The plugin manifest is [`mcp.json`](../../mcp.json). Native users should edit
@@ -40,6 +43,16 @@ The tool result contains the normal versioned session envelope in both
 tool results with `isError=true` and retain the stable embedded-debugger error
 code. Invalid MCP method or argument shapes use JSON-RPC errors and do not
 terminate the server.
+
+The supervisor validates configuration before launch and never replays a tool
+request. If the child exits before responding, JSON-RPC `-32001` marks the
+target state indeterminate. The replacement child receives only the cached MCP
+initialize handshake; this stays private and the external client does not
+initialize twice. Calls arriving while that handshake is in progress receive
+retryable `-32002` without being forwarded. A replacement child owns no lease,
+so an old `session_id` returns the normal `PROTOCOL_ERROR`; open a new lease and
+recover the target deliberately. Expected shutdown and stdin EOF are not
+restarted.
 
 ## Session order
 

@@ -446,3 +446,32 @@ qualify CPU1 control, asynchronous cancellation, flash, or OpenOCD.
 This accepts MCP bounded wait event/timeout semantics, lease reuse after a
 timeout, and supervised idle cleanup on ESP32-S3 CPU0. It does not qualify
 CPU1 control, asynchronous cancellation, flash, or OpenOCD.
+
+## MCP supervisor recovery acceptance (2026-08-23)
+
+- The exact native ESP32-S3 USB-JTAG probe
+  `303a:1001:E0:72:A1:D4:1F:DC` was selected with target `esp32s3` through
+  `supervisor mcp --idle-timeout-ms 1500 --max-restarts 2
+  --restart-delay-ms 100`.
+- The external client completed one MCP `2025-06-18` initialize lifecycle and
+  opened lease `ses_cf06ee5581014b8db9519e530b6fe971`. It then sent no
+  requests for 2506 ms. The child closed the active lease on idle expiry, and
+  stderr recorded `session.idle_expired`, `supervisor.child_exited`,
+  `supervisor.child_restarted`, and `supervisor.child_ready` in order.
+- Without a second external initialize, JSON-RPC ping request 3 succeeded. A
+  status request carrying the old lease ID reached the fresh owner and returned
+  the expected stable `PROTOCOL_ERROR`, proving that the supervisor did not
+  fabricate lease continuity.
+- A new exact lease `ses_31d13f600f2648799843651b1a520a20` then opened through
+  the same external MCP connection. CPU0 status was `running`; explicit close
+  returned `complete=true` and `disconnected=true`. Standard shutdown request
+  8 completed and the supervisor exited with code 0.
+- A subsequent exact `probes test` attach/disconnect completed successfully,
+  confirming that the replacement lifecycle released the probe. The exercise
+  did not flash, reset, write memory, set breakpoints, or transmit serial data.
+
+This accepts native process replacement after a child performs its guarded idle
+cleanup, private MCP handshake restoration, stale-session rejection, and a new
+lease on one outer stdio connection. It deliberately does not claim hard-kill
+cleanup, in-flight operation recovery, request replay, CPU1 control, or durable
+target-state recovery.

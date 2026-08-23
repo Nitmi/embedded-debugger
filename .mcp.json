@@ -6,8 +6,8 @@
       "args": [
         "--backend",
         "probe-rs",
+        "supervisor",
         "mcp",
-        "serve",
         "--target",
         "esp32s3"
       ]

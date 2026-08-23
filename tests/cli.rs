@@ -16,6 +16,33 @@ fn fixture() -> &'static str {
     "examples/replay/stm32g4.json"
 }
 
+fn spawn_replay_supervisor(idle_timeout_ms: u64, max_restarts: u32) -> std::process::Child {
+    ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
+        .args([
+            "--fixture",
+            fixture(),
+            "supervisor",
+            "mcp",
+            "--idle-timeout-ms",
+            &idle_timeout_ms.to_string(),
+            "--max-restarts",
+            &max_restarts.to_string(),
+            "--restart-delay-ms",
+            "0",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn send_mcp_request(stdin: &mut impl Write, stdout: &mut impl BufRead, request: Value) -> Value {
+    writeln!(stdin, "{request}").unwrap();
+    stdin.flush().unwrap();
+    read_jsonl_response(stdout)
+}
+
 #[test]
 fn replay_session_server_supports_an_interactive_jsonl_lifecycle() {
     let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
@@ -573,6 +600,239 @@ fn replay_mcp_server_supports_initialize_and_persistent_session_tool_calls() {
     drop(stdout);
     let status = child.wait().unwrap();
     assert!(status.success());
+}
+
+#[test]
+fn replay_supervisor_transparently_proxies_mcp_and_exits_after_shutdown() {
+    let mut child = spawn_replay_supervisor(0, 1);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let initialize = send_mcp_request(
+        &mut stdin,
+        &mut stdout,
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+    );
+    assert_eq!(initialize["result"]["protocolVersion"], "2025-06-18");
+    let tools = send_mcp_request(
+        &mut stdin,
+        &mut stdout,
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    );
+    assert_eq!(
+        tools["result"]["tools"][0]["name"],
+        "embedded_debugger_request"
+    );
+    let shutdown = send_mcp_request(
+        &mut stdin,
+        &mut stdout,
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown"}),
+    );
+    assert_eq!(shutdown["result"], serde_json::json!({}));
+
+    drop(stdin);
+    drop(stdout);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn replay_supervisor_restores_the_mcp_handshake_after_an_idle_child_restart() {
+    let mut child = spawn_replay_supervisor(200, 1);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    assert_eq!(
+        send_mcp_request(
+            &mut stdin,
+            &mut stdout,
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+        )["result"]["protocolVersion"],
+        "2025-06-18"
+    );
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let open = send_mcp_request(
+        &mut stdin,
+        &mut stdout,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "embedded_debugger_request",
+                "arguments": {
+                    "operation": "session.open",
+                    "probe": "replay:stlink-v3:0039002A3432510433343034",
+                    "target": "STM32G431CBTx"
+                }
+            }
+        }),
+    );
+    let old_session_id = open["result"]["structuredContent"]["data"]["session"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    thread::sleep(Duration::from_millis(800));
+    let ping = send_mcp_request(
+        &mut stdin,
+        &mut stdout,
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
+    );
+    assert_eq!(ping["result"], serde_json::json!({}));
+    let stale = send_mcp_request(
+        &mut stdin,
+        &mut stdout,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "embedded_debugger_request",
+                "arguments": {"operation": "session.status", "session_id": old_session_id}
+            }
+        }),
+    );
+    assert_eq!(stale["result"]["isError"], true);
+    assert_eq!(
+        stale["result"]["structuredContent"]["error"]["code"],
+        "PROTOCOL_ERROR"
+    );
+    assert_eq!(
+        send_mcp_request(
+            &mut stdin,
+            &mut stdout,
+            serde_json::json!({"jsonrpc": "2.0", "id": 5, "method": "shutdown"}),
+        )["result"],
+        serde_json::json!({})
+    );
+
+    drop(stdin);
+    drop(stdout);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("session.idle_expired"));
+    assert!(stderr.contains("supervisor.child_exited"));
+    assert!(stderr.contains("supervisor.child_restarted"));
+    assert!(stderr.contains("supervisor.child_ready"));
+    assert!(stderr.contains("\"initialized_notification_replayed\":true"));
+}
+
+#[test]
+fn replay_supervisor_stops_when_the_restart_budget_is_exhausted() {
+    let mut child = spawn_replay_supervisor(200, 0);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    send_mcp_request(
+        &mut stdin,
+        &mut stdout,
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+    );
+    let open = send_mcp_request(
+        &mut stdin,
+        &mut stdout,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "embedded_debugger_request",
+                "arguments": {
+                    "operation": "session.open",
+                    "probe": "replay:stlink-v3:0039002A3432510433343034",
+                    "target": "STM32G431CBTx"
+                }
+            }
+        }),
+    );
+    assert_eq!(open["result"]["isError"], false);
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(5) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("supervisor did not stop after exhausting its restart budget");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(10));
+    drop(stdin);
+    drop(stdout);
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.contains("\"restart\":false"));
+    assert!(stderr.contains("supervisor restart limit was reached"));
+}
+
+#[test]
+fn supervisor_options_are_validated_before_fixture_loading() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            "missing-supervisor-fixture.json",
+            "supervisor",
+            "mcp",
+            "--max-restarts",
+            "33",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let result: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+    assert_eq!(result["operation"], "supervisor.mcp");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["max_restarts"], 33);
+}
+
+#[test]
+fn supervisor_validates_the_replay_fixture_before_spawning_a_child() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            "missing-supervisor-fixture.json",
+            "supervisor",
+            "mcp",
+            "--max-restarts",
+            "2",
+            "--restart-delay-ms",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(10));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("supervisor.child_exited"));
+    assert!(!stderr.contains("supervisor.child_restarted"));
+    let result: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+    assert_eq!(result["operation"], "supervisor.mcp");
+    assert_eq!(
+        result["error"]["details"]["operation"],
+        "read replay fixture"
+    );
 }
 
 #[test]

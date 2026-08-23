@@ -7,5 +7,6 @@ pub mod firmware;
 pub mod model;
 pub mod service;
 pub mod session;
+pub mod supervisor;
 
 pub const SCHEMA_VERSION: &str = "1.0";
