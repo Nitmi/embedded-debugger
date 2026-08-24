@@ -49,6 +49,19 @@ All notable changes to this project will be documented in this file.
   UART heartbeats. The accepted scope remains the bounded attach/detach
   lifecycle; symbols, target-data commands, breakpoints, flash, and arbitrary
   commands remain disabled.
+- Confirmed `openocd registers plan/test` for one ordered selection of 1..=64
+  target register names. A separate digest binds the exact OpenOCD/GDB/profile
+  and configuration identities, fixed six-command MI2 exchange, normalized
+  register names and order, deadlines, expected current target, and running
+  restoration policy. Structured MI parsing resolves names through the complete
+  runtime inventory and requires one unique hexadecimal result for every
+  selection. Unknown, ambiguous, unavailable, missing, duplicate, extra, or
+  malformed results fail closed. Connected failure paths still attempt fixed
+  detach, bounded GDB exit, selected-target running restoration, and OpenOCD
+  cleanup. Controlled parser, process, restoration, digest, and CLI regressions
+  pass. ELF/symbol loading, memory/stack reads, breakpoints/watchpoints, general
+  execution control, flash, monitor input, and arbitrary MI/Tcl remain disabled;
+  physical target acceptance still requires a separate confirmed plan.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current

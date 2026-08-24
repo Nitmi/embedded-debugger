@@ -65,7 +65,7 @@ pub struct OpenOcdGdbSessionPlan {
     pub confirmation_boundary: OpenOcdGdbSessionConfirmationBoundary,
     pub confirm_digest: String,
     #[serde(skip)]
-    openocd_execution_plan: OpenOcdServerPlan,
+    pub(super) openocd_execution_plan: OpenOcdServerPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -523,7 +523,7 @@ pub(super) fn observe_initial_target(
     })
 }
 
-fn restore_running_target(
+pub(super) fn restore_running_target(
     server: &ManagedServerSession,
     initial: OpenOcdTargetStateObservation,
     timeout_ms: u64,
@@ -698,7 +698,7 @@ fn restoration_error(
     )
 }
 
-fn with_server_context(
+pub(super) fn with_server_context(
     mut error: DebugError,
     completion: ManagedServerCompletion,
     restoration: Option<&OpenOcdTargetRestoration>,

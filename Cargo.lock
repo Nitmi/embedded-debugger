@@ -633,6 +633,7 @@ dependencies = [
  "probe-rs-espressif",
  "process-wrap",
  "serde",
+ "serde_gdbmi",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -1600,6 +1601,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_gdbmi"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c8593be2499309c3dcab296bfd3f7caee78ce58ab9d098576b3cc6c42a74be9"
+dependencies = [
+ "serde",
+ "thiserror",
+ "unescape_zero_copy",
+]
+
+[[package]]
 name = "serde_json"
 version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1935,6 +1947,12 @@ name = "uf2-decode"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca77d41ab27e3fa45df42043f96c79b80c6d8632eed906b54681d8d47ab00623"
+
+[[package]]
+name = "unescape_zero_copy"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "745c468d775f409baa7ccf0997f0b00672da36145565366ad4a20163b71ad56c"
 
 [[package]]
 name = "unescaper"

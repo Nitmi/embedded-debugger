@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{DebugError, ErrorCode, Result, SuggestedAction};
 
 mod gdb;
+mod registers;
 mod reset;
 mod server;
 mod session;
@@ -26,11 +27,18 @@ pub use gdb::{
     DEFAULT_GDB_MI_COMMAND_TIMEOUT_MS, DEFAULT_GDB_MI_SHUTDOWN_TIMEOUT_MS,
     DEFAULT_GDB_MI_STARTUP_TIMEOUT_MS, DEFAULT_GDB_VERSION_TIMEOUT_MS, GdbExecutableFileIdentity,
     GdbExecutableInspection, GdbInspectOptions, GdbInspection, GdbMiCommandResult, GdbMiHandshake,
-    GdbMiOutput, GdbMiProtocol, GdbMiRecordCounts, GdbMiShutdown, GdbMiTestOptions,
-    GdbMiTestReport, MAX_GDB_MI_COMMAND_TIMEOUT_MS, MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS,
-    MAX_GDB_MI_STARTUP_TIMEOUT_MS, MAX_GDB_VERSION_TIMEOUT_MS, MIN_GDB_MI_COMMAND_TIMEOUT_MS,
-    MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS, MIN_GDB_VERSION_TIMEOUT_MS,
-    inspect_gdb, test_gdb_mi,
+    GdbMiOutput, GdbMiProtocol, GdbMiRecordCounts, GdbMiRegisterInventory, GdbMiRegisterValue,
+    GdbMiShutdown, GdbMiTestOptions, GdbMiTestReport, MAX_GDB_MI_COMMAND_TIMEOUT_MS,
+    MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS, MAX_GDB_MI_STARTUP_TIMEOUT_MS, MAX_GDB_VERSION_TIMEOUT_MS,
+    MIN_GDB_MI_COMMAND_TIMEOUT_MS, MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS,
+    MIN_GDB_VERSION_TIMEOUT_MS, inspect_gdb, test_gdb_mi,
+};
+pub use registers::{
+    MAX_OPENOCD_REGISTER_SNAPSHOT_REGISTERS, OpenOcdRegisterSnapshotCapabilities,
+    OpenOcdRegisterSnapshotConfirmationBoundary, OpenOcdRegisterSnapshotEffects,
+    OpenOcdRegisterSnapshotExchange, OpenOcdRegisterSnapshotOptions, OpenOcdRegisterSnapshotPlan,
+    OpenOcdRegisterSnapshotPolicy, OpenOcdRegisterSnapshotTestReport, plan_register_snapshot,
+    test_register_snapshot,
 };
 pub use reset::{
     OpenOcdResetCapabilities, OpenOcdResetConfirmationBoundary, OpenOcdResetEffects,

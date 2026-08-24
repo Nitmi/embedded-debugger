@@ -148,8 +148,9 @@ requires a valid MI startup prompt. The first request must produce the
 token-correlated result `1^done`; the exit request must produce `2^exit`,
 followed by a successful process exit. The framing parser recognizes prompts,
 result, async, and quoted stream record categories plus result tokens and
-classes. It deliberately does not claim to parse arbitrary nested MI values or
-provide a general debugger command channel.
+classes. Result records are structurally parsed, including nested lists and
+tuples, but this host-only lifecycle does not interpret target data or provide a
+general debugger command channel.
 
 MI stdout and diagnostic stderr are drained concurrently, forwarded to the
 parent stderr, completely hashed, and retained up to 256 KiB per stream. Lines
@@ -237,6 +238,55 @@ connection, state observation, attach/detach, and restoration resume.
 Symbol loading, register/memory/stack reads, breakpoints, watchpoints, general
 execution control, flash, and arbitrary commands remain false. Halted-origin
 sessions are not supported by this checkpoint.
+
+## Confirmed OpenOCD selected-register snapshot
+
+`openocd registers plan` reuses the exact OpenOCD/GDB/session inputs and adds
+repeatable `--register <NAME>`. Selection validation runs before executable or
+configuration lookup. It requires 1..=64 names, permits only ASCII alphanumeric
+plus `_`, `-`, `.`, or `:`, limits each name to 64 bytes, normalizes to
+lowercase, and rejects ASCII case-insensitive duplicates. The digest is
+independent from `openocd session`: it binds the ordered normalized selection,
+the six-command MI contract, tool/config/profile identities, deadlines, exact
+expected target, restoration policy, effects, and confirmation limits.
+
+The operation remains `R2_DEVICE_WRITE`. Explicit register reads are data
+inspection, but OpenOCD configuration is executable Tcl, the confirmed native
+Xtensa profile may execute host code, and attach handlers may probe flash,
+reset, or halt a protected target. Search-tree contents, transitive Tcl sources,
+configuration semantics, runtime adapter identity, and dynamic port values stay
+unbound. No firmware or symbol identity is accepted or required.
+
+`openocd registers test --confirm <DIGEST>` rejects a stale digest before Tcl
+execution, requires the exact selected target to start `running`, and runs only:
+
+```text
+1-gdb-version                                                    -> 1^done
+2-target-select remote 127.0.0.1:<dynamic-port>                 -> 2^connected
+3-data-list-register-names                                      -> 3^done
+4-data-list-register-values --skip-unavailable x <numbers...>   -> 4^done
+5-target-detach                                                  -> 5^done
+6-gdb-exit                                                       -> 6^exit
+```
+
+The complete `register-names` list is parsed as structured MI. Every selected
+name must resolve case-insensitively to exactly one non-empty canonical entry;
+the resolved indices alone form command 4. The `register-values` result must
+contain exactly `number` and hexadecimal `value` for every requested index, no
+unknown or duplicate index, and no missing value. Values are returned in the
+confirmed request order and normalized to lowercase `0x` form. An unknown,
+ambiguous, unavailable, malformed, duplicate, missing, or extra result is
+`PROTOCOL_ERROR`.
+
+After a connected-path snapshot error, the tool still attempts fixed token-5
+detach before bounded token-6 exit. All paths then query the original target,
+use the one fixed OpenOCD resume fallback when `running` is not proven, require
+final running, shut down OpenOCD, and retain GDB/OpenOCD cleanup evidence.
+Failure is never automatically retried. Success enables only selected register
+inventory/read in addition to the accepted connection and restoration
+capabilities. ELF/symbol loading, memory/stack reads, breakpoints/watchpoints,
+general execution control, flash, monitor input, and arbitrary MI/Tcl remain
+false.
 
 ## Confirmed OpenOCD target state roundtrip
 

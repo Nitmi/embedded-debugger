@@ -704,3 +704,43 @@ This accepts only the exact, running-origin, direct-Tcl
 cleanup guarantees. It does not accept CPU1, reset, durable halt, general target
 discovery/control, debugger data access, breakpoints/watchpoints, flash,
 arbitrary commands, or broader configuration trust.
+
+## Global OpenOCD reset and selected-target recovery acceptance (2026-08-24)
+
+- The user independently confirmed exact digest
+  `534095d32cdd29a88720230ffaaee6dd07edfd4b97fde287e81f436d76d782d6`.
+  It bound expected selected target `esp32s3.cpu0`, OpenOCD SHA-256
+  `58ceca283262cd313fdb6b4ba94195b01502a15dc61b6ae0b986077449010179`,
+  `esp32s3-builtin.cfg` SHA-256
+  `62f5bb4f81cf28455bab48d158227c3f4f280dcaab0838e0472c4249e7696611`,
+  the fixed global `reset halt` and selected-target recovery catch envelopes,
+  independent 3000 ms transition deadlines, and final selected-target running.
+- COM3, Windows PnP, and probe-rs independently identified the same ESP32-S3
+  native USB-JTAG device as `303A:1001 / E0:72:A1:D4:1F:DC`. A five-second
+  115200-baud monitor held DTR/RTS false, transmitted zero bytes, and received
+  consecutive baseline heartbeats `18865..18869`.
+- The single confirmed test, with no automatic retry, started OpenOCD on dynamic
+  loopback Tcl/GDB ports 2905/2906 and proved readiness in 150 ms. It strictly
+  matched `esp32s3.cpu0` and initial `running`. The global reset catch code was
+  0 and CPU0 reached `halted` in 292 ms. The one fixed recovery catch code was
+  0 and CPU0 reached final `running` in 5 ms.
+- OpenOCD accepted framed `shutdown`, exited 0 gracefully in 22 ms, and was not
+  force-killed. Process-tree and port cleanup completed, and both bounded log
+  streams drained without truncation, oversized lines, dropped records, or read
+  errors. OpenOCD reported that CPU1 was also reset, but CPU1 examination still
+  failed; its final state and restoration remain unqualified.
+- The first post-reset UART sample showed the expected firmware counter restart
+  and complete heartbeats `46..49`. An exact probe-rs attach/disconnect then
+  succeeded, proving probe release. A final zero-transmit monitor received
+  complete heartbeats `107..111`. Two partial records at reset/monitor
+  boundaries are retained as disclosed non-atomic external-I/O effects.
+- Structured evidence and all three UART captures are retained under
+  `target/hardware-acceptance/2026-08-24-openocd-reset-recovery`. The acceptance
+  summary SHA-256 is
+  `2472bc6b3fe917dff9f62c8cd3f610f3e6132d48018948fcf9a42dfd2b91882d`.
+
+This accepts only one exact global reset-halt plus observation, one fixed resume,
+and final-running proof for selected CPU0, together with complete cleanup and
+observable firmware recovery. It does not accept `reset init`, configurable or
+repeated reset, CPU1 restoration, target-data access, GDB, breakpoints, flash,
+monitor input, arbitrary Tcl, or broader configuration trust.

@@ -1916,6 +1916,157 @@ fn openocd_session_validates_its_timeouts_before_filesystem_inputs() {
 }
 
 #[test]
+fn openocd_registers_plan_binds_selection_protocol_and_restoration() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let make_plan = || {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .arg("openocd")
+            .arg("registers")
+            .arg("plan")
+            .arg("--openocd-executable")
+            .arg(&openocd)
+            .arg("--gdb-executable")
+            .arg(&gdb)
+            .arg("--expected-target")
+            .arg("fake.cpu0")
+            .arg("--config")
+            .arg(&config)
+            .arg("--search")
+            .arg(directory.path())
+            .arg("--register")
+            .arg("PC")
+            .arg("--register")
+            .arg("a0")
+            .arg("--json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Value>(&output).unwrap()
+    };
+    let first = make_plan();
+    let second = make_plan();
+
+    assert_eq!(first["operation"], "openocd.registers.plan");
+    assert_eq!(first["data"]["operation"], "openocd.registers.test");
+    assert_eq!(first["data"]["risk"], "R2_DEVICE_WRITE");
+    assert_eq!(
+        first["data"]["register_policy"]["requested_names"],
+        serde_json::json!(["pc", "a0"])
+    );
+    assert_eq!(
+        first["data"]["protocol"]["commands"][2]["command"],
+        "-data-list-register-names"
+    );
+    assert_eq!(
+        first["data"]["protocol"]["commands"][3]["command"],
+        "-data-list-register-values --skip-unavailable x <resolved_register_numbers>"
+    );
+    assert_eq!(
+        first["data"]["target_state_policy"]["normal_restoration_command"],
+        "5-target-detach"
+    );
+    assert_eq!(
+        first["data"]["effects"]["explicit_selected_register_read_requested"],
+        true
+    );
+    assert_eq!(
+        first["data"]["effects"]["openocd_attach_handler_reset_possible"],
+        true
+    );
+    assert_eq!(
+        first["data"]["capabilities"]["selected_register_read"],
+        Value::Null
+    );
+    assert_eq!(
+        first["data"]["confirm_digest"],
+        second["data"]["confirm_digest"]
+    );
+}
+
+#[test]
+fn openocd_registers_test_rejects_a_stale_digest_before_tcl_execution() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("registers")
+        .arg("test")
+        .arg("--openocd-executable")
+        .arg(&openocd)
+        .arg("--gdb-executable")
+        .arg(&gdb)
+        .arg("--expected-target")
+        .arg("fake.cpu0")
+        .arg("--config")
+        .arg(&config)
+        .arg("--register")
+        .arg("pc")
+        .arg("--confirm")
+        .arg("00".repeat(32))
+        .arg("--json")
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.registers.test");
+    assert_eq!(result["error"]["code"], "CONFIRMATION_MISMATCH");
+    assert_eq!(
+        result["error"]["suggested_actions"][0]["action"],
+        "review_openocd_register_snapshot_plan"
+    );
+    assert!(result["error"]["details"]["openocd_readiness"].is_null());
+}
+
+#[test]
+fn openocd_registers_validate_selection_before_filesystem_inputs() {
+    for registers in [Vec::<&str>::new(), vec!["pc; reset"]] {
+        let mut command = Command::cargo_bin("embedded-debugger").unwrap();
+        command.args([
+            "openocd",
+            "registers",
+            "plan",
+            "--openocd-executable",
+            "deliberately-missing-openocd",
+            "--gdb-executable",
+            "deliberately-missing-gdb",
+            "--expected-target",
+            "fake.cpu0",
+            "--config",
+            "deliberately-missing.cfg",
+        ]);
+        for register in registers {
+            command.arg("--register").arg(register);
+        }
+        let output = command
+            .arg("--json")
+            .assert()
+            .code(7)
+            .get_output()
+            .stdout
+            .clone();
+        let result: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(result["operation"], "openocd.registers.plan");
+        assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    }
+}
+
+#[test]
 fn openocd_reset_plan_binds_global_reset_and_selected_target_recovery() {
     let directory = tempdir().unwrap();
     let openocd = write_fake_openocd(directory.path());

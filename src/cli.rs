@@ -9,7 +9,8 @@ use crate::{
         DebugBackend,
         openocd::{
             self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
-            OpenOcdInspectOptions, OpenOcdServerOptions, OpenOcdTargetOptions,
+            OpenOcdInspectOptions, OpenOcdRegisterSnapshotOptions, OpenOcdServerOptions,
+            OpenOcdTargetOptions,
         },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
@@ -108,6 +109,10 @@ pub enum OpenOcdCommand {
     Reset {
         #[command(subcommand)]
         command: OpenOcdResetCommand,
+    },
+    Registers {
+        #[command(subcommand)]
+        command: OpenOcdRegistersCommand,
     },
     Server {
         #[command(subcommand)]
@@ -333,6 +338,34 @@ pub struct OpenOcdSessionTestSelection {
     pub session: OpenOcdSessionSelection,
 
     #[arg(long, help = "exact confirm_digest returned by openocd session plan")]
+    pub confirm: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdRegistersCommand {
+    Plan(OpenOcdRegistersSelection),
+    Test(OpenOcdRegistersTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdRegistersSelection {
+    #[command(flatten)]
+    pub session: OpenOcdSessionSelection,
+
+    #[arg(
+        long = "register",
+        value_name = "NAME",
+        help = "selected GDB register name; repeat 1..=64 times"
+    )]
+    pub registers: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdRegistersTestSelection {
+    #[command(flatten)]
+    pub registers: OpenOcdRegistersSelection,
+
+    #[arg(long, help = "exact confirm_digest returned by openocd registers plan")]
     pub confirm: String,
 }
 
@@ -786,6 +819,18 @@ impl Cli {
             } => "openocd.reset.test",
             Command::Openocd {
                 command:
+                    OpenOcdCommand::Registers {
+                        command: OpenOcdRegistersCommand::Plan(_),
+                    },
+            } => "openocd.registers.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Registers {
+                        command: OpenOcdRegistersCommand::Test(_),
+                    },
+            } => "openocd.registers.test",
+            Command::Openocd {
+                command:
                     OpenOcdCommand::Server {
                         command: OpenOcdServerCommand::Plan(_),
                     },
@@ -1160,6 +1205,58 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report
                         .recovery
                         .observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Registers {
+                    command: OpenOcdRegistersCommand::Plan(selection),
+                },
+        } => {
+            let report = openocd::plan_register_snapshot(&openocd_register_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.registers.plan",
+                &report,
+                format!(
+                    "OpenOCD selected-register snapshot plan ready\nRisk: {}\nTarget: {}\nRegisters: {}\nInitial/final target state: running\nConfirm digest: {}",
+                    report.risk,
+                    report.target_state_policy.expected_current_target,
+                    report.register_policy.requested_names.join(", "),
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Registers {
+                    command: OpenOcdRegistersCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_register_snapshot(
+                &openocd_register_options(&selection.registers),
+                &selection.confirm,
+            )?;
+            let values = report
+                .exchange
+                .values
+                .iter()
+                .map(|register| format!("{}={}", register.requested_name, register.value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(CommandResult::serializable(
+                "openocd.registers.test",
+                &report,
+                format!(
+                    "OpenOCD selected-register snapshot complete\nTarget: {}\nValues: {}\nTarget state: {} -> {}\nShutdown: graceful",
+                    report.target_restoration.initial.target_name,
+                    values,
+                    report.target_restoration.initial.state,
+                    report
+                        .target_restoration
+                        .final_observation
                         .as_ref()
                         .map_or("missing", |observation| observation.state.as_str()),
                 ),
@@ -1892,6 +1989,15 @@ fn openocd_session_options(selection: &OpenOcdSessionSelection) -> OpenOcdGdbSes
         gdb_command_timeout_ms: selection.gdb_command_timeout_ms,
         gdb_shutdown_timeout_ms: selection.gdb_shutdown_timeout_ms,
         target_state_timeout_ms: selection.target_state_timeout_ms,
+    }
+}
+
+fn openocd_register_options(
+    selection: &OpenOcdRegistersSelection,
+) -> OpenOcdRegisterSnapshotOptions {
+    OpenOcdRegisterSnapshotOptions {
+        session: openocd_session_options(&selection.session),
+        registers: selection.registers.clone(),
     }
 }
 

@@ -74,6 +74,26 @@ code loaded only during confirmed execution. Use the identical option for
 plan and test. Ambient `XTENSA_GNU_CONFIG` is deliberately ignored. A missing
 or changed profile requires a new plan and confirmation.
 
+For explicit OpenOCD register inspection, use the independent
+`openocd registers plan/test` workflow with the same exact tool, profile,
+configuration, search, and expected-target inputs. Add each desired register as
+`--register <NAME>`; do not request more than 64. Surface the normalized ordered
+selection, fixed inventory/value MI commands, R2 configuration and attach
+effects, restoration policy, and unbound runtime adapter identity. Require the
+user to return the exact new digest before `test`.
+
+The register test requires a running origin, resolves names only from GDB's
+structured runtime inventory, reads only the resolved selected numbers, and
+fails if any requested value is unknown, ambiguous, unavailable, missing,
+duplicate, extra, malformed, or non-hexadecimal. A connected failure still
+attempts fixed detach, GDB exit, selected-target running restoration, and
+OpenOCD cleanup. Never retry automatically. Success proves only the returned
+selected register values and cleanup for that exact target/tool/profile plan;
+it does not authorize ELF/symbol loading, memory/stack access, breakpoints,
+execution control, flash, monitor commands, arbitrary MI/Tcl, CPU1, or another
+target. Until a physical acceptance is recorded, describe this capability as
+implemented and controlled-tested, not hardware-qualified.
+
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state
 observation, and restoration. It does not authorize ELF or symbol loading,

@@ -145,6 +145,50 @@ this workflow, so the confirmation boundary reports runtime adapter identity as
 unbound; use an adapter-specific serial setting in reviewed configuration when
 the driver supports one.
 
+Selected OpenOCD register inspection is a separate confirmed checkpoint:
+
+```console
+cargo run -- openocd registers plan \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --register pc --register sp \
+  --json
+
+cargo run -- openocd registers test \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --register pc --register sp \
+  --confirm <confirm_digest> \
+  --json
+```
+
+The plan accepts 1..=64 restricted ASCII register names, normalizes them to
+lowercase, rejects case-insensitive duplicates, and binds both names and order.
+The test adds only `3-data-list-register-names` and
+`4-data-list-register-values --skip-unavailable x <resolved-numbers>` between
+the accepted version/connect and detach/exit commands. Structured MI parsing
+resolves each selected name to exactly one runtime register number and requires
+one hexadecimal value for every selection; unknown, ambiguous, unavailable,
+duplicate, malformed, or extra results fail closed. Failure after connection
+still attempts fixed detach, GDB exit, selected-target running restoration, and
+OpenOCD cleanup.
+
+This remains `R2_DEVICE_WRITE`: OpenOCD configuration and attach handlers keep
+their broader disclosed effects even though the explicit data operation is a
+register read. It accepts no ELF, symbols, memory or stack read, breakpoint,
+execution-control command, flash, monitor input, or arbitrary MI/Tcl. Do not
+retry a failed confirmed test automatically. Controlled process and parser
+regressions pass; each physical target still needs a separately reviewed digest
+and acceptance run.
+
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
 ```console
@@ -606,9 +650,10 @@ and UART heartbeats resumed. The exact profile is now hash-bound, and a second,
 separately confirmed physical run completed the fixed MI version/connect/
 detach/exit exchange. The fixed fallback restored CPU0 to `running`, both
 process trees and dynamic ports were released, probe-rs reattached, and UART
-heartbeats continued. This accepts only the narrow combined lifecycle;
-therefore GDB/MI symbols and target inspection, general
-ELF/HEX loading, RTT, memory writes,
+heartbeats continued. This accepts only the narrow combined lifecycle. A
+separate selected-register snapshot is implemented behind its own digest and
+controlled regressions but has not yet passed physical acceptance; GDB/MI
+symbols, memory/stack inspection, general ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
 watchpoints, asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,

@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     env,
     ffi::OsString,
     fs::{self, File},
@@ -16,6 +17,7 @@ use process_wrap::std::JobObject;
 use process_wrap::std::ProcessGroup;
 use process_wrap::std::{ChildWrapper, CommandWrap};
 use serde::Serialize;
+use serde_gdbmi::parser::{DataSymbol, ResponseBody as StructuredResponseBody, Value as MiValue};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -51,6 +53,13 @@ const REMOTE_EXIT_TOKEN: u64 = 4;
 const REMOTE_SELECT_COMMAND_PLACEHOLDER: &str =
     "-target-select remote 127.0.0.1:<dynamic_openocd_gdb_port>";
 const REMOTE_DETACH_COMMAND: &str = "-target-detach";
+const REGISTER_NAMES_TOKEN: u64 = 3;
+const REGISTER_VALUES_TOKEN: u64 = 4;
+const REGISTER_DETACH_TOKEN: u64 = 5;
+const REGISTER_EXIT_TOKEN: u64 = 6;
+const REGISTER_NAMES_COMMAND: &str = "-data-list-register-names";
+const REGISTER_VALUES_COMMAND_PLACEHOLDER: &str =
+    "-data-list-register-values --skip-unavailable x <resolved_register_numbers>";
 const MI_LAUNCH_ARGUMENTS: [&str; 4] = ["--nx", "--nh", "--quiet", "--interpreter=mi2"];
 pub(super) const XTENSA_GNU_CONFIG_ENV: &str = "XTENSA_GNU_CONFIG";
 
@@ -243,6 +252,20 @@ pub struct GdbMiRecordCounts {
     pub log_stream: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiRegisterInventory {
+    pub total_entries: u64,
+    pub named_entries: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiRegisterValue {
+    pub requested_name: String,
+    pub canonical_name: String,
+    pub number: u64,
+    pub value: String,
+}
+
 pub(super) struct RemoteGdbExecution {
     pub endpoint: String,
     pub startup_elapsed: Duration,
@@ -251,6 +274,28 @@ pub(super) struct RemoteGdbExecution {
     pub version_stream_records: u64,
     pub connect_elapsed: Duration,
     pub connect_result_class: String,
+    pub detach_elapsed: Duration,
+    pub detach_result_class: String,
+    pub record_counts: GdbMiRecordCounts,
+    pub shutdown: GdbMiShutdown,
+    pub output: GdbMiOutput,
+}
+
+pub(super) struct RemoteRegisterExecution {
+    pub endpoint: String,
+    pub startup_elapsed: Duration,
+    pub version_elapsed: Duration,
+    pub version_result_class: String,
+    pub version_stream_records: u64,
+    pub connect_elapsed: Duration,
+    pub connect_result_class: String,
+    pub names_elapsed: Duration,
+    pub names_result_class: String,
+    pub values_elapsed: Duration,
+    pub values_result_class: String,
+    pub values_command: String,
+    pub inventory: GdbMiRegisterInventory,
+    pub values: Vec<GdbMiRegisterValue>,
     pub detach_elapsed: Duration,
     pub detach_result_class: String,
     pub record_counts: GdbMiRecordCounts,
@@ -431,6 +476,81 @@ pub(super) fn execute_remote_gdb(
     })
 }
 
+pub(super) fn execute_remote_register_snapshot(
+    executable: &str,
+    xtensa_config: Option<&str>,
+    gdb_port: u16,
+    requested_names: &[String],
+    startup_timeout_ms: u64,
+    command_timeout_ms: u64,
+    shutdown_timeout_ms: u64,
+) -> Result<RemoteRegisterExecution> {
+    let endpoint = format!("127.0.0.1:{gdb_port}");
+    let mut command = Command::new(executable);
+    command
+        .args(MI_LAUNCH_ARGUMENTS)
+        .env_remove(XTENSA_GNU_CONFIG_ENV);
+    if let Some(config) = xtensa_config {
+        command.env(XTENSA_GNU_CONFIG_ENV, config);
+    }
+    let mut gdb = ManagedGdb::spawn(command, executable, REGISTER_EXIT_TOKEN)?;
+    let lifecycle = match gdb.run_register_lifecycle(
+        &endpoint,
+        requested_names,
+        Duration::from_millis(startup_timeout_ms),
+        Duration::from_millis(command_timeout_ms),
+        Duration::from_millis(shutdown_timeout_ms),
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(failure) => {
+            return Err(finalize_failure(gdb, failure, shutdown_timeout_ms));
+        }
+    };
+
+    let mut shutdown = gdb.cleanup(Duration::from_millis(shutdown_timeout_ms));
+    let record_counts = gdb.record_counts.clone();
+    let output = gdb.finish_output();
+    shutdown.process_tree_cleanup_complete &= output_streams_closed(&output);
+    if !shutdown.command_sent
+        || !shutdown.result_observed
+        || !shutdown.graceful
+        || !shutdown.exit_success
+        || !shutdown.process_tree_cleanup_complete
+    {
+        return Err(protocol_error_with_lifecycle(
+            "register-snapshot GDB/MI process did not complete a graceful shutdown",
+            json!({"endpoint": endpoint}),
+            &shutdown,
+            &output,
+        ));
+    }
+    validate_complete_output(&output).map_err(|message| {
+        protocol_error_with_lifecycle(message, json!({"endpoint": endpoint}), &shutdown, &output)
+    })?;
+
+    Ok(RemoteRegisterExecution {
+        endpoint,
+        startup_elapsed: lifecycle.startup_elapsed,
+        version_elapsed: lifecycle.version_elapsed,
+        version_result_class: lifecycle.version_result_class,
+        version_stream_records: lifecycle.version_stream_records,
+        connect_elapsed: lifecycle.connect_elapsed,
+        connect_result_class: lifecycle.connect_result_class,
+        names_elapsed: lifecycle.names_elapsed,
+        names_result_class: lifecycle.names_result_class,
+        values_elapsed: lifecycle.values_elapsed,
+        values_result_class: lifecycle.values_result_class,
+        values_command: lifecycle.values_command,
+        inventory: lifecycle.inventory,
+        values: lifecycle.values,
+        detach_elapsed: lifecycle.detach_elapsed,
+        detach_result_class: lifecycle.detach_result_class,
+        record_counts,
+        shutdown,
+        output,
+    })
+}
+
 fn protocol_contract() -> GdbMiProtocol {
     GdbMiProtocol {
         interpreter: "mi2".to_string(),
@@ -488,6 +608,53 @@ pub(super) fn remote_protocol_contract() -> GdbMiProtocol {
             },
             GdbMiPlannedCommand {
                 token: REMOTE_EXIT_TOKEN,
+                command: EXIT_COMMAND.to_string(),
+                expected_result_class: "exit".to_string(),
+            },
+        ],
+    }
+}
+
+pub(super) fn register_protocol_contract() -> GdbMiProtocol {
+    GdbMiProtocol {
+        interpreter: "mi2".to_string(),
+        launch_arguments: MI_LAUNCH_ARGUMENTS
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        initialization_files_enabled: false,
+        input_encoding: "ascii".to_string(),
+        line_terminator: "lf".to_string(),
+        token_correlation_required: true,
+        process_isolation: process_isolation().to_string(),
+        commands: vec![
+            GdbMiPlannedCommand {
+                token: VERSION_TOKEN,
+                command: VERSION_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REMOTE_SELECT_TOKEN,
+                command: REMOTE_SELECT_COMMAND_PLACEHOLDER.to_string(),
+                expected_result_class: "connected".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REGISTER_NAMES_TOKEN,
+                command: REGISTER_NAMES_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REGISTER_VALUES_TOKEN,
+                command: REGISTER_VALUES_COMMAND_PLACEHOLDER.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REGISTER_DETACH_TOKEN,
+                command: REMOTE_DETACH_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REGISTER_EXIT_TOKEN,
                 command: EXIT_COMMAND.to_string(),
                 expected_result_class: "exit".to_string(),
             },
@@ -1068,11 +1235,151 @@ impl ManagedGdb {
         })
     }
 
+    fn run_register_lifecycle(
+        &mut self,
+        endpoint: &str,
+        requested_names: &[String],
+        startup_timeout: Duration,
+        command_timeout: Duration,
+        shutdown_timeout: Duration,
+    ) -> std::result::Result<RegisterLifecycleSuccess, LifecycleFailure> {
+        let startup_deadline = self.started + startup_timeout;
+        self.wait_for_prompt(startup_deadline)?;
+        let startup_elapsed = self.started.elapsed();
+
+        let streams_before_version = stream_record_count(&self.record_counts);
+        let version_started = Instant::now();
+        self.send_command(VERSION_TOKEN, VERSION_COMMAND)?;
+        let version_result_class = self.wait_for_result(VERSION_TOKEN, "done", startup_deadline)?;
+        let version_elapsed = version_started.elapsed();
+        let version_stream_records =
+            stream_record_count(&self.record_counts).saturating_sub(streams_before_version);
+
+        let connect_command = format!("-target-select remote {endpoint}");
+        let connect_started = Instant::now();
+        self.send_command(REMOTE_SELECT_TOKEN, &connect_command)?;
+        let connect_result_class = self.wait_for_result(
+            REMOTE_SELECT_TOKEN,
+            "connected",
+            connect_started + command_timeout,
+        )?;
+        let connect_elapsed = connect_started.elapsed();
+
+        let snapshot = match self.run_register_snapshot(requested_names, command_timeout) {
+            Ok(snapshot) => snapshot,
+            Err(failure) => return Err(self.with_register_detach_attempt(failure, command_timeout)),
+        };
+
+        let detach_started = Instant::now();
+        self.send_command(REGISTER_DETACH_TOKEN, REMOTE_DETACH_COMMAND)?;
+        let detach_result_class = self.wait_for_result(
+            REGISTER_DETACH_TOKEN,
+            "done",
+            detach_started + command_timeout,
+        )?;
+        let detach_elapsed = detach_started.elapsed();
+
+        self.send_command(REGISTER_EXIT_TOKEN, EXIT_COMMAND)?;
+        let shutdown_deadline = Instant::now() + shutdown_timeout;
+        self.wait_for_result(REGISTER_EXIT_TOKEN, "exit", shutdown_deadline)?;
+        self.wait_for_exit(shutdown_deadline)?;
+
+        Ok(RegisterLifecycleSuccess {
+            startup_elapsed,
+            version_elapsed,
+            version_result_class,
+            version_stream_records,
+            connect_elapsed,
+            connect_result_class,
+            names_elapsed: snapshot.names_elapsed,
+            names_result_class: snapshot.names_result_class,
+            values_elapsed: snapshot.values_elapsed,
+            values_result_class: snapshot.values_result_class,
+            values_command: snapshot.values_command,
+            inventory: snapshot.inventory,
+            values: snapshot.values,
+            detach_elapsed,
+            detach_result_class,
+        })
+    }
+
+    fn run_register_snapshot(
+        &mut self,
+        requested_names: &[String],
+        command_timeout: Duration,
+    ) -> std::result::Result<RegisterSnapshotSuccess, LifecycleFailure> {
+        let names_started = Instant::now();
+        self.send_command(REGISTER_NAMES_TOKEN, REGISTER_NAMES_COMMAND)?;
+        let names_result = self.wait_for_result_record(
+            REGISTER_NAMES_TOKEN,
+            "done",
+            names_started + command_timeout,
+        )?;
+        let names_elapsed = names_started.elapsed();
+        let selection = resolve_register_selection(&names_result.variables, requested_names)?;
+
+        let values_command = register_values_command(&selection.registers);
+        let values_started = Instant::now();
+        self.send_command(REGISTER_VALUES_TOKEN, &values_command)?;
+        let values_result = self.wait_for_result_record(
+            REGISTER_VALUES_TOKEN,
+            "done",
+            values_started + command_timeout,
+        )?;
+        let values_elapsed = values_started.elapsed();
+        let values = parse_register_values(&values_result.variables, &selection.registers)?;
+
+        Ok(RegisterSnapshotSuccess {
+            names_elapsed,
+            names_result_class: names_result.class,
+            values_elapsed,
+            values_result_class: values_result.class,
+            values_command,
+            inventory: selection.inventory,
+            values,
+        })
+    }
+
+    fn with_register_detach_attempt(
+        &mut self,
+        mut failure: LifecycleFailure,
+        command_timeout: Duration,
+    ) -> LifecycleFailure {
+        let started = Instant::now();
+        let attempt = self
+            .send_command(REGISTER_DETACH_TOKEN, REMOTE_DETACH_COMMAND)
+            .and_then(|()| {
+                self.wait_for_result(REGISTER_DETACH_TOKEN, "done", started + command_timeout)
+            });
+        let evidence = match attempt {
+            Ok(result_class) => json!({
+                "attempted": true,
+                "complete": true,
+                "token": REGISTER_DETACH_TOKEN,
+                "command": REMOTE_DETACH_COMMAND,
+                "result_class": result_class,
+                "elapsed_ms": duration_ms(started.elapsed()),
+            }),
+            Err(detach_failure) => json!({
+                "attempted": true,
+                "complete": false,
+                "token": REGISTER_DETACH_TOKEN,
+                "command": REMOTE_DETACH_COMMAND,
+                "elapsed_ms": duration_ms(started.elapsed()),
+                "failure": lifecycle_failure_value(&detach_failure),
+            }),
+        };
+        let mut details = failure.details.as_object().cloned().unwrap_or_default();
+        details.insert("cleanup_detach".to_string(), evidence);
+        failure.details = Value::Object(details);
+        failure
+    }
+
     fn wait_for_prompt(&mut self, deadline: Instant) -> std::result::Result<(), LifecycleFailure> {
         loop {
             match self.next_record(deadline, "startup prompt")? {
                 ParsedRecord::Prompt => return Ok(()),
-                ParsedRecord::Result { token, class } => {
+                ParsedRecord::Result { token, class, .. } => {
                     return Err(protocol_failure(
                         "GDB/MI emitted a result before its startup prompt",
                         json!({"token": token, "result_class": class}),
@@ -1089,8 +1396,23 @@ impl ManagedGdb {
         expected_class: &str,
         deadline: Instant,
     ) -> std::result::Result<String, LifecycleFailure> {
+        self.wait_for_result_record(expected_token, expected_class, deadline)
+            .map(|result| result.class)
+    }
+
+    fn wait_for_result_record(
+        &mut self,
+        expected_token: u64,
+        expected_class: &str,
+        deadline: Instant,
+    ) -> std::result::Result<MiResultRecord, LifecycleFailure> {
         loop {
-            if let ParsedRecord::Result { token, class } = self.next_record(deadline, "result")? {
+            if let ParsedRecord::Result {
+                token,
+                class,
+                variables,
+            } = self.next_record(deadline, "result")?
+            {
                 if token != Some(expected_token) {
                     return Err(protocol_failure(
                         "GDB/MI result token did not match the outstanding command",
@@ -1111,7 +1433,7 @@ impl ManagedGdb {
                         }),
                     ));
                 }
-                return Ok(class);
+                return Ok(MiResultRecord { class, variables });
             }
         }
     }
@@ -1199,7 +1521,7 @@ impl ManagedGdb {
             )
         })?;
         self.record_counts.observe(&record);
-        if let ParsedRecord::Result { token, class } = &record
+        if let ParsedRecord::Result { token, class, .. } = &record
             && *token == Some(self.exit_token)
         {
             self.exit_result_class = Some(class.clone());
@@ -1427,6 +1749,55 @@ struct RemoteLifecycleSuccess {
 }
 
 #[derive(Debug)]
+struct RegisterLifecycleSuccess {
+    startup_elapsed: Duration,
+    version_elapsed: Duration,
+    version_result_class: String,
+    version_stream_records: u64,
+    connect_elapsed: Duration,
+    connect_result_class: String,
+    names_elapsed: Duration,
+    names_result_class: String,
+    values_elapsed: Duration,
+    values_result_class: String,
+    values_command: String,
+    inventory: GdbMiRegisterInventory,
+    values: Vec<GdbMiRegisterValue>,
+    detach_elapsed: Duration,
+    detach_result_class: String,
+}
+
+#[derive(Debug)]
+struct RegisterSnapshotSuccess {
+    names_elapsed: Duration,
+    names_result_class: String,
+    values_elapsed: Duration,
+    values_result_class: String,
+    values_command: String,
+    inventory: GdbMiRegisterInventory,
+    values: Vec<GdbMiRegisterValue>,
+}
+
+#[derive(Debug)]
+struct MiResultRecord {
+    class: String,
+    variables: HashMap<String, MiValue>,
+}
+
+#[derive(Debug)]
+struct ResolvedRegisterSelection {
+    inventory: GdbMiRegisterInventory,
+    registers: Vec<ResolvedRegister>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedRegister {
+    requested_name: String,
+    canonical_name: String,
+    number: u64,
+}
+
+#[derive(Debug)]
 struct LifecycleFailure {
     code: ErrorCode,
     message: String,
@@ -1443,6 +1814,250 @@ fn protocol_failure(message: impl Into<String>, details: Value) -> LifecycleFail
         retryable: false,
         details,
     }
+}
+
+fn lifecycle_failure_value(failure: &LifecycleFailure) -> Value {
+    json!({
+        "code": failure.code,
+        "message": failure.message,
+        "exit_code": failure.exit_code,
+        "retryable": failure.retryable,
+        "details": failure.details,
+    })
+}
+
+fn resolve_register_selection(
+    variables: &HashMap<String, MiValue>,
+    requested_names: &[String],
+) -> std::result::Result<ResolvedRegisterSelection, LifecycleFailure> {
+    let names = exact_list_variable(variables, "register-names", "register-name inventory")?;
+    let mut by_name: HashMap<String, Vec<ResolvedRegister>> = HashMap::new();
+    let mut named_entries = 0_u64;
+    for (index, value) in names.iter().enumerate() {
+        let MiValue::String(canonical_name) = value else {
+            return Err(protocol_failure(
+                "GDB/MI register-name inventory contained a non-string entry",
+                json!({"register_number": index}),
+            ));
+        };
+        if canonical_name.is_empty() {
+            continue;
+        }
+        if !is_safe_register_name(canonical_name) {
+            return Err(protocol_failure(
+                "GDB/MI register-name inventory contained an unsafe name",
+                json!({
+                    "register_number": index,
+                    "register_name": bounded_line(canonical_name),
+                }),
+            ));
+        }
+        let number = u64::try_from(index).map_err(|_| {
+            protocol_failure(
+                "GDB/MI register inventory exceeded the supported index range",
+                json!({"register_number": index}),
+            )
+        })?;
+        named_entries = named_entries.saturating_add(1);
+        by_name
+            .entry(canonical_name.to_ascii_lowercase())
+            .or_default()
+            .push(ResolvedRegister {
+                requested_name: String::new(),
+                canonical_name: canonical_name.clone(),
+                number,
+            });
+    }
+
+    let mut registers = Vec::with_capacity(requested_names.len());
+    for requested_name in requested_names {
+        let key = requested_name.to_ascii_lowercase();
+        let Some(candidates) = by_name.get(&key) else {
+            return Err(protocol_failure(
+                "requested register was not present in the GDB/MI register-name inventory",
+                json!({
+                    "requested_register": requested_name,
+                    "inventory_entries": names.len(),
+                    "named_registers": named_entries,
+                }),
+            ));
+        };
+        if candidates.len() != 1 {
+            return Err(protocol_failure(
+                "requested register name was ambiguous in the GDB/MI inventory",
+                json!({
+                    "requested_register": requested_name,
+                    "matching_register_numbers": candidates.iter().map(|item| item.number).collect::<Vec<_>>(),
+                }),
+            ));
+        }
+        let mut register = candidates[0].clone();
+        register.requested_name = requested_name.clone();
+        registers.push(register);
+    }
+
+    Ok(ResolvedRegisterSelection {
+        inventory: GdbMiRegisterInventory {
+            total_entries: u64::try_from(names.len()).unwrap_or(u64::MAX),
+            named_entries,
+        },
+        registers,
+    })
+}
+
+fn register_values_command(registers: &[ResolvedRegister]) -> String {
+    let numbers = registers
+        .iter()
+        .map(|register| register.number.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("-data-list-register-values --skip-unavailable x {numbers}")
+}
+
+fn parse_register_values(
+    variables: &HashMap<String, MiValue>,
+    registers: &[ResolvedRegister],
+) -> std::result::Result<Vec<GdbMiRegisterValue>, LifecycleFailure> {
+    let values = exact_list_variable(variables, "register-values", "register values")?;
+    let requested_numbers = registers
+        .iter()
+        .map(|register| register.number)
+        .collect::<HashSet<_>>();
+    let mut by_number = HashMap::new();
+    for value in values {
+        let MiValue::Dict(fields) = value else {
+            return Err(protocol_failure(
+                "GDB/MI register-values list contained a non-tuple entry",
+                json!({}),
+            ));
+        };
+        if fields.len() != 2 {
+            return Err(protocol_failure(
+                "GDB/MI register-value tuple did not contain exactly number and value",
+                json!({"field_count": fields.len()}),
+            ));
+        }
+        let number = exact_string_field(fields, "number", "register-value tuple")?;
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(protocol_failure(
+                "GDB/MI register-value tuple contained an invalid register number",
+                json!({"number": bounded_line(number)}),
+            ));
+        }
+        let number = number.parse::<u64>().map_err(|_| {
+            protocol_failure(
+                "GDB/MI register number exceeded the supported integer range",
+                json!({"number": bounded_line(number)}),
+            )
+        })?;
+        if !requested_numbers.contains(&number) {
+            return Err(protocol_failure(
+                "GDB/MI returned a register number that was not requested",
+                json!({"register_number": number}),
+            ));
+        }
+        let raw_value = exact_string_field(fields, "value", "register-value tuple")?;
+        let normalized_value = normalize_hex_register_value(raw_value)?;
+        if by_number.insert(number, normalized_value).is_some() {
+            return Err(protocol_failure(
+                "GDB/MI returned a duplicate register number",
+                json!({"register_number": number}),
+            ));
+        }
+    }
+
+    registers
+        .iter()
+        .map(|register| {
+            let value = by_number.remove(&register.number).ok_or_else(|| {
+                protocol_failure(
+                    "GDB/MI did not return every requested register value",
+                    json!({
+                        "missing_register": register.requested_name,
+                        "register_number": register.number,
+                        "unavailable_policy": "fail",
+                    }),
+                )
+            })?;
+            Ok(GdbMiRegisterValue {
+                requested_name: register.requested_name.clone(),
+                canonical_name: register.canonical_name.clone(),
+                number: register.number,
+                value,
+            })
+        })
+        .collect()
+}
+
+fn exact_list_variable<'a>(
+    variables: &'a HashMap<String, MiValue>,
+    expected_key: &str,
+    label: &str,
+) -> std::result::Result<&'a [MiValue], LifecycleFailure> {
+    if variables.len() != 1 {
+        return Err(protocol_failure(
+            format!("GDB/MI {label} result contained unexpected fields"),
+            json!({
+                "expected_field": expected_key,
+                "field_count": variables.len(),
+            }),
+        ));
+    }
+    let Some(MiValue::List(values)) = variables.get(expected_key) else {
+        return Err(protocol_failure(
+            format!("GDB/MI {label} result did not contain the expected list"),
+            json!({"expected_field": expected_key}),
+        ));
+    };
+    Ok(values)
+}
+
+fn exact_string_field<'a>(
+    fields: &'a HashMap<String, MiValue>,
+    key: &str,
+    label: &str,
+) -> std::result::Result<&'a str, LifecycleFailure> {
+    let Some(MiValue::String(value)) = fields.get(key) else {
+        return Err(protocol_failure(
+            format!("GDB/MI {label} did not contain a string {key} field"),
+            json!({"field": key}),
+        ));
+    };
+    Ok(value)
+}
+
+fn normalize_hex_register_value(value: &str) -> std::result::Result<String, LifecycleFailure> {
+    const MAX_REGISTER_HEX_DIGITS: usize = 1024;
+    let Some(digits) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    else {
+        return Err(protocol_failure(
+            "GDB/MI register value was not hexadecimal",
+            json!({"value": bounded_line(value)}),
+        ));
+    };
+    if digits.is_empty()
+        || digits.len() > MAX_REGISTER_HEX_DIGITS
+        || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(protocol_failure(
+            "GDB/MI register value had an invalid hexadecimal payload",
+            json!({
+                "value": bounded_line(value),
+                "maximum_hex_digits": MAX_REGISTER_HEX_DIGITS,
+            }),
+        ));
+    }
+    Ok(format!("0x{}", digits.to_ascii_lowercase()))
+}
+
+fn is_safe_register_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
 }
 
 fn finalize_failure(
@@ -1622,7 +2237,11 @@ fn finish_stream(handle: Option<JoinHandle<StreamCapture>>, deadline: Instant) -
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedRecord {
     Prompt,
-    Result { token: Option<u64>, class: String },
+    Result {
+        token: Option<u64>,
+        class: String,
+        variables: HashMap<String, MiValue>,
+    },
     ExecAsync,
     StatusAsync,
     NotifyAsync,
@@ -1653,10 +2272,7 @@ fn parse_record(line: &str) -> std::result::Result<ParsedRecord, String> {
     };
     let payload = &record[1..];
     match marker {
-        b'^' => Ok(ParsedRecord::Result {
-            token,
-            class: parse_class(payload, "result")?,
-        }),
+        b'^' => parse_result_record(line, token, payload),
         b'*' => {
             reject_token(token, "exec async")?;
             parse_class(payload, "exec async")?;
@@ -1689,6 +2305,39 @@ fn parse_record(line: &str) -> std::result::Result<ParsedRecord, String> {
         }
         _ => Err(format!("unsupported MI record marker 0x{marker:02x}")),
     }
+}
+
+fn parse_result_record(
+    line: &str,
+    token: Option<u64>,
+    payload: &str,
+) -> std::result::Result<ParsedRecord, String> {
+    let class = parse_class(payload, "result")?;
+    let response = serde_gdbmi::parser::Response::try_from(line)
+        .map_err(|error| format!("result record has invalid structured MI data: {error}"))?;
+    let parsed_token = response
+        .token
+        .as_deref()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| "MI token is outside the supported integer range".to_string())
+        })
+        .transpose()?;
+    if parsed_token != token {
+        return Err("structured MI parser returned an inconsistent result token".to_string());
+    }
+    let StructuredResponseBody::Data(data) = response.body else {
+        return Err("result marker parsed as a stream record".to_string());
+    };
+    if data.symbol != DataSymbol::Result || data.class != class {
+        return Err("structured MI parser returned an inconsistent result record".to_string());
+    }
+    Ok(ParsedRecord::Result {
+        token,
+        class,
+        variables: data.variables,
+    })
 }
 
 fn reject_token(token: Option<u64>, kind: &str) -> std::result::Result<(), String> {
@@ -1760,6 +2409,7 @@ mod tests {
             ParsedRecord::Result {
                 token: Some(1),
                 class: "done".to_string(),
+                variables: HashMap::new(),
             }
         );
         assert_eq!(
@@ -1767,6 +2417,7 @@ mod tests {
             ParsedRecord::Result {
                 token: Some(2),
                 class: "exit".to_string(),
+                variables: HashMap::new(),
             }
         );
         assert_eq!(
@@ -1785,6 +2436,131 @@ mod tests {
         assert!(parse_record("1").is_err());
         assert!(parse_record("9=thread-created,id=\"1\"").is_err());
         assert!(parse_record("~not-quoted").is_err());
+        assert!(parse_record("3^done,register-names=[\"pc\"").is_err());
+    }
+
+    #[test]
+    fn parser_preserves_structured_result_variables() {
+        let record = parse_record("3^done,register-names=[\"pc\",\"\",\"a0\"]").unwrap();
+        let ParsedRecord::Result {
+            token,
+            class,
+            variables,
+        } = record
+        else {
+            panic!("expected result record");
+        };
+        assert_eq!(token, Some(3));
+        assert_eq!(class, "done");
+        assert_eq!(
+            variables["register-names"],
+            MiValue::List(vec![
+                MiValue::String("pc".to_string()),
+                MiValue::String(String::new()),
+                MiValue::String("a0".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn register_results_are_resolved_and_returned_in_requested_order() {
+        let names = parse_record("3^done,register-names=[\"pc\",\"a0\",\"\",\"ps\"]").unwrap();
+        let ParsedRecord::Result {
+            variables: name_variables,
+            ..
+        } = names
+        else {
+            panic!("expected result record");
+        };
+        let requested = vec!["ps".to_string(), "pc".to_string()];
+        let selection = resolve_register_selection(&name_variables, &requested).unwrap();
+        assert_eq!(selection.inventory.total_entries, 4);
+        assert_eq!(selection.inventory.named_entries, 3);
+        assert_eq!(
+            register_values_command(&selection.registers),
+            "-data-list-register-values --skip-unavailable x 3 0"
+        );
+
+        let values = parse_record(
+            "4^done,register-values=[{number=\"0\",value=\"0X4200ABCD\"},{number=\"3\",value=\"0x20\"}]",
+        )
+        .unwrap();
+        let ParsedRecord::Result {
+            variables: value_variables,
+            ..
+        } = values
+        else {
+            panic!("expected result record");
+        };
+        let values = parse_register_values(&value_variables, &selection.registers).unwrap();
+        assert_eq!(values[0].requested_name, "ps");
+        assert_eq!(values[0].number, 3);
+        assert_eq!(values[0].value, "0x20");
+        assert_eq!(values[1].requested_name, "pc");
+        assert_eq!(values[1].value, "0x4200abcd");
+    }
+
+    #[test]
+    fn register_results_fail_closed_on_unknown_unavailable_or_duplicate_values() {
+        let names = HashMap::from([(
+            "register-names".to_string(),
+            MiValue::List(vec![MiValue::String("pc".to_string())]),
+        )]);
+        let unknown = resolve_register_selection(&names, &["a0".to_string()]).unwrap_err();
+        assert_eq!(unknown.code, ErrorCode::ProtocolError);
+
+        let ambiguous_names = HashMap::from([(
+            "register-names".to_string(),
+            MiValue::List(vec![
+                MiValue::String("pc".to_string()),
+                MiValue::String("PC".to_string()),
+            ]),
+        )]);
+        let ambiguous =
+            resolve_register_selection(&ambiguous_names, &["pc".to_string()]).unwrap_err();
+        assert_eq!(
+            ambiguous.details["matching_register_numbers"],
+            json!([0, 1])
+        );
+
+        let selection = resolve_register_selection(&names, &["pc".to_string()]).unwrap();
+        let unavailable =
+            HashMap::from([("register-values".to_string(), MiValue::List(Vec::new()))]);
+        let error = parse_register_values(&unavailable, &selection.registers).unwrap_err();
+        assert_eq!(error.details["unavailable_policy"], "fail");
+
+        let tuple = MiValue::Dict(HashMap::from([
+            ("number".to_string(), MiValue::String("0".to_string())),
+            ("value".to_string(), MiValue::String("0x1".to_string())),
+        ]));
+        let duplicate = HashMap::from([(
+            "register-values".to_string(),
+            MiValue::List(vec![tuple.clone(), tuple]),
+        )]);
+        let error = parse_register_values(&duplicate, &selection.registers).unwrap_err();
+        assert_eq!(error.details["register_number"], 0);
+
+        let non_hex = HashMap::from([(
+            "register-values".to_string(),
+            MiValue::List(vec![MiValue::Dict(HashMap::from([
+                ("number".to_string(), MiValue::String("0".to_string())),
+                (
+                    "value".to_string(),
+                    MiValue::String("unavailable".to_string()),
+                ),
+            ]))]),
+        )]);
+        assert!(parse_register_values(&non_hex, &selection.registers).is_err());
+
+        let extra = HashMap::from([(
+            "register-values".to_string(),
+            MiValue::List(vec![MiValue::Dict(HashMap::from([
+                ("number".to_string(), MiValue::String("1".to_string())),
+                ("value".to_string(), MiValue::String("0x1".to_string())),
+            ]))]),
+        )]);
+        let error = parse_register_values(&extra, &selection.registers).unwrap_err();
+        assert_eq!(error.details["register_number"], 1);
     }
 
     #[test]
@@ -1810,5 +2586,18 @@ mod tests {
         assert_eq!(contract.commands.len(), 2);
         assert_eq!(contract.commands[0].command, VERSION_COMMAND);
         assert_eq!(contract.commands[1].command, EXIT_COMMAND);
+    }
+
+    #[test]
+    fn register_protocol_contract_exposes_only_the_fixed_snapshot_exchange() {
+        let contract = register_protocol_contract();
+        assert_eq!(contract.commands.len(), 6);
+        assert_eq!(contract.commands[2].command, REGISTER_NAMES_COMMAND);
+        assert_eq!(
+            contract.commands[3].command,
+            REGISTER_VALUES_COMMAND_PLACEHOLDER
+        );
+        assert_eq!(contract.commands[4].command, REMOTE_DETACH_COMMAND);
+        assert_eq!(contract.commands[5].command, EXIT_COMMAND);
     }
 }
