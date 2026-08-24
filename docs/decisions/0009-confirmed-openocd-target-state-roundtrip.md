@@ -60,9 +60,15 @@ therefore remain narrow, separately confirmed, and restoration-oriented.
 - Target grouping and reviewed configuration can affect related cores or
   peripherals beyond what `curstate` proves; those residual effects remain
   disclosed rather than treated as state preservation.
-- Controlled OpenOCD fixtures cover the protocol and cleanup paths without
-  hardware. A real target requires a separate exact digest confirmation and
-  physical acceptance before the capability is considered qualified there.
+- Controlled OpenOCD fixtures cover protocol and cleanup paths without
+  hardware. On 2026-08-24, the separately confirmed digest
+  `06d650bc97d6f055572591a411a6a3be4c60979194aded349d32e869aafa593d`
+  passed physical acceptance on exact target `esp32s3.cpu0`: halt and resume
+  observations, final running state, graceful shutdown, port cleanup, exact
+  probe reuse, and UART recovery all passed.
+- That acceptance qualifies only the fixed CPU0 roundtrip on the reviewed
+  ESP32-S3 fixture. CPU1 examination failed, and the configuration's transitive
+  Tcl semantics and runtime adapter identity remain outside the digest.
 
 ## References
 

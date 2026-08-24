@@ -57,8 +57,10 @@ All notable changes to this project will be documented in this file.
   fixed resume after every halt result, requires final running, and preserves
   transition plus server cleanup evidence on failure. It requests no reset,
   GDB, register/memory/stack read, breakpoint, flash, monitor, or arbitrary Tcl
-  command. Controlled lifecycle regressions pass; physical ESP32-S3 acceptance
-  requires a separately confirmed plan.
+  command. Controlled lifecycle regressions pass. A separately confirmed
+  ESP32-S3 CPU0 run proved `running -> halted -> running`, graceful shutdown,
+  dynamic-port cleanup, exact probe reuse, and UART recovery; CPU1 remains
+  unqualified.
 - Versioned success and error envelopes for Agent-safe CLI automation.
 - Stable error codes and exit codes.
 - Backend capability model and deterministic Replay backend.
@@ -199,9 +201,11 @@ All notable changes to this project will be documented in this file.
 ### Known limitations
 
 - OpenOCD host inspection, a confirmed managed server, GDB/MI host validation,
-  and a confirmed fixed remote attach/detach lifecycle are implemented. General
-  OpenOCD target discovery/control, symbol/ELF loading, register or memory
-  inspection, breakpoints/watchpoints, and flashing are not. The MCP adapter
+  a confirmed fixed remote attach/detach lifecycle, and one fixed direct CPU0
+  halt/resume roundtrip are implemented; the latter is physically accepted on
+  ESP32-S3. General OpenOCD target discovery/control, reset, symbol/ELF loading,
+  register or memory inspection, breakpoints/watchpoints, and flashing are not.
+  The MCP adapter
   currently exposes only the probe-rs/Replay persistent session contract;
   OpenOCD and flash planning/execution remain CLI operations.
 - Native raw BIN requires an explicit base address; Replay uses the fixture

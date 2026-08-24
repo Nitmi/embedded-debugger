@@ -176,6 +176,14 @@ a partial record boundary. It does not request reset, GDB, registers, memory,
 stack, breakpoints, flash, monitor input, or arbitrary Tcl. Do not retry a
 failed test automatically because target outcome may be indeterminate.
 
+The fixed roundtrip has passed physical acceptance on ESP32-S3 CPU0 using the
+exact confirmed digest
+`06d650bc97d6f055572591a411a6a3be4c60979194aded349d32e869aafa593d`.
+The run proved `esp32s3.cpu0` as `running -> halted -> running`, gracefully
+released OpenOCD and both dynamic ports, permitted an exact probe-rs reattach,
+and recovered zero-transmit UART heartbeats. CPU1 examination still fails on
+this fixture and remains unqualified.
+
 Native probe discovery is available through the embedded probe-rs library:
 
 ```console
@@ -567,9 +575,9 @@ Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
 watchpoints, asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,
 and non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD
-`running -> halted -> running` command now passes controlled process/Tcl and
-restoration regressions; it remains behind a new exact-digest physical
-acceptance and does not expose general execution control. The core
+`running -> halted -> running` command now passes controlled process/Tcl
+regressions and exact-digest physical acceptance on ESP32-S3 CPU0; it does not
+expose general execution control. The core
 status/halt/run/continue/continue-until-halt/step contract is complete in
 Replay. Its session-scoped native path, idle lease expiry, and slot-addressable
 hardware breakpoints are accepted on ESP32-S3 CPU0; live attach negotiates two

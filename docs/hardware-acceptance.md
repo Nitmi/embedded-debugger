@@ -661,3 +661,46 @@ does not accept CPU1, symbols or ELF loading, explicit register/memory/stack
 inspection, breakpoints, watchpoints, general execution control, OpenOCD flash,
 arbitrary MI/Tcl/monitor commands, or digest binding of the runtime USB adapter
 identity and dynamically selected port numbers.
+
+## Direct OpenOCD target-state roundtrip acceptance (2026-08-24)
+
+- The user independently confirmed exact digest
+  `06d650bc97d6f055572591a411a6a3be4c60979194aded349d32e869aafa593d`.
+  It bound expected target `esp32s3.cpu0`, OpenOCD SHA-256
+  `58ceca283262cd313fdb6b4ba94195b01502a15dc61b6ae0b986077449010179`,
+  `esp32s3-builtin.cfg` SHA-256
+  `62f5bb4f81cf28455bab48d158227c3f4f280dcaab0838e0472c4249e7696611`,
+  a 3000 ms transition deadline, and the fixed
+  `target current / curstate / halt / resume / shutdown` protocol.
+- COM3 was re-enumerated immediately before execution as exact USB device
+  `303A:1001 / E0:72:A1:D4:1F:DC`. A five-second monitor at 115200 baud with
+  DTR/RTS false and zero transmitted bytes received consecutive heartbeats
+  `12580..12584` (209 bytes).
+- The single confirmed test started OpenOCD on dynamic loopback Tcl/GDB ports
+  12171/12172 and proved readiness in 110 ms. It validated the exact current
+  target and initial `running` state, observed `halted` after the fixed halt in
+  29 ms, and observed final `running` after the fixed resume in 2 ms. The test
+  requested no reset, GDB/monitor operation, register/memory/stack read,
+  breakpoint, flash, or arbitrary Tcl command.
+- OpenOCD accepted framed `shutdown`, exited 0 gracefully in 11 ms, and was not
+  force-killed. Process-tree cleanup completed; stdout and stderr fully drained
+  without truncation, oversized lines, dropped events, or read errors. No
+  related process or listener on 12171/12172 remained.
+- OpenOCD examined CPU0 successfully but again reported CPU1 examination
+  failure with `Unexpected OCD_ID = 00000000`; this acceptance does not qualify
+  CPU1. The digest also does not bind runtime adapter identity, dynamic port
+  numbers, search-tree contents, transitive Tcl sources, or configuration
+  semantics.
+- A subsequent exact probe-rs attach/disconnect on
+  `303a:1001:E0:72:A1:D4:1F:DC` succeeded, proving probe release. A final
+  five-second DTR/RTS-false, zero-transmit UART monitor received consecutive
+  heartbeats `12665..12668` after one partial log record (185 bytes), proving
+  observable application recovery. Final process, port, and COM identity
+  checks were clean. Evidence is retained under
+  `target/hardware-acceptance/2026-08-24-openocd-target-roundtrip`.
+
+This accepts only the exact, running-origin, direct-Tcl
+`esp32s3.cpu0 running -> halted -> running` roundtrip and its restoration and
+cleanup guarantees. It does not accept CPU1, reset, durable halt, general target
+discovery/control, debugger data access, breakpoints/watchpoints, flash,
+arbitrary commands, or broader configuration trust.
