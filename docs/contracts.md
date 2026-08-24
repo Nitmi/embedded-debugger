@@ -288,6 +288,54 @@ capabilities. ELF/symbol loading, memory/stack reads, breakpoints/watchpoints,
 general execution control, flash, monitor input, and arbitrary MI/Tcl remain
 false.
 
+## Confirmed OpenOCD bounded memory snapshot
+
+`openocd memory plan` reuses the exact OpenOCD/GDB/session inputs and requires
+`--address`, `--length`, `--region-start`, `--region-length`, and
+`--region-kind ram|nvm`. Address arithmetic, the 1..=4096-byte request limit,
+region non-emptiness, overflow, and complete containment are validated before
+any executable or configuration lookup. MMIO and unknown region kinds are not
+accepted.
+
+The declared region is a user-confirmed safety input, not a discovered target
+memory map. Its kind and bounds, the exact request, the concrete memory command,
+complete-coverage response policy, tool/config/profile identities, deadlines,
+target restoration policy, effects, and confirmation limits are bound in an
+independent digest. `declared_region_semantics_verified` and
+`target_memory_map_semantics_bound` remain false. A wrong region declaration can
+still select MMIO or another side-effectful target address.
+
+The operation remains `R2_DEVICE_WRITE` because OpenOCD configuration is Tcl,
+the optional Xtensa profile is native host code, attach handlers may probe
+flash/reset/halt, and attachment interrupts the target. A confirmed test
+requires the exact selected target to start `running` and permits only:
+
+```text
+1-gdb-version                                             -> 1^done
+2-target-select remote 127.0.0.1:<dynamic-port>          -> 2^connected
+3-data-read-memory-bytes <confirmed-address> <length>    -> 3^done
+4-target-detach                                           -> 4^done
+5-gdb-exit                                                -> 5^exit
+```
+
+The `memory` result must be a structured list of tuples containing exactly
+`begin`, `offset`, `end`, and hexadecimal `contents`. Multiple blocks are
+accepted only in strict ascending offset order from zero, with no gap, overlap,
+duplicate, extra range, or missing byte. Each `begin` must equal the confirmed
+address plus `offset`; `end` is treated as exclusive and its span must equal the
+decoded content length. The blocks must cover the entire confirmed request.
+Malformed hexadecimal, mismatched metadata, inaccessible gaps, partial reads,
+and unexpected fields are `PROTOCOL_ERROR`.
+
+A complete report returns lowercase hex data, SHA-256, and block evidence. A
+connected-path failure still attempts fixed token-4 detach before token-5 exit;
+all paths then prove the initial selected target `running`, using only the one
+fixed resume fallback when needed, and clean up OpenOCD. Failure is not retried
+automatically. Success enables only this bounded memory read. Symbols/ELF,
+register/stack commands, memory writes, breakpoints/watchpoints, general
+execution control, flash, monitor input, arbitrary MI/Tcl, and unverified
+region inference remain unavailable.
+
 ## Confirmed OpenOCD target state roundtrip
 
 `openocd target plan` accepts one exact OpenOCD executable, at least one

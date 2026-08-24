@@ -21,7 +21,10 @@ use serde_gdbmi::parser::{DataSymbol, ResponseBody as StructuredResponseBody, Va
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::error::{DebugError, ErrorCode, Result, SuggestedAction};
+use crate::{
+    error::{DebugError, ErrorCode, Result, SuggestedAction},
+    model::{Address, MAX_INLINE_MEMORY_READ_BYTES},
+};
 
 pub const DEFAULT_GDB_VERSION_TIMEOUT_MS: u64 = 10_000;
 pub const MIN_GDB_VERSION_TIMEOUT_MS: u64 = 100;
@@ -60,6 +63,9 @@ const REGISTER_EXIT_TOKEN: u64 = 6;
 const REGISTER_NAMES_COMMAND: &str = "-data-list-register-names";
 const REGISTER_VALUES_COMMAND_PLACEHOLDER: &str =
     "-data-list-register-values --skip-unavailable x <resolved_register_numbers>";
+const MEMORY_READ_TOKEN: u64 = 3;
+const MEMORY_DETACH_TOKEN: u64 = 4;
+const MEMORY_EXIT_TOKEN: u64 = 5;
 const MI_LAUNCH_ARGUMENTS: [&str; 4] = ["--nx", "--nh", "--quiet", "--interpreter=mi2"];
 pub(super) const XTENSA_GNU_CONFIG_ENV: &str = "XTENSA_GNU_CONFIG";
 
@@ -266,6 +272,27 @@ pub struct GdbMiRegisterValue {
     pub value: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiMemoryBlock {
+    pub begin: Address,
+    pub offset_bytes: u64,
+    pub end_exclusive: Address,
+    pub length_bytes: u64,
+    pub contents: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiMemorySnapshot {
+    pub address: Address,
+    pub length_bytes: u64,
+    pub end_exclusive: Address,
+    pub encoding: String,
+    pub data: String,
+    pub sha256: String,
+    pub complete_coverage: bool,
+    pub blocks: Vec<GdbMiMemoryBlock>,
+}
+
 pub(super) struct RemoteGdbExecution {
     pub endpoint: String,
     pub startup_elapsed: Duration,
@@ -301,6 +328,31 @@ pub(super) struct RemoteRegisterExecution {
     pub record_counts: GdbMiRecordCounts,
     pub shutdown: GdbMiShutdown,
     pub output: GdbMiOutput,
+}
+
+pub(super) struct RemoteMemoryExecution {
+    pub endpoint: String,
+    pub startup_elapsed: Duration,
+    pub version_elapsed: Duration,
+    pub version_result_class: String,
+    pub version_stream_records: u64,
+    pub connect_elapsed: Duration,
+    pub connect_result_class: String,
+    pub read_elapsed: Duration,
+    pub read_result_class: String,
+    pub read_command: String,
+    pub snapshot: GdbMiMemorySnapshot,
+    pub detach_elapsed: Duration,
+    pub detach_result_class: String,
+    pub record_counts: GdbMiRecordCounts,
+    pub shutdown: GdbMiShutdown,
+    pub output: GdbMiOutput,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RemoteMemoryRequest {
+    pub address: Address,
+    pub length_bytes: u64,
 }
 
 pub fn inspect_gdb(options: &GdbInspectOptions) -> Result<GdbInspection> {
@@ -551,6 +603,79 @@ pub(super) fn execute_remote_register_snapshot(
     })
 }
 
+pub(super) fn execute_remote_memory_snapshot(
+    executable: &str,
+    xtensa_config: Option<&str>,
+    gdb_port: u16,
+    request: RemoteMemoryRequest,
+    startup_timeout_ms: u64,
+    command_timeout_ms: u64,
+    shutdown_timeout_ms: u64,
+) -> Result<RemoteMemoryExecution> {
+    let endpoint = format!("127.0.0.1:{gdb_port}");
+    let mut command = Command::new(executable);
+    command
+        .args(MI_LAUNCH_ARGUMENTS)
+        .env_remove(XTENSA_GNU_CONFIG_ENV);
+    if let Some(config) = xtensa_config {
+        command.env(XTENSA_GNU_CONFIG_ENV, config);
+    }
+    let mut gdb = ManagedGdb::spawn(command, executable, MEMORY_EXIT_TOKEN)?;
+    let lifecycle = match gdb.run_memory_lifecycle(
+        &endpoint,
+        request.address,
+        request.length_bytes,
+        Duration::from_millis(startup_timeout_ms),
+        Duration::from_millis(command_timeout_ms),
+        Duration::from_millis(shutdown_timeout_ms),
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(failure) => {
+            return Err(finalize_failure(gdb, failure, shutdown_timeout_ms));
+        }
+    };
+
+    let mut shutdown = gdb.cleanup(Duration::from_millis(shutdown_timeout_ms));
+    let record_counts = gdb.record_counts.clone();
+    let output = gdb.finish_output();
+    shutdown.process_tree_cleanup_complete &= output_streams_closed(&output);
+    if !shutdown.command_sent
+        || !shutdown.result_observed
+        || !shutdown.graceful
+        || !shutdown.exit_success
+        || !shutdown.process_tree_cleanup_complete
+    {
+        return Err(protocol_error_with_lifecycle(
+            "memory-snapshot GDB/MI process did not complete a graceful shutdown",
+            json!({"endpoint": endpoint}),
+            &shutdown,
+            &output,
+        ));
+    }
+    validate_complete_output(&output).map_err(|message| {
+        protocol_error_with_lifecycle(message, json!({"endpoint": endpoint}), &shutdown, &output)
+    })?;
+
+    Ok(RemoteMemoryExecution {
+        endpoint,
+        startup_elapsed: lifecycle.startup_elapsed,
+        version_elapsed: lifecycle.version_elapsed,
+        version_result_class: lifecycle.version_result_class,
+        version_stream_records: lifecycle.version_stream_records,
+        connect_elapsed: lifecycle.connect_elapsed,
+        connect_result_class: lifecycle.connect_result_class,
+        read_elapsed: lifecycle.read_elapsed,
+        read_result_class: lifecycle.read_result_class,
+        read_command: lifecycle.read_command,
+        snapshot: lifecycle.snapshot,
+        detach_elapsed: lifecycle.detach_elapsed,
+        detach_result_class: lifecycle.detach_result_class,
+        record_counts,
+        shutdown,
+        output,
+    })
+}
+
 fn protocol_contract() -> GdbMiProtocol {
     GdbMiProtocol {
         interpreter: "mi2".to_string(),
@@ -655,6 +780,48 @@ pub(super) fn register_protocol_contract() -> GdbMiProtocol {
             },
             GdbMiPlannedCommand {
                 token: REGISTER_EXIT_TOKEN,
+                command: EXIT_COMMAND.to_string(),
+                expected_result_class: "exit".to_string(),
+            },
+        ],
+    }
+}
+
+pub(super) fn memory_protocol_contract(address: Address, length_bytes: u64) -> GdbMiProtocol {
+    GdbMiProtocol {
+        interpreter: "mi2".to_string(),
+        launch_arguments: MI_LAUNCH_ARGUMENTS
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        initialization_files_enabled: false,
+        input_encoding: "ascii".to_string(),
+        line_terminator: "lf".to_string(),
+        token_correlation_required: true,
+        process_isolation: process_isolation().to_string(),
+        commands: vec![
+            GdbMiPlannedCommand {
+                token: VERSION_TOKEN,
+                command: VERSION_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REMOTE_SELECT_TOKEN,
+                command: REMOTE_SELECT_COMMAND_PLACEHOLDER.to_string(),
+                expected_result_class: "connected".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: MEMORY_READ_TOKEN,
+                command: memory_read_command(address, length_bytes),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: MEMORY_DETACH_TOKEN,
+                command: REMOTE_DETACH_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: MEMORY_EXIT_TOKEN,
                 command: EXIT_COMMAND.to_string(),
                 expected_result_class: "exit".to_string(),
             },
@@ -1375,6 +1542,129 @@ impl ManagedGdb {
         failure
     }
 
+    fn run_memory_lifecycle(
+        &mut self,
+        endpoint: &str,
+        address: Address,
+        length_bytes: u64,
+        startup_timeout: Duration,
+        command_timeout: Duration,
+        shutdown_timeout: Duration,
+    ) -> std::result::Result<MemoryLifecycleSuccess, LifecycleFailure> {
+        let startup_deadline = self.started + startup_timeout;
+        self.wait_for_prompt(startup_deadline)?;
+        let startup_elapsed = self.started.elapsed();
+
+        let streams_before_version = stream_record_count(&self.record_counts);
+        let version_started = Instant::now();
+        self.send_command(VERSION_TOKEN, VERSION_COMMAND)?;
+        let version_result_class = self.wait_for_result(VERSION_TOKEN, "done", startup_deadline)?;
+        let version_elapsed = version_started.elapsed();
+        let version_stream_records =
+            stream_record_count(&self.record_counts).saturating_sub(streams_before_version);
+
+        let connect_command = format!("-target-select remote {endpoint}");
+        let connect_started = Instant::now();
+        self.send_command(REMOTE_SELECT_TOKEN, &connect_command)?;
+        let connect_result_class = self.wait_for_result(
+            REMOTE_SELECT_TOKEN,
+            "connected",
+            connect_started + command_timeout,
+        )?;
+        let connect_elapsed = connect_started.elapsed();
+
+        let snapshot = match self.run_memory_snapshot(address, length_bytes, command_timeout) {
+            Ok(snapshot) => snapshot,
+            Err(failure) => return Err(self.with_memory_detach_attempt(failure, command_timeout)),
+        };
+
+        let detach_started = Instant::now();
+        self.send_command(MEMORY_DETACH_TOKEN, REMOTE_DETACH_COMMAND)?;
+        let detach_result_class = self.wait_for_result(
+            MEMORY_DETACH_TOKEN,
+            "done",
+            detach_started + command_timeout,
+        )?;
+        let detach_elapsed = detach_started.elapsed();
+
+        self.send_command(MEMORY_EXIT_TOKEN, EXIT_COMMAND)?;
+        let shutdown_deadline = Instant::now() + shutdown_timeout;
+        self.wait_for_result(MEMORY_EXIT_TOKEN, "exit", shutdown_deadline)?;
+        self.wait_for_exit(shutdown_deadline)?;
+
+        Ok(MemoryLifecycleSuccess {
+            startup_elapsed,
+            version_elapsed,
+            version_result_class,
+            version_stream_records,
+            connect_elapsed,
+            connect_result_class,
+            read_elapsed: snapshot.read_elapsed,
+            read_result_class: snapshot.read_result_class,
+            read_command: snapshot.read_command,
+            snapshot: snapshot.snapshot,
+            detach_elapsed,
+            detach_result_class,
+        })
+    }
+
+    fn run_memory_snapshot(
+        &mut self,
+        address: Address,
+        length_bytes: u64,
+        command_timeout: Duration,
+    ) -> std::result::Result<MemorySnapshotSuccess, LifecycleFailure> {
+        let read_command = memory_read_command(address, length_bytes);
+        let read_started = Instant::now();
+        self.send_command(MEMORY_READ_TOKEN, &read_command)?;
+        let read_result =
+            self.wait_for_result_record(MEMORY_READ_TOKEN, "done", read_started + command_timeout)?;
+        let read_elapsed = read_started.elapsed();
+        let snapshot = parse_memory_snapshot(&read_result.variables, address, length_bytes)?;
+
+        Ok(MemorySnapshotSuccess {
+            read_elapsed,
+            read_result_class: read_result.class,
+            read_command,
+            snapshot,
+        })
+    }
+
+    fn with_memory_detach_attempt(
+        &mut self,
+        mut failure: LifecycleFailure,
+        command_timeout: Duration,
+    ) -> LifecycleFailure {
+        let started = Instant::now();
+        let attempt = self
+            .send_command(MEMORY_DETACH_TOKEN, REMOTE_DETACH_COMMAND)
+            .and_then(|()| {
+                self.wait_for_result(MEMORY_DETACH_TOKEN, "done", started + command_timeout)
+            });
+        let evidence = match attempt {
+            Ok(result_class) => json!({
+                "attempted": true,
+                "complete": true,
+                "token": MEMORY_DETACH_TOKEN,
+                "command": REMOTE_DETACH_COMMAND,
+                "result_class": result_class,
+                "elapsed_ms": duration_ms(started.elapsed()),
+            }),
+            Err(detach_failure) => json!({
+                "attempted": true,
+                "complete": false,
+                "token": MEMORY_DETACH_TOKEN,
+                "command": REMOTE_DETACH_COMMAND,
+                "elapsed_ms": duration_ms(started.elapsed()),
+                "failure": lifecycle_failure_value(&detach_failure),
+            }),
+        };
+        let mut details = failure.details.as_object().cloned().unwrap_or_default();
+        details.insert("cleanup_detach".to_string(), evidence);
+        failure.details = Value::Object(details);
+        failure
+    }
+
     fn wait_for_prompt(&mut self, deadline: Instant) -> std::result::Result<(), LifecycleFailure> {
         loop {
             match self.next_record(deadline, "startup prompt")? {
@@ -1779,6 +2069,30 @@ struct RegisterSnapshotSuccess {
 }
 
 #[derive(Debug)]
+struct MemoryLifecycleSuccess {
+    startup_elapsed: Duration,
+    version_elapsed: Duration,
+    version_result_class: String,
+    version_stream_records: u64,
+    connect_elapsed: Duration,
+    connect_result_class: String,
+    read_elapsed: Duration,
+    read_result_class: String,
+    read_command: String,
+    snapshot: GdbMiMemorySnapshot,
+    detach_elapsed: Duration,
+    detach_result_class: String,
+}
+
+#[derive(Debug)]
+struct MemorySnapshotSuccess {
+    read_elapsed: Duration,
+    read_result_class: String,
+    read_command: String,
+    snapshot: GdbMiMemorySnapshot,
+}
+
+#[derive(Debug)]
 struct MiResultRecord {
     class: String,
     variables: HashMap<String, MiValue>,
@@ -1987,6 +2301,214 @@ fn parse_register_values(
             })
         })
         .collect()
+}
+
+fn memory_read_command(address: Address, length_bytes: u64) -> String {
+    format!("-data-read-memory-bytes 0x{:x} {length_bytes}", address.0)
+}
+
+fn parse_memory_snapshot(
+    variables: &HashMap<String, MiValue>,
+    address: Address,
+    length_bytes: u64,
+) -> std::result::Result<GdbMiMemorySnapshot, LifecycleFailure> {
+    if length_bytes == 0 || length_bytes > MAX_INLINE_MEMORY_READ_BYTES {
+        return Err(protocol_failure(
+            "GDB/MI memory snapshot request exceeded the supported byte range",
+            json!({
+                "length_bytes": length_bytes,
+                "minimum": 1,
+                "maximum": MAX_INLINE_MEMORY_READ_BYTES,
+            }),
+        ));
+    }
+    let end_exclusive = address.0.checked_add(length_bytes).ok_or_else(|| {
+        protocol_failure(
+            "GDB/MI memory snapshot request overflowed the address space",
+            json!({"address": address, "length_bytes": length_bytes}),
+        )
+    })?;
+    let values = exact_list_variable(variables, "memory", "memory snapshot")?;
+    if values.is_empty() {
+        return Err(protocol_failure(
+            "GDB/MI memory snapshot returned no readable blocks",
+            json!({"address": address, "length_bytes": length_bytes}),
+        ));
+    }
+    let maximum_blocks = usize::try_from(length_bytes).unwrap_or(usize::MAX);
+    if values.len() > maximum_blocks {
+        return Err(protocol_failure(
+            "GDB/MI memory snapshot returned more blocks than requested bytes",
+            json!({
+                "block_count": values.len(),
+                "length_bytes": length_bytes,
+            }),
+        ));
+    }
+
+    let mut expected_offset = 0_u64;
+    let mut bytes = Vec::with_capacity(maximum_blocks);
+    let mut blocks = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let MiValue::Dict(fields) = value else {
+            return Err(protocol_failure(
+                "GDB/MI memory list contained a non-tuple entry",
+                json!({"block_index": index}),
+            ));
+        };
+        if fields.len() != 4 {
+            return Err(protocol_failure(
+                "GDB/MI memory block did not contain exactly begin, offset, end, and contents",
+                json!({"block_index": index, "field_count": fields.len()}),
+            ));
+        }
+        let begin = parse_hex_u64_field(fields, "begin", index)?;
+        let offset = parse_hex_u64_field(fields, "offset", index)?;
+        let end = parse_hex_u64_field(fields, "end", index)?;
+        if offset != expected_offset {
+            return Err(protocol_failure(
+                "GDB/MI memory blocks did not provide ordered gap-free coverage",
+                json!({
+                    "block_index": index,
+                    "expected_offset_bytes": expected_offset,
+                    "observed_offset_bytes": offset,
+                }),
+            ));
+        }
+        let expected_begin = address.0.checked_add(offset).ok_or_else(|| {
+            protocol_failure(
+                "GDB/MI memory block begin overflowed the requested address",
+                json!({"block_index": index, "address": address, "offset_bytes": offset}),
+            )
+        })?;
+        if begin != expected_begin {
+            return Err(protocol_failure(
+                "GDB/MI memory block begin did not match its requested-relative offset",
+                json!({
+                    "block_index": index,
+                    "expected_begin": Address(expected_begin),
+                    "observed_begin": Address(begin),
+                }),
+            ));
+        }
+        if end <= begin || end > end_exclusive {
+            return Err(protocol_failure(
+                "GDB/MI memory block end was outside the requested range",
+                json!({
+                    "block_index": index,
+                    "begin": Address(begin),
+                    "end_exclusive": Address(end),
+                    "request_end_exclusive": Address(end_exclusive),
+                }),
+            ));
+        }
+
+        let contents = exact_string_field(fields, "contents", "memory block")?;
+        if contents.is_empty()
+            || contents.len() > (MAX_INLINE_MEMORY_READ_BYTES as usize) * 2
+            || !contents.len().is_multiple_of(2)
+            || !contents.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(protocol_failure(
+                "GDB/MI memory block contained invalid bounded hexadecimal contents",
+                json!({
+                    "block_index": index,
+                    "hex_digits": contents.len(),
+                    "maximum_hex_digits": MAX_INLINE_MEMORY_READ_BYTES * 2,
+                }),
+            ));
+        }
+        let block_bytes = hex::decode(contents).map_err(|_| {
+            protocol_failure(
+                "GDB/MI memory block hexadecimal contents could not be decoded",
+                json!({"block_index": index}),
+            )
+        })?;
+        let block_length = u64::try_from(block_bytes.len()).map_err(|_| {
+            protocol_failure(
+                "GDB/MI memory block length exceeded the supported range",
+                json!({"block_index": index}),
+            )
+        })?;
+        if end - begin != block_length {
+            return Err(protocol_failure(
+                "GDB/MI memory block address span did not match its decoded contents",
+                json!({
+                    "block_index": index,
+                    "address_span": end - begin,
+                    "decoded_bytes": block_length,
+                }),
+            ));
+        }
+        expected_offset = expected_offset.checked_add(block_length).ok_or_else(|| {
+            protocol_failure(
+                "GDB/MI memory block coverage overflowed",
+                json!({"block_index": index}),
+            )
+        })?;
+        bytes.extend_from_slice(&block_bytes);
+        blocks.push(GdbMiMemoryBlock {
+            begin: Address(begin),
+            offset_bytes: offset,
+            end_exclusive: Address(end),
+            length_bytes: block_length,
+            contents: contents.to_ascii_lowercase(),
+        });
+    }
+
+    if expected_offset != length_bytes {
+        return Err(protocol_failure(
+            "GDB/MI memory blocks did not cover every requested byte",
+            json!({
+                "requested_length_bytes": length_bytes,
+                "covered_length_bytes": expected_offset,
+                "unavailable_policy": "fail",
+            }),
+        ));
+    }
+
+    Ok(GdbMiMemorySnapshot {
+        address,
+        length_bytes,
+        end_exclusive: Address(end_exclusive),
+        encoding: "hex".to_string(),
+        data: hex::encode(&bytes),
+        sha256: hex::encode(Sha256::digest(&bytes)),
+        complete_coverage: true,
+        blocks,
+    })
+}
+
+fn parse_hex_u64_field(
+    fields: &HashMap<String, MiValue>,
+    key: &str,
+    block_index: usize,
+) -> std::result::Result<u64, LifecycleFailure> {
+    let value = exact_string_field(fields, key, "memory block")?;
+    let Some(digits) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    else {
+        return Err(protocol_failure(
+            "GDB/MI memory block address metadata was not hexadecimal",
+            json!({"block_index": block_index, "field": key, "value": bounded_line(value)}),
+        ));
+    };
+    if digits.is_empty()
+        || digits.len() > 16
+        || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(protocol_failure(
+            "GDB/MI memory block address metadata had an invalid hexadecimal payload",
+            json!({"block_index": block_index, "field": key, "value": bounded_line(value)}),
+        ));
+    }
+    u64::from_str_radix(digits, 16).map_err(|_| {
+        protocol_failure(
+            "GDB/MI memory block address metadata exceeded 64 bits",
+            json!({"block_index": block_index, "field": key, "value": bounded_line(value)}),
+        )
+    })
 }
 
 fn exact_list_variable<'a>(
@@ -2564,6 +3086,50 @@ mod tests {
     }
 
     #[test]
+    fn memory_results_require_complete_ordered_gap_free_coverage() {
+        let record = parse_record(
+            "3^done,memory=[{begin=\"0x20000004\",offset=\"0x0\",end=\"0x20000008\",contents=\"00010203\"},{begin=\"0x20000008\",offset=\"0x4\",end=\"0x2000000c\",contents=\"AABBCCDD\"}]",
+        )
+        .unwrap();
+        let ParsedRecord::Result { variables, .. } = record else {
+            panic!("expected result record");
+        };
+        let snapshot = parse_memory_snapshot(&variables, Address(0x2000_0004), 8).unwrap();
+        assert_eq!(snapshot.address, Address(0x2000_0004));
+        assert_eq!(snapshot.end_exclusive, Address(0x2000_000c));
+        assert_eq!(snapshot.data, "00010203aabbccdd");
+        assert_eq!(
+            snapshot.sha256,
+            hex::encode(Sha256::digest([0, 1, 2, 3, 0xaa, 0xbb, 0xcc, 0xdd]))
+        );
+        assert!(snapshot.complete_coverage);
+        assert_eq!(snapshot.blocks.len(), 2);
+        assert_eq!(snapshot.blocks[1].offset_bytes, 4);
+        assert_eq!(snapshot.blocks[1].contents, "aabbccdd");
+    }
+
+    #[test]
+    fn memory_results_fail_closed_on_partial_or_malformed_blocks() {
+        let cases = [
+            "3^done,memory=[]",
+            "3^done,memory=[{begin=\"0x20000004\",offset=\"0x0\",end=\"0x20000008\",contents=\"00010203\"}]",
+            "3^done,memory=[{begin=\"0x20000004\",offset=\"0x0\",end=\"0x20000008\",contents=\"00010203\"},{begin=\"0x20000009\",offset=\"0x5\",end=\"0x2000000c\",contents=\"aabbcc\"}]",
+            "3^done,memory=[{begin=\"0x20000005\",offset=\"0x0\",end=\"0x2000000c\",contents=\"0001020304050607\"}]",
+            "3^done,memory=[{begin=\"0x20000004\",offset=\"0x0\",end=\"0x2000000c\",contents=\"00010203\"}]",
+            "3^done,memory=[{begin=\"0x20000004\",offset=\"0x0\",end=\"0x2000000c\",contents=\"not-hex!\"}]",
+            "3^done,memory=[{begin=\"0x20000004\",offset=\"0x0\",end=\"0x2000000c\",contents=\"0001020304050607\",extra=\"x\"}]",
+        ];
+        for line in cases {
+            let record = parse_record(line).unwrap();
+            let ParsedRecord::Result { variables, .. } = record else {
+                panic!("expected result record");
+            };
+            let error = parse_memory_snapshot(&variables, Address(0x2000_0004), 8).unwrap_err();
+            assert_eq!(error.code, ErrorCode::ProtocolError, "{line}");
+        }
+    }
+
+    #[test]
     fn test_options_validate_scalar_bounds_before_executable_lookup() {
         let mut options = GdbMiTestOptions {
             executable: PathBuf::from("missing-gdb"),
@@ -2599,5 +3165,17 @@ mod tests {
         );
         assert_eq!(contract.commands[4].command, REMOTE_DETACH_COMMAND);
         assert_eq!(contract.commands[5].command, EXIT_COMMAND);
+    }
+
+    #[test]
+    fn memory_protocol_contract_binds_the_exact_bounded_read() {
+        let contract = memory_protocol_contract(Address(0x2000_0004), 8);
+        assert_eq!(contract.commands.len(), 5);
+        assert_eq!(
+            contract.commands[2].command,
+            "-data-read-memory-bytes 0x20000004 8"
+        );
+        assert_eq!(contract.commands[3].command, REMOTE_DETACH_COMMAND);
+        assert_eq!(contract.commands[4].command, EXIT_COMMAND);
     }
 }

@@ -2067,6 +2067,182 @@ fn openocd_registers_validate_selection_before_filesystem_inputs() {
 }
 
 #[test]
+fn openocd_memory_plan_binds_range_region_protocol_and_restoration() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let make_plan = || {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .arg("openocd")
+            .arg("memory")
+            .arg("plan")
+            .arg("--openocd-executable")
+            .arg(&openocd)
+            .arg("--gdb-executable")
+            .arg(&gdb)
+            .arg("--expected-target")
+            .arg("fake.cpu0")
+            .arg("--config")
+            .arg(&config)
+            .arg("--search")
+            .arg(directory.path())
+            .arg("--address")
+            .arg("0x20000004")
+            .arg("--length")
+            .arg("8")
+            .arg("--region-start")
+            .arg("0x20000000")
+            .arg("--region-length")
+            .arg("0x1000")
+            .arg("--region-kind")
+            .arg("ram")
+            .arg("--json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Value>(&output).unwrap()
+    };
+    let first = make_plan();
+    let second = make_plan();
+
+    assert_eq!(first["operation"], "openocd.memory.plan");
+    assert_eq!(first["data"]["operation"], "openocd.memory.test");
+    assert_eq!(first["data"]["risk"], "R2_DEVICE_WRITE");
+    assert_eq!(
+        first["data"]["memory_policy"]["requested_address"],
+        "0x20000004"
+    );
+    assert_eq!(
+        first["data"]["memory_policy"]["requested_end_exclusive"],
+        "0x2000000C"
+    );
+    assert_eq!(
+        first["data"]["memory_policy"]["declared_region"]["kind"],
+        "ram"
+    );
+    assert_eq!(
+        first["data"]["protocol"]["commands"][2]["command"],
+        "-data-read-memory-bytes 0x20000004 8"
+    );
+    assert_eq!(
+        first["data"]["target_state_policy"]["normal_restoration_command"],
+        "4-target-detach"
+    );
+    assert_eq!(
+        first["data"]["effects"]["explicit_bounded_memory_read_requested"],
+        true
+    );
+    assert_eq!(
+        first["data"]["effects"]["target_memory_map_semantics_verified"],
+        false
+    );
+    assert_eq!(
+        first["data"]["capabilities"]["bounded_memory_read"],
+        Value::Null
+    );
+    assert_eq!(
+        first["data"]["confirm_digest"],
+        second["data"]["confirm_digest"]
+    );
+}
+
+#[test]
+fn openocd_memory_test_rejects_a_stale_digest_before_tcl_execution() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("memory")
+        .arg("test")
+        .arg("--openocd-executable")
+        .arg(&openocd)
+        .arg("--gdb-executable")
+        .arg(&gdb)
+        .arg("--expected-target")
+        .arg("fake.cpu0")
+        .arg("--config")
+        .arg(&config)
+        .arg("--address")
+        .arg("0x20000004")
+        .arg("--length")
+        .arg("8")
+        .arg("--region-start")
+        .arg("0x20000000")
+        .arg("--region-length")
+        .arg("0x1000")
+        .arg("--region-kind")
+        .arg("ram")
+        .arg("--confirm")
+        .arg("00".repeat(32))
+        .arg("--json")
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.memory.test");
+    assert_eq!(result["error"]["code"], "CONFIRMATION_MISMATCH");
+    assert_eq!(
+        result["error"]["suggested_actions"][0]["action"],
+        "review_openocd_memory_snapshot_plan"
+    );
+    assert!(result["error"]["details"]["openocd_readiness"].is_null());
+}
+
+#[test]
+fn openocd_memory_validates_range_before_filesystem_inputs() {
+    for (address, length) in [("0x20000004", "0"), ("0x30000000", "8")] {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .args([
+                "openocd",
+                "memory",
+                "plan",
+                "--openocd-executable",
+                "deliberately-missing-openocd",
+                "--gdb-executable",
+                "deliberately-missing-gdb",
+                "--expected-target",
+                "fake.cpu0",
+                "--config",
+                "deliberately-missing.cfg",
+                "--address",
+                address,
+                "--length",
+                length,
+                "--region-start",
+                "0x20000000",
+                "--region-length",
+                "0x1000",
+                "--region-kind",
+                "ram",
+                "--json",
+            ])
+            .assert()
+            .code(7)
+            .get_output()
+            .stdout
+            .clone();
+        let result: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(result["operation"], "openocd.memory.plan");
+        assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    }
+}
+
+#[test]
 fn openocd_reset_plan_binds_global_reset_and_selected_target_recovery() {
     let directory = tempdir().unwrap();
     let openocd = write_fake_openocd(directory.path());

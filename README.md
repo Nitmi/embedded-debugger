@@ -186,8 +186,51 @@ their broader disclosed effects even though the explicit data operation is a
 register read. It accepts no ELF, symbols, memory or stack read, breakpoint,
 execution-control command, flash, monitor input, or arbitrary MI/Tcl. Do not
 retry a failed confirmed test automatically. Controlled process and parser
-regressions pass; each physical target still needs a separately reviewed digest
-and acceptance run.
+regressions pass. ESP32-S3 CPU0 has also passed one separately confirmed
+`pc/a0/a1/ps` physical snapshot with verified fallback restoration and UART
+recovery; that acceptance does not extend to CPU1 or another target.
+
+Bounded OpenOCD memory inspection is another independent checkpoint:
+
+```console
+cargo run -- openocd memory plan \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --address 0x20000000 --length 32 \
+  --region-start 0x20000000 --region-length 0x10000 \
+  --region-kind ram \
+  --json
+
+cargo run -- openocd memory test \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --address 0x20000000 --length 32 \
+  --region-start 0x20000000 --region-length 0x10000 \
+  --region-kind ram \
+  --confirm <confirm_digest> \
+  --json
+```
+
+The request must be 1..=4096 bytes and fully contained in an explicitly
+declared `ram` or `nvm` region. The declaration and arithmetic are digest-bound,
+but the tool does not claim that OpenOCD independently verified the target
+memory map; a wrong declaration can still cause a side-effectful read. The
+fixed MI command may return multiple readable blocks, and the wrapper accepts
+them only when their metadata and decoded bytes provide complete ordered
+gap-free coverage of the exact request. Partial or malformed results fail
+closed and still take the fixed detach, target-restoration, and cleanup paths.
+Memory writes, MMIO/unknown declarations, expressions, symbols, stack reads,
+breakpoints, execution control, flash, monitor input, and arbitrary commands
+remain unavailable. Physical target acceptance requires a separately reviewed
+digest and one non-retried run.
 
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
@@ -651,11 +694,14 @@ separately confirmed physical run completed the fixed MI version/connect/
 detach/exit exchange. The fixed fallback restored CPU0 to `running`, both
 process trees and dynamic ports were released, probe-rs reattached, and UART
 heartbeats continued. This accepts only the narrow combined lifecycle. A
-separate selected-register snapshot is implemented behind its own digest and
-controlled regressions but has not yet passed physical acceptance; GDB/MI
-symbols, memory/stack inspection, general ELF/HEX loading, RTT, memory writes,
-Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
-watchpoints, asynchronous request cancellation, durable crash recovery,
+separate selected-register snapshot has passed its own exact-digest ESP32-S3
+CPU0 physical acceptance, including ordered values, fallback restoration,
+process cleanup, and UART recovery. A bounded declared-region memory snapshot
+is implemented behind another independent digest and controlled regressions but
+has not yet passed physical acceptance. GDB/MI symbols, stack inspection,
+general ELF/HEX loading, RTT, memory writes, Generic/MMIO or undeclared-region
+reads, register writes, software/symbolic/conditional breakpoints, watchpoints,
+asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,
 and non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD
 `running -> halted -> running` command now passes controlled process/Tcl

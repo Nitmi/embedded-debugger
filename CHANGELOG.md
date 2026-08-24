@@ -61,7 +61,25 @@ All notable changes to this project will be documented in this file.
   cleanup. Controlled parser, process, restoration, digest, and CLI regressions
   pass. ELF/symbol loading, memory/stack reads, breakpoints/watchpoints, general
   execution control, flash, monitor input, and arbitrary MI/Tcl remain disabled;
-  physical target acceptance still requires a separate confirmed plan.
+  a separately confirmed ESP32-S3 CPU0 run returned ordered `pc/a0/a1/ps`, used
+  the fixed resume fallback, cleaned both processes, and recovered UART
+  heartbeats. CPU1 and other targets remain unqualified.
+- Confirmed `openocd memory plan/test` for one exact 1..=4096-byte read inside
+  an explicitly declared RAM or NVM region. Range, overflow, and containment
+  checks run before host-file access. A separate digest binds the exact address,
+  length, declared-region kind/bounds, concrete five-command MI2 exchange,
+  complete-coverage policy, tool/config/profile identities, deadlines, target,
+  effects, and restoration. Structured parsing accepts multiple GDB memory
+  blocks only when `begin/offset/end/contents` describe ordered gap-free coverage
+  of every requested byte; partial, inaccessible, overlapping, reordered,
+  malformed, or extra results fail closed and still take fixed detach, GDB exit,
+  target restoration, and OpenOCD cleanup paths. Region semantics are explicitly
+  user-confirmed rather than target-map verified, so wrong declarations retain
+  possible side-effectful-read risk and the operation remains R2. Memory writes,
+  MMIO/unknown declarations, expressions, symbols/ELF, register/stack commands,
+  breakpoints, execution control, flash, monitor input, and arbitrary MI/Tcl
+  remain disabled. Controlled parser, process, digest, range, and CLI regressions
+  pass; physical target acceptance still requires a separate confirmed plan.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current

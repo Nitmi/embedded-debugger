@@ -91,7 +91,34 @@ OpenOCD cleanup. Never retry automatically. Success proves only the returned
 selected register values and cleanup for that exact target/tool/profile plan;
 it does not authorize ELF/symbol loading, memory/stack access, breakpoints,
 execution control, flash, monitor commands, arbitrary MI/Tcl, CPU1, or another
-target. Until a physical acceptance is recorded, describe this capability as
+target. ESP32-S3 CPU0 has passed one exact `pc/a0/a1/ps` acceptance run with
+fallback restoration and UART recovery; do not generalize it beyond that
+target and selection.
+
+For explicit OpenOCD memory inspection, use the independent
+`openocd memory plan/test` workflow. Require an exact `--address` and 1..=4096
+`--length` plus `--region-start`, `--region-length`, and explicit
+`--region-kind ram|nvm`. Do not infer the region from an address or accept MMIO,
+unknown, cross-region, overflowing, or unbounded requests. Surface that the
+region is a user-confirmed input: containment is checked and digest-bound, but
+the target memory-map semantics are not independently verified. A wrong region
+declaration may still make a read side effectful.
+
+The memory plan binds the concrete read command and complete-coverage policy in
+its own R2 digest. Require the user to return that exact digest before `test`.
+The fixed test permits only version, remote connect, one
+`-data-read-memory-bytes`, detach, and exit. It accepts split result blocks only
+when their structured `begin/offset/end/contents` metadata and decoded bytes
+cover the whole request in order without gaps or overlaps. Partial,
+inaccessible, malformed, reordered, duplicate, or extra output is failure.
+
+A connected memory failure still attempts fixed detach, GDB exit,
+selected-target running restoration, and OpenOCD cleanup. Never retry
+automatically. Success proves only the exact returned bytes and SHA-256 for the
+confirmed declared range. It does not authorize region inference, memory
+writes, symbols/ELF, register/stack commands, breakpoints, execution control,
+flash, monitor commands, arbitrary MI/Tcl, CPU1, or another target. Until a
+physical acceptance is recorded, describe OpenOCD memory snapshots as
 implemented and controlled-tested, not hardware-qualified.
 
 A complete combined test proves only the selected tools' fixed MI2

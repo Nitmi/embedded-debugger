@@ -9,8 +9,8 @@ use crate::{
         DebugBackend,
         openocd::{
             self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
-            OpenOcdInspectOptions, OpenOcdRegisterSnapshotOptions, OpenOcdServerOptions,
-            OpenOcdTargetOptions,
+            OpenOcdInspectOptions, OpenOcdMemorySnapshotOptions, OpenOcdRegisterSnapshotOptions,
+            OpenOcdServerOptions, OpenOcdTargetOptions,
         },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
@@ -21,7 +21,7 @@ use crate::{
     model::{
         Address, ContinueUntilHaltOptions, CoreExecutionAction,
         DEFAULT_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS, DEFAULT_CONTINUE_UNTIL_HALT_TIMEOUT_MS,
-        FlashRange,
+        FlashRange, MemoryRegionKind,
     },
     service::{DebugService, inspect_evidence},
     session, supervisor,
@@ -109,6 +109,10 @@ pub enum OpenOcdCommand {
     Reset {
         #[command(subcommand)]
         command: OpenOcdResetCommand,
+    },
+    Memory {
+        #[command(subcommand)]
+        command: OpenOcdMemoryCommand,
     },
     Registers {
         #[command(subcommand)]
@@ -367,6 +371,71 @@ pub struct OpenOcdRegistersTestSelection {
 
     #[arg(long, help = "exact confirm_digest returned by openocd registers plan")]
     pub confirm: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdMemoryCommand {
+    Plan(OpenOcdMemorySelection),
+    Test(OpenOcdMemoryTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdMemorySelection {
+    #[command(flatten)]
+    pub session: OpenOcdSessionSelection,
+
+    #[arg(long, value_name = "ADDRESS", value_parser = parse_address)]
+    pub address: Address,
+
+    #[arg(
+        long,
+        value_name = "LENGTH",
+        value_parser = parse_length,
+        help = "exact byte count, limited to 4096"
+    )]
+    pub length: u64,
+
+    #[arg(long, value_name = "ADDRESS", value_parser = parse_address)]
+    pub region_start: Address,
+
+    #[arg(
+        long,
+        value_name = "LENGTH",
+        value_parser = parse_length,
+        help = "declared containing RAM/NVM region length"
+    )]
+    pub region_length: u64,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "confirmed region type; MMIO and unknown regions are not accepted"
+    )]
+    pub region_kind: OpenOcdMemoryRegionKindArg,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdMemoryTestSelection {
+    #[command(flatten)]
+    pub memory: OpenOcdMemorySelection,
+
+    #[arg(long, help = "exact confirm_digest returned by openocd memory plan")]
+    pub confirm: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OpenOcdMemoryRegionKindArg {
+    Ram,
+    Nvm,
+}
+
+impl From<OpenOcdMemoryRegionKindArg> for MemoryRegionKind {
+    fn from(value: OpenOcdMemoryRegionKindArg) -> Self {
+        match value {
+            OpenOcdMemoryRegionKindArg::Ram => Self::Ram,
+            OpenOcdMemoryRegionKindArg::Nvm => Self::Nvm,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -819,6 +888,18 @@ impl Cli {
             } => "openocd.reset.test",
             Command::Openocd {
                 command:
+                    OpenOcdCommand::Memory {
+                        command: OpenOcdMemoryCommand::Plan(_),
+                    },
+            } => "openocd.memory.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Memory {
+                        command: OpenOcdMemoryCommand::Test(_),
+                    },
+            } => "openocd.memory.test",
+            Command::Openocd {
+                command:
                     OpenOcdCommand::Registers {
                         command: OpenOcdRegistersCommand::Plan(_),
                     },
@@ -1205,6 +1286,57 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report
                         .recovery
                         .observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Memory {
+                    command: OpenOcdMemoryCommand::Plan(selection),
+                },
+        } => {
+            let report = openocd::plan_memory_snapshot(&openocd_memory_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.memory.plan",
+                &report,
+                format!(
+                    "OpenOCD bounded memory snapshot plan ready\nRisk: {}\nTarget: {}\nRange: {} + {} byte(s)\nDeclared region: {:?} {} + {} byte(s)\nInitial/final target state: running\nConfirm digest: {}",
+                    report.risk,
+                    report.target_state_policy.expected_current_target,
+                    report.memory_policy.requested_address,
+                    report.memory_policy.requested_length_bytes,
+                    report.memory_policy.declared_region.kind,
+                    report.memory_policy.declared_region.start,
+                    report.memory_policy.declared_region.length_bytes,
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Memory {
+                    command: OpenOcdMemoryCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_memory_snapshot(
+                &openocd_memory_options(&selection.memory),
+                &selection.confirm,
+            )?;
+            Ok(CommandResult::serializable(
+                "openocd.memory.test",
+                &report,
+                format!(
+                    "OpenOCD bounded memory snapshot complete\nTarget: {}\nRange: {} + {} byte(s)\nSHA-256: {}\nTarget state: {} -> {}\nShutdown: graceful",
+                    report.target_restoration.initial.target_name,
+                    report.exchange.snapshot.address,
+                    report.exchange.snapshot.length_bytes,
+                    report.exchange.snapshot.sha256,
+                    report.target_restoration.initial.state,
+                    report
+                        .target_restoration
+                        .final_observation
                         .as_ref()
                         .map_or("missing", |observation| observation.state.as_str()),
                 ),
@@ -1998,6 +2130,17 @@ fn openocd_register_options(
     OpenOcdRegisterSnapshotOptions {
         session: openocd_session_options(&selection.session),
         registers: selection.registers.clone(),
+    }
+}
+
+fn openocd_memory_options(selection: &OpenOcdMemorySelection) -> OpenOcdMemorySnapshotOptions {
+    OpenOcdMemorySnapshotOptions {
+        session: openocd_session_options(&selection.session),
+        address: selection.address,
+        length_bytes: selection.length,
+        region_start: selection.region_start,
+        region_length_bytes: selection.region_length,
+        region_kind: selection.region_kind.into(),
     }
 }
 
