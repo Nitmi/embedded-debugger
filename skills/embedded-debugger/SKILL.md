@@ -44,6 +44,8 @@ cleanup. Require the exact reset digest immediately before execution. Do not
 claim non-selected target restoration, and never retry a failed reset test
 automatically. Success does not authorize `reset init`, another reset mode,
 GDB, target-data access, breakpoints, flash, monitor commands, or user Tcl.
+ESP32-S3 CPU0 has passed this exact narrow workflow; do not generalize that
+acceptance to CPU1, another target, or any excluded capability.
 
 Use `openocd gdb inspect --executable <PATH> --json` to prove an exact GNU GDB
 file, then `openocd gdb test --executable <PATH> --json` to prove only the

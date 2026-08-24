@@ -342,6 +342,14 @@ verification. It does not enable `reset init`, configurable reset modes,
 non-selected target restoration, GDB/MI, register/memory/stack reads,
 breakpoints/watchpoints, flash, monitor commands, or arbitrary Tcl.
 
+ESP32-S3 CPU0 physical acceptance under digest
+`534095d32cdd29a88720230ffaaee6dd07edfd4b97fde287e81f436d76d782d6`
+proved reset and recovery catch code 0, selected-target
+`running -> halted -> running`, graceful process-tree cleanup, exact probe
+reattach, and restarted UART heartbeats. OpenOCD also reported resetting CPU1,
+but CPU1 examination failed; its final state and restoration remain unverified.
+This acceptance does not widen any capability excluded above.
+
 `probes test --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` operation. It opens the selected probe, attaches to the
 target, and disconnects without requesting erase, program, reset, halt,

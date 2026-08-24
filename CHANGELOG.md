@@ -72,7 +72,9 @@ All notable changes to this project will be documented in this file.
   fires configuration-defined reset events; non-selected target inventory and
   final states remain unbound and unverified. Controlled regressions pass,
   including nonzero catch code, ineffective reset, and failed recovery paths.
-  Physical acceptance requires a separately confirmed plan.
+  A separately confirmed ESP32-S3 CPU0 run proved reset/recovery catch code 0,
+  `running -> halted -> running`, graceful process-tree cleanup, exact probe
+  reuse, and restarted UART heartbeats. CPU1 was reset but remains unqualified.
 - Versioned success and error envelopes for Agent-safe CLI automation.
 - Stable error codes and exit codes.
 - Backend capability model and deterministic Replay backend.
@@ -216,7 +218,7 @@ All notable changes to this project will be documented in this file.
   a confirmed fixed remote attach/detach lifecycle, and one fixed direct CPU0
   halt/resume roundtrip are implemented; the latter is physically accepted on
   ESP32-S3. A fixed global reset-halt and selected-target recovery workflow is
-  implemented but still awaits physical acceptance. General OpenOCD target
+  also physically accepted on ESP32-S3 CPU0. General OpenOCD target
   discovery/control, configurable reset, non-selected target restoration,
   symbol/ELF loading, register or memory inspection, breakpoints/watchpoints,
   and flashing are not. The MCP adapter

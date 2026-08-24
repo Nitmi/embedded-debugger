@@ -214,7 +214,13 @@ the operation does not inventory, restore, or verify non-selected target states.
 It does not use
 `reset init`, a second reset fallback, GDB, target-data access, breakpoints,
 flash, monitor input, or user Tcl. Do not automatically retry a failure.
-Controlled fixtures pass; physical targets require a separately confirmed plan.
+Controlled fixtures pass. ESP32-S3 CPU0 physical acceptance used digest
+`534095d32cdd29a88720230ffaaee6dd07edfd4b97fde287e81f436d76d782d6`:
+the reset and recovery catch codes were 0, CPU0 proved
+`running -> halted -> running`, OpenOCD cleaned up without a forced kill, the
+exact probe reattached, and zero-transmit UART heartbeats restarted. CPU1 was
+reset but still failed examination, so its final state remains unqualified.
+Every other physical target requires its own separately confirmed plan.
 
 Native probe discovery is available through the embedded probe-rs library:
 
@@ -611,7 +617,7 @@ and non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD
 regressions and exact-digest physical acceptance on ESP32-S3 CPU0; it does not
 expose general execution control. A separate fixed global-reset and
 selected-target-recovery command now passes controlled Tcl/status/cleanup
-regressions but remains behind exact-digest physical acceptance; it does not
+regressions and exact-digest physical acceptance on ESP32-S3 CPU0; it does not
 claim non-selected target restoration. The core
 status/halt/run/continue/continue-until-halt/step contract is complete in
 Replay. Its session-scoped native path, idle lease expiry, and slot-addressable
