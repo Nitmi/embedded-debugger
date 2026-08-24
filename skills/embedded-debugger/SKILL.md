@@ -23,6 +23,17 @@ Use `openocd inspect` before any OpenOCD configuration execution. Configuration
 files are Tcl; crossing into `openocd server test` requires a reviewed
 `openocd server plan` and its exact confirmation digest.
 
+For direct OpenOCD halt/run qualification, run `openocd target plan` with the
+exact executable, top-level config/search inputs, and exact
+`--expected-target`. Surface the R2 effects, including target interruption,
+partial external I/O, and unbound runtime adapter identity. Require the user to
+return the exact digest before `openocd target test`. The fixed test accepts
+only a running origin, proves halted, always attempts the fixed resume after
+the halt result, and requires final running plus complete server cleanup. Do
+not retry failure automatically. A success proves only fixed selected-target
+halt/run; it does not authorize reset, GDB, register/memory/stack access,
+breakpoints, flash, monitor commands, or arbitrary Tcl.
+
 Use `openocd gdb inspect --executable <PATH> --json` to prove an exact GNU GDB
 file, then `openocd gdb test --executable <PATH> --json` to prove only the
 fixed local MI2 version/exit lifecycle. A successful

@@ -49,6 +49,16 @@ All notable changes to this project will be documented in this file.
   UART heartbeats. The accepted scope remains the bounded attach/detach
   lifecycle; symbols, target-data commands, breakpoints, flash, and arbitrary
   commands remain disabled.
+- Confirmed `openocd target plan/test` for one fixed direct-Tcl
+  `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
+  top-level config identities, ordered search paths, the expected current
+  target, fixed halt/resume protocol, deadlines, and restoration policy. The
+  test rejects a mismatched or non-running target before control, attempts the
+  fixed resume after every halt result, requires final running, and preserves
+  transition plus server cleanup evidence on failure. It requests no reset,
+  GDB, register/memory/stack read, breakpoint, flash, monitor, or arbitrary Tcl
+  command. Controlled lifecycle regressions pass; physical ESP32-S3 acceptance
+  requires a separately confirmed plan.
 - Versioned success and error envelopes for Agent-safe CLI automation.
 - Stable error codes and exit codes.
 - Backend capability model and deterministic Replay backend.

@@ -145,6 +145,37 @@ this workflow, so the confirmation boundary reports runtime adapter identity as
 unbound; use an adapter-specific serial setting in reviewed configuration when
 the driver supports one.
 
+Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
+
+```console
+cargo run -- openocd target plan \
+  --executable path/to/openocd \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --json
+
+cargo run -- openocd target test \
+  --executable path/to/openocd \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --confirm <confirm_digest> \
+  --json
+```
+
+The digest binds the exact OpenOCD/config identities, fixed Tcl protocol,
+expected current-target name, deadlines, and `running -> halted -> running`
+policy. The test refuses a mismatched target or non-running origin before any
+control command. It sends only fixed `targets <validated-name>; halt` and
+`targets <validated-name>; resume`, polls the selected target after each, and
+attempts resume after every halt result. Final `running` is mandatory even on a
+failed halt path. This remains `R2_DEVICE_WRITE` because configuration Tcl is
+not semantically bound; the explicit halt can also interrupt peripheral I/O at
+a partial record boundary. It does not request reset, GDB, registers, memory,
+stack, breakpoints, flash, monitor input, or arbitrary Tcl. Do not retry a
+failed test automatically because target outcome may be indeterminate.
+
 Native probe discovery is available through the embedded probe-rs library:
 
 ```console
@@ -535,7 +566,10 @@ ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
 watchpoints, asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,
-and non-boot NVM writes are not yet exposed. The core
+and non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD
+`running -> halted -> running` command now passes controlled process/Tcl and
+restoration regressions; it remains behind a new exact-digest physical
+acceptance and does not expose general execution control. The core
 status/halt/run/continue/continue-until-halt/step contract is complete in
 Replay. Its session-scoped native path, idle lease expiry, and slot-addressable
 hardware breakpoints are accepted on ESP32-S3 CPU0; live attach negotiates two

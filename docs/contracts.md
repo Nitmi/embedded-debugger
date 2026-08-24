@@ -238,6 +238,56 @@ Symbol loading, register/memory/stack reads, breakpoints, watchpoints, general
 execution control, flash, and arbitrary commands remain false. Halted-origin
 sessions are not supported by this checkpoint.
 
+## Confirmed OpenOCD target state roundtrip
+
+`openocd target plan` accepts one exact OpenOCD executable, at least one
+top-level configuration, ordered search paths, one required exact
+`--expected-target`, the managed-server deadlines, and a target transition
+deadline. The target deadline defaults to 3000 ms and is bounded to
+100..=30000 ms. Target syntax and the deadline are rejected before executable
+or configuration lookup.
+
+The returned plan is `R2_DEVICE_WRITE`. Its digest binds the exact OpenOCD
+executable identity/version, top-level configuration manifests, ordered search
+paths, loopback/dynamic endpoint lifecycle, fixed Tcl protocol, exact expected
+current-target name, all deadlines, and the `running -> halted -> running`
+policy. Search-directory contents, transitive Tcl sources, configuration
+semantics, runtime USB adapter identity, and dynamically selected ports remain
+explicitly unbound.
+
+`openocd target test --confirm <DIGEST>` recomputes the plan and rejects a
+mismatch before configuration Tcl executes. After managed-server readiness it
+uses bounded `0x1a`-framed Tcl RPC to execute only this protocol:
+
+```text
+target current                                  -> exact confirmed name
+<validated-current-target> curstate             -> running
+targets <validated-current-target>; halt        -> poll until halted
+targets <validated-current-target>; resume      -> poll until running
+shutdown                                        -> graceful OpenOCD exit
+```
+
+The runtime name must pass the same 128-byte ASCII allow list used by the
+combined GDB session and must exactly equal the confirmed name before target
+control starts. A non-running origin is rejected without a halt or resume.
+After any halt result, including an error or a failure to observe `halted`, the
+tool attempts the one fixed resume transition with a fresh bounded deadline.
+The result is successful only when the halt command cleanly reaches `halted`,
+the resume command cleanly reaches `running`, OpenOCD shuts down gracefully,
+and all logs and process-tree cleanup are complete. Failure evidence preserves
+the initial observation, available halt/resume transitions, final state,
+readiness, shutdown, and bounded logs. A final state other than proven
+`running` is `VERIFICATION_FAILED` and must not be retried automatically.
+
+The explicit halt is a real target-control effect and may interrupt peripheral
+activity or external I/O at a partial record boundary. Reviewed configuration
+or target grouping may also affect target state beyond the selected core, so
+the conservative R2 classification remains. A complete result enables only
+server launch, Tcl RPC, selected-target state observation, fixed halt/run, and
+verified final restoration. Reset, GDB/MI, register/memory/stack reads,
+breakpoints, watchpoints, flash, monitor commands, and arbitrary Tcl remain
+false.
+
 `probes test --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` operation. It opens the selected probe, attaches to the
 target, and disconnects without requesting erase, program, reset, halt,

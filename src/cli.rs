@@ -9,7 +9,7 @@ use crate::{
         DebugBackend,
         openocd::{
             self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
-            OpenOcdInspectOptions, OpenOcdServerOptions,
+            OpenOcdInspectOptions, OpenOcdServerOptions, OpenOcdTargetOptions,
         },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
@@ -112,6 +112,10 @@ pub enum OpenOcdCommand {
     Session {
         #[command(subcommand)]
         command: OpenOcdSessionCommand,
+    },
+    Target {
+        #[command(subcommand)]
+        command: OpenOcdTargetCommand,
     },
 }
 
@@ -325,6 +329,41 @@ pub struct OpenOcdSessionTestSelection {
     pub session: OpenOcdSessionSelection,
 
     #[arg(long, help = "exact confirm_digest returned by openocd session plan")]
+    pub confirm: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdTargetCommand {
+    Plan(OpenOcdTargetSelection),
+    Test(OpenOcdTargetTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdTargetSelection {
+    #[command(flatten)]
+    pub server: OpenOcdServerSelection,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "exact OpenOCD 'target current' name required before target control"
+    )]
+    pub expected_target: String,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_TARGET_STATE_TIMEOUT_MS,
+        help = "bounded halt/resume state transition deadline in milliseconds (100..=30000)"
+    )]
+    pub target_state_timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdTargetTestSelection {
+    #[command(flatten)]
+    pub target: OpenOcdTargetSelection,
+
+    #[arg(long, help = "exact confirm_digest returned by openocd target plan")]
     pub confirm: String,
 }
 
@@ -718,6 +757,18 @@ impl Cli {
                         command: OpenOcdSessionCommand::Test(_),
                     },
             } => "openocd.session.test",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Target {
+                        command: OpenOcdTargetCommand::Plan(_),
+                    },
+            } => "openocd.target.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Target {
+                        command: OpenOcdTargetCommand::Test(_),
+                    },
+            } => "openocd.target.test",
         }
     }
 
@@ -1013,6 +1064,55 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report.openocd.executable.resolved,
                     report.gdb.executable.resolved,
                     report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Target {
+                    command: OpenOcdTargetCommand::Plan(selection),
+                },
+        } => {
+            let report = openocd::plan_target(&openocd_target_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.target.plan",
+                &report,
+                format!(
+                    "OpenOCD target state-roundtrip plan ready\nRisk: {}\nOpenOCD: {}\nTarget: {}\nState sequence: running -> halted -> running\nConfirm digest: {}",
+                    report.risk,
+                    report.openocd.executable.resolved,
+                    report.target_policy.expected_current_target,
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Target {
+                    command: OpenOcdTargetCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_target(
+                &openocd_target_options(&selection.target),
+                &selection.confirm,
+            )?;
+            Ok(CommandResult::serializable(
+                "openocd.target.test",
+                &report,
+                format!(
+                    "OpenOCD target state roundtrip complete\nTarget: {}\nStates: {} -> {} -> {}\nShutdown: graceful",
+                    report.initial.target_name,
+                    report.initial.state,
+                    report
+                        .halt
+                        .observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
+                    report
+                        .resume
+                        .observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
                 ),
             ))
         }
@@ -1693,6 +1793,14 @@ fn openocd_session_options(selection: &OpenOcdSessionSelection) -> OpenOcdGdbSes
         gdb_startup_timeout_ms: selection.gdb_startup_timeout_ms,
         gdb_command_timeout_ms: selection.gdb_command_timeout_ms,
         gdb_shutdown_timeout_ms: selection.gdb_shutdown_timeout_ms,
+        target_state_timeout_ms: selection.target_state_timeout_ms,
+    }
+}
+
+fn openocd_target_options(selection: &OpenOcdTargetSelection) -> OpenOcdTargetOptions {
+    OpenOcdTargetOptions {
+        openocd: openocd_server_options(&selection.server),
+        expected_target: selection.expected_target.clone(),
         target_state_timeout_ms: selection.target_state_timeout_ms,
     }
 }

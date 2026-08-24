@@ -19,6 +19,7 @@ use crate::error::{DebugError, ErrorCode, Result, SuggestedAction};
 mod gdb;
 mod server;
 mod session;
+mod target;
 
 pub use gdb::{
     DEFAULT_GDB_MI_COMMAND_TIMEOUT_MS, DEFAULT_GDB_MI_SHUTDOWN_TIMEOUT_MS,
@@ -47,6 +48,12 @@ pub use session::{
     OpenOcdGdbSessionPlan, OpenOcdGdbSessionTestReport, OpenOcdSessionGdbPlan,
     OpenOcdSessionServerPlan, OpenOcdTargetRestoration, OpenOcdTargetStateObservation,
     OpenOcdTargetStatePolicy, plan_session, test_session,
+};
+pub use target::{
+    OpenOcdTargetCapabilities, OpenOcdTargetConfirmationBoundary, OpenOcdTargetEffects,
+    OpenOcdTargetOptions, OpenOcdTargetPlan, OpenOcdTargetPolicy, OpenOcdTargetProtocol,
+    OpenOcdTargetProtocolCommand, OpenOcdTargetTestReport, OpenOcdTargetTransition, plan_target,
+    test_target,
 };
 
 pub const DEFAULT_OPENOCD_VERSION_TIMEOUT_MS: u64 = 2_000;

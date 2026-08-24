@@ -34,7 +34,7 @@ pub const MIN_OPENOCD_TARGET_STATE_TIMEOUT_MS: u64 = 100;
 pub const MAX_OPENOCD_TARGET_STATE_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_GDB_XTENSA_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
 
-const TARGET_STATE_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(250);
+pub(super) const TARGET_STATE_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(250);
 const TARGET_STATE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_TARGET_NAME_BYTES: usize = 128;
 
@@ -504,7 +504,7 @@ fn execute_session_plan(plan: OpenOcdGdbSessionPlan) -> Result<OpenOcdGdbSession
     })
 }
 
-fn observe_initial_target(
+pub(super) fn observe_initial_target(
     server: &ManagedServerSession,
     timeout_ms: u64,
 ) -> Result<OpenOcdTargetStateObservation> {
@@ -619,7 +619,7 @@ fn restore_running_target(
     }
 }
 
-fn query_target_state(
+pub(super) fn query_target_state(
     server: &ManagedServerSession,
     target_name: &str,
     deadline: Instant,
@@ -639,7 +639,7 @@ fn query_target_state(
     Ok(state.to_string())
 }
 
-fn validate_target_name(response: &str) -> Result<String> {
+pub(super) fn validate_target_name(response: &str) -> Result<String> {
     let name = response.trim();
     if name.is_empty()
         || name.len() > MAX_TARGET_NAME_BYTES
