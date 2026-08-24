@@ -744,3 +744,55 @@ and final-running proof for selected CPU0, together with complete cleanup and
 observable firmware recovery. It does not accept `reset init`, configurable or
 repeated reset, CPU1 restoration, target-data access, GDB, breakpoints, flash,
 monitor input, arbitrary Tcl, or broader configuration trust.
+
+## Confirmed OpenOCD selected-register snapshot acceptance (2026-08-24)
+
+- The user independently confirmed exact digest
+  `7507f3e8fcc5a0ce5051348564358b6f8e0e8981f3321e6ecc4256444989dddd`.
+  It bound `esp32s3.cpu0`, the ordered `pc/a0/a1/ps` selection, the six-command
+  GDB/MI protocol, all lifecycle deadlines, and the exact OpenOCD, GDB, Xtensa
+  profile, and top-level board-configuration identities.
+- Before execution, `baud list --json` distinguished COM3 as Espressif
+  `303A:1001 / E0:72:A1:D4:1F:DC` from the two SEGGER J-Link CDC ports. There
+  was no related OpenOCD, GDB, or embedded-debugger process, and the evidence
+  paths did not exist. All four bound host-file hashes still matched the plan.
+- The confirmed physical command ran exactly once, with no automatic retry. It
+  started OpenOCD on dynamic loopback Tcl/GDB ports 9804/9805 and proved
+  readiness in 171 ms. The runtime OpenOCD identity matched the same native
+  USB-JTAG serial, both ESP32-S3 taps were found, and selected CPU0 initially
+  reported `running`.
+- GDB completed the fixed six-command MI sequence with the required result
+  classes: `version`, `connect`, `register names`, `selected values`, `detach`,
+  and `exit`. The runtime inventory contained 270 uniquely named registers.
+  Ordered output was
+  `pc[0]=0x42012a0d`, `a0[212]=0x40378695`,
+  `a1[213]=0x3fcdb550`, and `ps[73]=0x60025`.
+- Normal GDB detach returned `done`, but CPU0 was subsequently observed
+  `halted`. The confirmed policy therefore requested its one fixed resume
+  fallback and proved final `esp32s3.cpu0=running` in 6 ms. GDB and OpenOCD
+  both exited 0 gracefully, neither process tree was force-killed, all output
+  drains completed, and the final residual debug-process count was zero.
+- OpenOCD's attach handlers halted both cores and inspected flash mappings even
+  though the tool issued no explicit flash command or write. Only selected
+  CPU0 received a final state observation; CPU1's final state is therefore not
+  qualified by this acceptance.
+- Post-run COM enumeration was unchanged. One five-second 115200-baud monitor
+  held DTR and RTS false, transmitted zero bytes, and received 180 bytes with
+  consecutive firmware heartbeats `4675..4678`, providing application-level
+  recovery evidence.
+- The structured result, protocol log, UART log/JSONL, and acceptance summary
+  are retained under
+  `target/hardware-acceptance/2026-08-24-openocd-register-snapshot`. The result
+  and stderr SHA-256 values are respectively
+  `e5ccc72bcad6ea8025b5f5028add5e3bb82569a4434b77e16c1a04b00637b5a8` and
+  `b2d758f16a0320ee6fe6ff57a5836426708a621376c0a47e0ddaba99841f9334`;
+  the acceptance-summary SHA-256 is
+  `feda510347a093d2e5e22aaa5897fafae2cfd8cd11c81df47f48baf0a668962b`.
+
+This accepts one exact running-origin selected-register snapshot on ESP32-S3
+CPU0, including runtime name resolution, ordered hexadecimal values, bounded
+fallback restoration, process cleanup, and observable firmware recovery. It
+does not accept CPU1 restoration, a halted-origin path, symbols or ELF loading,
+memory/stack access, breakpoints/watchpoints, general execution control, flash,
+arbitrary MI/Tcl/monitor commands, or digest binding of runtime adapter identity
+and dynamically selected port numbers.
