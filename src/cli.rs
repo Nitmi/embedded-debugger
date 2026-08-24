@@ -244,6 +244,13 @@ pub struct OpenOcdSessionSelection {
 
     #[arg(
         long,
+        value_name = "FILE",
+        help = "exact Espressif Xtensa target configuration loaded through XTENSA_GNU_CONFIG"
+    )]
+    pub gdb_xtensa_config: Option<PathBuf>,
+
+    #[arg(
+        long,
         value_name = "NAME",
         help = "exact OpenOCD 'target current' name required before GDB starts"
     )]
@@ -1680,6 +1687,7 @@ fn openocd_session_options(selection: &OpenOcdSessionSelection) -> OpenOcdGdbSes
             shutdown_timeout_ms: selection.openocd_shutdown_timeout_ms,
         },
         gdb_executable: selection.gdb_executable.clone(),
+        gdb_xtensa_config: selection.gdb_xtensa_config.clone(),
         expected_target: selection.expected_target.clone(),
         gdb_version_timeout_ms: selection.gdb_version_timeout_ms,
         gdb_startup_timeout_ms: selection.gdb_startup_timeout_ms,

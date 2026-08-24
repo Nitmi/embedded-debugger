@@ -37,8 +37,13 @@ All notable changes to this project will be documented in this file.
   arbitrary command. Effects disclose that remote negotiation may exchange
   target descriptions, memory-map metadata, stop/register state, and that
   confirmed OpenOCD attach handlers may probe flash or reset a protected
-  target. Controlled regression coverage passes while physical ESP32-S3
-  acceptance remains pending exact-digest confirmation.
+  target. The first physical ESP32-S3 attempt failed closed on a 388-byte versus
+  608-byte GDB register-layout mismatch, then restored CPU0 running, cleaned
+  both processes and ports, permitted probe-rs reattach, and recovered UART
+  heartbeats. Optional `--gdb-xtensa-config` now canonicalizes and hashes the
+  exact Espressif target profile, binds its selection in the digest, clears any
+  ambient `XTENSA_GNU_CONFIG`, and sets only the confirmed path for GDB. A new
+  exact-digest physical success remains pending.
 - Versioned success and error envelopes for Agent-safe CLI automation.
 - Stable error codes and exit codes.
 - Backend capability model and deterministic Replay backend.

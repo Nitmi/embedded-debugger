@@ -52,6 +52,7 @@ const REMOTE_SELECT_COMMAND_PLACEHOLDER: &str =
     "-target-select remote 127.0.0.1:<dynamic_openocd_gdb_port>";
 const REMOTE_DETACH_COMMAND: &str = "-target-detach";
 const MI_LAUNCH_ARGUMENTS: [&str; 4] = ["--nx", "--nh", "--quiet", "--interpreter=mi2"];
+pub(super) const XTENSA_GNU_CONFIG_ENV: &str = "XTENSA_GNU_CONFIG";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GdbInspectOptions {
@@ -290,7 +291,9 @@ pub fn test_gdb_mi(options: &GdbMiTestOptions) -> Result<GdbMiTestReport> {
     })?;
 
     let mut command = Command::new(&inspection.executable.resolved);
-    command.args(MI_LAUNCH_ARGUMENTS);
+    command
+        .args(MI_LAUNCH_ARGUMENTS)
+        .env_remove(XTENSA_GNU_CONFIG_ENV);
     let mut gdb = ManagedGdb::spawn(command, &inspection.executable.resolved, EXIT_TOKEN)?;
     let lifecycle = match gdb.run_lifecycle(
         Duration::from_millis(options.startup_timeout_ms),
@@ -364,6 +367,7 @@ pub fn test_gdb_mi(options: &GdbMiTestOptions) -> Result<GdbMiTestReport> {
 
 pub(super) fn execute_remote_gdb(
     executable: &str,
+    xtensa_config: Option<&str>,
     gdb_port: u16,
     startup_timeout_ms: u64,
     command_timeout_ms: u64,
@@ -371,7 +375,12 @@ pub(super) fn execute_remote_gdb(
 ) -> Result<RemoteGdbExecution> {
     let endpoint = format!("127.0.0.1:{gdb_port}");
     let mut command = Command::new(executable);
-    command.args(MI_LAUNCH_ARGUMENTS);
+    command
+        .args(MI_LAUNCH_ARGUMENTS)
+        .env_remove(XTENSA_GNU_CONFIG_ENV);
+    if let Some(config) = xtensa_config {
+        command.env(XTENSA_GNU_CONFIG_ENV, config);
+    }
     let mut gdb = ManagedGdb::spawn(command, executable, REMOTE_EXIT_TOKEN)?;
     let lifecycle = match gdb.run_remote_lifecycle(
         &endpoint,
@@ -534,6 +543,7 @@ fn inspect_gdb_executable(requested: &Path, timeout_ms: u64) -> Result<GdbExecut
     let mut command = Command::new(&resolved);
     command
         .arg("--version")
+        .env_remove(XTENSA_GNU_CONFIG_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

@@ -41,6 +41,15 @@ normally resumes it, and the tool may issue one fixed OpenOCD resume fallback
 before final verification. Do not retry a lost or failed test automatically
 because target outcome may be indeterminate.
 
+For Espressif Xtensa targets, resolve the target-specific profile before
+planning. Prefer the actual `xtensa-esp-elf-gdb` binary with
+`--gdb-xtensa-config <exact-profile.so>` so both files are hash-bound; do not
+substitute a small board launcher whose dynamically selected GDB child is not
+represented by that launcher hash. Surface that the profile is native host
+code loaded only during confirmed execution. Use the identical option for
+plan and test. Ambient `XTENSA_GNU_CONFIG` is deliberately ignored. A missing
+or changed profile requires a new plan and confirmation.
+
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state
 observation, and restoration. It does not authorize ELF or symbol loading,

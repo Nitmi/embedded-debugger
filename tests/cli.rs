@@ -1728,7 +1728,9 @@ fn openocd_session_plan_binds_both_tools_and_the_fixed_restoration_policy() {
     let openocd = write_fake_openocd(directory.path());
     let gdb = write_fake_gdb(directory.path());
     let config = directory.path().join("board.cfg");
+    let gdb_xtensa_config = directory.path().join("xtensa_fake.so");
     fs::write(&config, b"adapter speed 1000\n").unwrap();
+    fs::write(&gdb_xtensa_config, b"target-profile").unwrap();
 
     let make_plan = || {
         let output = Command::cargo_bin("embedded-debugger")
@@ -1740,6 +1742,8 @@ fn openocd_session_plan_binds_both_tools_and_the_fixed_restoration_policy() {
             .arg(&openocd)
             .arg("--gdb-executable")
             .arg(&gdb)
+            .arg("--gdb-xtensa-config")
+            .arg(&gdb_xtensa_config)
             .arg("--expected-target")
             .arg("fake.cpu0")
             .arg("--config")
@@ -1808,6 +1812,22 @@ fn openocd_session_plan_binds_both_tools_and_the_fixed_restoration_policy() {
     );
     assert_eq!(
         first["data"]["confirmation_boundary"]["gdb_executable_file_hash_bound"],
+        true
+    );
+    assert_eq!(
+        first["data"]["gdb"]["xtensa_config"]["environment_variable"],
+        "XTENSA_GNU_CONFIG"
+    );
+    assert_eq!(
+        first["data"]["gdb"]["ambient_xtensa_config_inherited"],
+        false
+    );
+    assert_eq!(
+        first["data"]["effects"]["gdb_xtensa_target_configuration_requested"],
+        true
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["gdb_xtensa_config_file_hash_bound"],
         true
     );
     assert_eq!(

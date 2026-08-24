@@ -40,7 +40,8 @@ pub use server::{
     test_server,
 };
 pub use session::{
-    DEFAULT_OPENOCD_TARGET_STATE_TIMEOUT_MS, MAX_OPENOCD_TARGET_STATE_TIMEOUT_MS,
+    DEFAULT_OPENOCD_TARGET_STATE_TIMEOUT_MS, GdbXtensaConfigInspection,
+    MAX_GDB_XTENSA_CONFIG_BYTES, MAX_OPENOCD_TARGET_STATE_TIMEOUT_MS,
     MIN_OPENOCD_TARGET_STATE_TIMEOUT_MS, OpenOcdGdbExchange, OpenOcdGdbSessionCapabilities,
     OpenOcdGdbSessionConfirmationBoundary, OpenOcdGdbSessionEffects, OpenOcdGdbSessionOptions,
     OpenOcdGdbSessionPlan, OpenOcdGdbSessionTestReport, OpenOcdSessionGdbPlan,

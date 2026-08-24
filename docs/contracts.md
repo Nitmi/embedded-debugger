@@ -171,8 +171,9 @@ boundary.
 ## Confirmed OpenOCD and GDB session
 
 `openocd session plan` accepts exact OpenOCD and GDB executable selections,
-one required exact `--expected-target <NAME>`, repeatable OpenOCD config and
-search inputs, and bounded OpenOCD version,
+one optional `--gdb-xtensa-config <FILE>`, one required exact
+`--expected-target <NAME>`, repeatable OpenOCD config and search inputs, and
+bounded OpenOCD version,
 startup, and shutdown, GDB version, startup, command, and shutdown, and target
 state deadlines. The target-state deadline defaults to 3000 ms and must be
 100..=30000 ms. The GDB remote command deadline defaults to 10000 ms and must
@@ -180,9 +181,12 @@ be 100..=60000 ms. Session-specific scalar bounds are validated before either
 executable or configuration path is inspected.
 
 The returned `R2_DEVICE_WRITE` plan binds both exact executable hashes and
-recognized versions, the ordered top-level config manifests and search paths,
-the exact expected current-target name, the loopback/dynamic endpoint policy,
-all deadlines, the fixed MI2 contract, and target-state policy. Search
+recognized versions, whether an Xtensa target configuration was selected and,
+when present, its canonical path, byte length, SHA-256, and fixed
+`XTENSA_GNU_CONFIG` delivery mechanism. It also binds the ordered top-level
+config manifests and search paths, the exact expected current-target name, the
+loopback/dynamic endpoint policy, all deadlines, the fixed MI2 contract, and
+target-state policy. Search
 directory contents, transitive Tcl sources, configuration semantics, and the
 runtime adapter/USB serial identity remain explicitly unbound. The
 runtime-selected port number is necessarily not known at planning time. No
@@ -195,8 +199,12 @@ against a 128-byte ASCII allow list, and queries `<name> curstate`. GDB is not
 started unless the name exactly matches the confirmed `--expected-target` and
 the state is exactly `running`.
 
-The GDB process uses only `--nx --nh --quiet --interpreter=mi2`. Its complete
-input is fixed to these token-correlated commands and result classes:
+The GDB process uses only `--nx --nh --quiet --interpreter=mi2`. Ambient
+`XTENSA_GNU_CONFIG` is always removed. When a target configuration was selected
+and confirmed, the process receives only its canonical path through that fixed
+environment variable. The profile is a native module and may execute host code
+when GDB starts; the plan hashes but does not load it. Its complete MI input is
+fixed to these token-correlated commands and result classes:
 
 ```text
 1-gdb-version                                      -> 1^done
@@ -205,8 +213,9 @@ input is fixed to these token-correlated commands and result classes:
 4-gdb-exit                                         -> 4^exit
 ```
 
-No extra GDB argument, initialization file, symbol, ELF, explicit target-data
-command, monitor command, or arbitrary MI command is accepted. Async and stream
+No extra GDB argument, arbitrary environment variable, initialization file,
+symbol, ELF, explicit target-data command, monitor command, or arbitrary MI
+command is accepted. Async and stream
 records may occur around the four results but retain the existing bounded
 framing and output requirements. The effects do not equate this narrow MI
 command set with a packet-free connection: ordinary remote negotiation may

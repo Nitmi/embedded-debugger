@@ -571,3 +571,45 @@ bounded output, graceful exit, and descendant cleanup on the host. It enables
 only `gdb_mi_host_process` in the GDB test result. It does not combine GDB with
 OpenOCD or qualify symbols, registers, memory, stack, breakpoints, execution
 control, target-state preservation, CPU1, or flash.
+
+## Combined OpenOCD and GDB failure-path acceptance (2026-08-24)
+
+- The user confirmed exact digest
+  `8936fffb9fa9eb3a36b97e7c928e1aa2b4f0de96f00eb33cb6e97fbb3ca84aee`.
+  It selected `esp32s3.cpu0`, the Espressif OpenOCD executable SHA-256
+  `58ceca283262cd313fdb6b4ba94195b01502a15dc61b6ae0b986077449010179`,
+  the generic no-Python GDB SHA-256
+  `5ce33ee35b9075251532fc8ea6f1745ce0885764689f0014ff1c3a3f42bcd71a`,
+  and `esp32s3-builtin.cfg` SHA-256
+  `62f5bb4f81cf28455bab48d158227c3f4f280dcaab0838e0472c4249e7696611`.
+- Before execution, COM3 was re-enumerated as `303A:1001` with serial
+  `E0:72:A1:D4:1F:DC`. A 5-second, 115200-baud, DTR/RTS-false, zero-transmit
+  monitor received five consecutive heartbeats `5090..5094` (206 bytes).
+- The confirmed test started OpenOCD on dynamic Tcl/GDB ports 2504/2505,
+  verified `esp32s3.cpu0=running`, and completed `1-gdb-version` as `1^done`.
+  Remote selection then returned `2^error`: GDB expected a 388-byte `g` packet
+  but OpenOCD returned 608 bytes. No detach result, symbol, ELF, breakpoint,
+  explicit target-data command, flash command, or arbitrary command followed.
+- The failure cleanup observed CPU0 halted, issued the fixed resume fallback,
+  and proved the final exact state `esp32s3.cpu0=running`. GDB accepted
+  `4-gdb-exit`, exited 0, and was not force-killed. OpenOCD accepted `shutdown`,
+  exited 0, and was not force-killed. Both Job Object trees, output readers,
+  and ports 2504/2505 were clean after exit.
+- An exact probe-rs attach/disconnect then succeeded on
+  `303a:1001:E0:72:A1:D4:1F:DC`. A second zero-transmit serial monitor received
+  heartbeats `5241..5245` (204 bytes), proving observable firmware recovery.
+  Evidence is retained under
+  `target/hardware-acceptance/2026-08-24-openocd-gdb-session`.
+- Host-only diagnosis showed 131 register-table lines for the generic GDB and
+  272 for the official `xtensa-esp32s3-elf-gdb` launcher. Setting
+  `XTENSA_GNU_CONFIG` to `lib/xtensa_esp32s3.so` on the exact generic GDB
+  reproduced the launcher's table byte for byte; both outputs had SHA-256
+  `a99bc896e736c3dd50a52e16f7a94777d1dddd0e99b227033237bd4aa1dd648c`.
+  The profile file SHA-256 is
+  `8bea9f0f2225db46a5ab682b257cd3590969ae4173ab2ceddde24d6e830dbee4`.
+
+This accepts the confirmed protocol-failure cleanup, target restoration,
+process/port release, probe reuse, and UART recovery paths. It does not accept
+successful OpenOCD/GDB interoperability. The implementation now supports a
+digest-bound `--gdb-xtensa-config`; a new plan and separate confirmation are
+required before one further physical attempt.

@@ -1,4 +1,6 @@
 use std::{
+    fs::{self, File},
+    io::Read,
     path::PathBuf,
     thread,
     time::{Duration, Instant},
@@ -18,7 +20,7 @@ use super::{
         MAX_GDB_MI_COMMAND_TIMEOUT_MS, MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS,
         MAX_GDB_MI_STARTUP_TIMEOUT_MS, MAX_GDB_VERSION_TIMEOUT_MS, MIN_GDB_MI_COMMAND_TIMEOUT_MS,
         MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS, MIN_GDB_VERSION_TIMEOUT_MS,
-        execute_remote_gdb, remote_protocol_contract,
+        XTENSA_GNU_CONFIG_ENV, execute_remote_gdb, remote_protocol_contract,
     },
     server::{ManagedServerCompletion, ManagedServerSession, start_managed_server},
 };
@@ -30,6 +32,7 @@ use crate::{
 pub const DEFAULT_OPENOCD_TARGET_STATE_TIMEOUT_MS: u64 = 3_000;
 pub const MIN_OPENOCD_TARGET_STATE_TIMEOUT_MS: u64 = 100;
 pub const MAX_OPENOCD_TARGET_STATE_TIMEOUT_MS: u64 = 30_000;
+pub const MAX_GDB_XTENSA_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
 
 const TARGET_STATE_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(250);
 const TARGET_STATE_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -39,6 +42,7 @@ const MAX_TARGET_NAME_BYTES: usize = 128;
 pub struct OpenOcdGdbSessionOptions {
     pub openocd: OpenOcdServerOptions,
     pub gdb_executable: PathBuf,
+    pub gdb_xtensa_config: Option<PathBuf>,
     pub expected_target: String,
     pub gdb_version_timeout_ms: u64,
     pub gdb_startup_timeout_ms: u64,
@@ -78,10 +82,22 @@ pub struct OpenOcdSessionServerPlan {
 pub struct OpenOcdSessionGdbPlan {
     pub executable: GdbExecutableInspection,
     pub executable_file: GdbExecutableFileIdentity,
+    pub xtensa_config: Option<GdbXtensaConfigInspection>,
+    pub ambient_xtensa_config_inherited: bool,
     pub version_timeout_ms: u64,
     pub startup_timeout_ms: u64,
     pub command_timeout_ms: u64,
     pub shutdown_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbXtensaConfigInspection {
+    pub environment_variable: String,
+    pub requested: String,
+    pub resolved: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub maximum_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -119,6 +135,8 @@ pub struct OpenOcdGdbSessionEffects {
     pub breakpoint_or_watchpoint_requested: bool,
     pub flash_command_requested: bool,
     pub arbitrary_gdb_or_monitor_command_requested: bool,
+    pub gdb_xtensa_target_configuration_requested: bool,
+    pub gdb_xtensa_target_configuration_native_code_execution_possible: bool,
     pub notes: Vec<String>,
 }
 
@@ -132,6 +150,8 @@ pub struct OpenOcdGdbSessionConfirmationBoundary {
     pub transitive_sources_bound: bool,
     pub gdb_executable_file_hash_bound: bool,
     pub gdb_version_bound: bool,
+    pub gdb_xtensa_config_selection_bound: bool,
+    pub gdb_xtensa_config_file_hash_bound: bool,
     pub fixed_mi_protocol_bound: bool,
     pub lifecycle_deadlines_bound: bool,
     pub loopback_dynamic_endpoint_policy_bound: bool,
@@ -230,6 +250,7 @@ struct SessionConfirmationInput<'a> {
     gdb_executable_path: &'a str,
     gdb_executable_version: &'a str,
     gdb_executable_file: &'a GdbExecutableFileIdentity,
+    gdb_xtensa_config: Option<&'a GdbXtensaConfigInspection>,
     gdb_lifecycle: GdbLifecycleConfirmation,
     protocol: &'a GdbMiProtocol,
     target_state_policy: &'a OpenOcdTargetStatePolicy,
@@ -260,9 +281,25 @@ pub fn plan_session(options: &OpenOcdGdbSessionOptions) -> Result<OpenOcdGdbSess
         executable: options.gdb_executable.clone(),
         timeout_ms: options.gdb_version_timeout_ms,
     })?;
+    let gdb_xtensa_config = options
+        .gdb_xtensa_config
+        .as_deref()
+        .map(inspect_gdb_xtensa_config)
+        .transpose()?;
+    if gdb_xtensa_config.is_some() && gdb_inspection.executable.vendor != "espressif" {
+        return Err(DebugError::config(
+            "Xtensa target configuration requires an Espressif GDB executable",
+            json!({
+                "gdb_vendor": gdb_inspection.executable.vendor,
+                "environment_variable": XTENSA_GNU_CONFIG_ENV,
+            }),
+        ));
+    }
     let gdb = OpenOcdSessionGdbPlan {
         executable: gdb_inspection.executable,
         executable_file: gdb_inspection.executable_file,
+        xtensa_config: gdb_xtensa_config,
+        ambient_xtensa_config_inherited: false,
         version_timeout_ms: options.gdb_version_timeout_ms,
         startup_timeout_ms: options.gdb_startup_timeout_ms,
         command_timeout_ms: options.gdb_command_timeout_ms,
@@ -273,7 +310,7 @@ pub fn plan_session(options: &OpenOcdGdbSessionOptions) -> Result<OpenOcdGdbSess
         options.expected_target.clone(),
         options.target_state_timeout_ms,
     );
-    let effects = session_effects();
+    let effects = session_effects(gdb.xtensa_config.is_some());
     let confirmation_boundary = session_confirmation_boundary();
     let confirmation = SessionConfirmationInput {
         schema_version: SCHEMA_VERSION,
@@ -289,6 +326,7 @@ pub fn plan_session(options: &OpenOcdGdbSessionOptions) -> Result<OpenOcdGdbSess
         gdb_executable_path: &gdb.executable.resolved,
         gdb_executable_version: &gdb.executable.version_line,
         gdb_executable_file: &gdb.executable_file,
+        gdb_xtensa_config: gdb.xtensa_config.as_ref(),
         gdb_lifecycle: GdbLifecycleConfirmation {
             version_timeout_ms: gdb.version_timeout_ms,
             startup_timeout_ms: gdb.startup_timeout_ms,
@@ -372,6 +410,10 @@ fn execute_session_plan(plan: OpenOcdGdbSessionPlan) -> Result<OpenOcdGdbSession
 
     let gdb_result = execute_remote_gdb(
         &plan.gdb.executable.resolved,
+        plan.gdb
+            .xtensa_config
+            .as_ref()
+            .map(|config| config.resolved.as_str()),
         server.readiness().gdb_port,
         plan.gdb.startup_timeout_ms,
         plan.gdb.command_timeout_ms,
@@ -786,7 +828,7 @@ fn target_state_policy(
     }
 }
 
-fn session_effects() -> OpenOcdGdbSessionEffects {
+fn session_effects(xtensa_config_selected: bool) -> OpenOcdGdbSessionEffects {
     OpenOcdGdbSessionEffects {
         configuration_tcl_execution_required: true,
         adapter_or_target_access_possible_from_configuration: true,
@@ -806,6 +848,8 @@ fn session_effects() -> OpenOcdGdbSessionEffects {
         breakpoint_or_watchpoint_requested: false,
         flash_command_requested: false,
         arbitrary_gdb_or_monitor_command_requested: false,
+        gdb_xtensa_target_configuration_requested: xtensa_config_selected,
+        gdb_xtensa_target_configuration_native_code_execution_possible: xtensa_config_selected,
         notes: vec![
             "OpenOCD configuration remains executable Tcl; only top-level files are hashed."
                 .to_string(),
@@ -814,6 +858,8 @@ fn session_effects() -> OpenOcdGdbSessionEffects {
             "Confirmed OpenOCD configuration may run an attach handler that probes flash or resets and halts a protected target."
                 .to_string(),
             "The session refuses attachment unless the current target is running and fails unless running is proven again before server shutdown."
+                .to_string(),
+            "Ambient XTENSA_GNU_CONFIG is never inherited; an explicitly selected configuration is canonicalized, hashed, and loaded as native host code."
                 .to_string(),
         ],
     }
@@ -829,6 +875,8 @@ fn session_confirmation_boundary() -> OpenOcdGdbSessionConfirmationBoundary {
         transitive_sources_bound: false,
         gdb_executable_file_hash_bound: true,
         gdb_version_bound: true,
+        gdb_xtensa_config_selection_bound: true,
+        gdb_xtensa_config_file_hash_bound: true,
         fixed_mi_protocol_bound: true,
         lifecycle_deadlines_bound: true,
         loopback_dynamic_endpoint_policy_bound: true,
@@ -838,6 +886,102 @@ fn session_confirmation_boundary() -> OpenOcdGdbSessionConfirmationBoundary {
         target_state_policy_bound: true,
         symbol_or_firmware_identity_required: false,
     }
+}
+
+fn inspect_gdb_xtensa_config(requested: &std::path::Path) -> Result<GdbXtensaConfigInspection> {
+    if requested.as_os_str().is_empty() {
+        return Err(DebugError::config(
+            "GDB Xtensa target configuration path must not be empty",
+            json!({"environment_variable": XTENSA_GNU_CONFIG_ENV}),
+        ));
+    }
+    let requested_display = stable_config_path(requested, "requested target configuration")?;
+    let resolved = fs::canonicalize(requested).map_err(|source| {
+        DebugError::config(
+            "resolve GDB Xtensa target configuration failed",
+            json!({"path": requested_display, "cause": source.to_string()}),
+        )
+    })?;
+    let resolved_display = stable_config_path(&resolved, "resolved target configuration")?;
+    let metadata = fs::metadata(&resolved).map_err(|source| {
+        DebugError::config(
+            "inspect GDB Xtensa target configuration failed",
+            json!({"path": resolved_display, "cause": source.to_string()}),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(DebugError::config(
+            "GDB Xtensa target configuration is not a regular file",
+            json!({"path": resolved_display}),
+        ));
+    }
+    if metadata.len() > MAX_GDB_XTENSA_CONFIG_BYTES {
+        return Err(DebugError::config(
+            "GDB Xtensa target configuration exceeds the hashing size limit",
+            json!({
+                "path": resolved_display,
+                "bytes": metadata.len(),
+                "maximum": MAX_GDB_XTENSA_CONFIG_BYTES,
+            }),
+        ));
+    }
+
+    let mut file = File::open(&resolved).map_err(|source| {
+        DebugError::config(
+            "open GDB Xtensa target configuration for hashing failed",
+            json!({"path": resolved_display, "cause": source.to_string()}),
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|source| {
+            DebugError::config(
+                "read GDB Xtensa target configuration for hashing failed",
+                json!({"path": resolved_display, "cause": source.to_string()}),
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count as u64);
+        if total > MAX_GDB_XTENSA_CONFIG_BYTES {
+            return Err(DebugError::config(
+                "GDB Xtensa target configuration grew beyond the hashing size limit",
+                json!({"path": resolved_display, "maximum": MAX_GDB_XTENSA_CONFIG_BYTES}),
+            ));
+        }
+        hasher.update(&buffer[..count]);
+    }
+
+    Ok(GdbXtensaConfigInspection {
+        environment_variable: XTENSA_GNU_CONFIG_ENV.to_string(),
+        requested: requested_display,
+        resolved: resolved_display,
+        bytes: total,
+        sha256: hex::encode(hasher.finalize()),
+        maximum_bytes: MAX_GDB_XTENSA_CONFIG_BYTES,
+    })
+}
+
+fn stable_config_path(path: &std::path::Path, label: &str) -> Result<String> {
+    let path = path.to_str().ok_or_else(|| {
+        DebugError::config(
+            format!("GDB Xtensa {label} is not valid Unicode"),
+            json!({"path_kind": label}),
+        )
+    })?;
+    #[cfg(windows)]
+    {
+        if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+            return Ok(format!(r"\\{path}"));
+        }
+        if let Some(path) = path.strip_prefix(r"\\?\") {
+            return Ok(path.to_string());
+        }
+    }
+    Ok(path.to_string())
 }
 
 fn session_capabilities() -> OpenOcdGdbSessionCapabilities {
@@ -923,6 +1067,7 @@ mod tests {
                 shutdown_timeout_ms: super::super::DEFAULT_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS,
             },
             gdb_executable: PathBuf::from("missing-gdb"),
+            gdb_xtensa_config: None,
             expected_target: "fake.cpu0".to_string(),
             gdb_version_timeout_ms: super::super::DEFAULT_GDB_VERSION_TIMEOUT_MS,
             gdb_startup_timeout_ms: super::super::DEFAULT_GDB_MI_STARTUP_TIMEOUT_MS,
@@ -968,6 +1113,7 @@ mod tests {
                 shutdown_timeout_ms: 5_000,
             },
             gdb_executable: gdb,
+            gdb_xtensa_config: None,
             expected_target: "fake.cpu0".to_string(),
             gdb_version_timeout_ms: 5_000,
             gdb_startup_timeout_ms: 5_000,
@@ -1001,6 +1147,53 @@ mod tests {
     }
 
     #[test]
+    fn xtensa_config_is_hash_bound_and_passed_only_to_remote_gdb() {
+        let directory = tempdir().unwrap();
+        let openocd = write_fake_openocd(directory.path());
+        let gdb = write_fake_remote_gdb_requiring_xtensa_config(directory.path());
+        let config = directory.path().join("board.cfg");
+        let xtensa_config = directory.path().join("xtensa_fake.so");
+        fs::write(&config, b"adapter speed 1000\n").unwrap();
+        fs::write(&xtensa_config, b"target-profile-a").unwrap();
+        let options = OpenOcdGdbSessionOptions {
+            openocd: OpenOcdServerOptions {
+                executable: openocd,
+                config_files: vec![config],
+                search_dirs: vec![directory.path().to_path_buf()],
+                version_timeout_ms: super::super::DEFAULT_OPENOCD_VERSION_TIMEOUT_MS,
+                startup_timeout_ms: 5_000,
+                shutdown_timeout_ms: 5_000,
+            },
+            gdb_executable: gdb,
+            gdb_xtensa_config: Some(xtensa_config.clone()),
+            expected_target: "fake.cpu0".to_string(),
+            gdb_version_timeout_ms: 5_000,
+            gdb_startup_timeout_ms: 5_000,
+            gdb_command_timeout_ms: 5_000,
+            gdb_shutdown_timeout_ms: 5_000,
+            target_state_timeout_ms: 5_000,
+        };
+
+        let first_plan = plan_session(&options).unwrap();
+        let target_config = first_plan.gdb.xtensa_config.as_ref().unwrap();
+        assert_eq!(target_config.environment_variable, XTENSA_GNU_CONFIG_ENV);
+        assert!(!first_plan.gdb.ambient_xtensa_config_inherited);
+        assert!(first_plan.effects.gdb_xtensa_target_configuration_requested);
+        let report = test_session(&options, &first_plan.confirm_digest).unwrap();
+        assert!(report.complete);
+
+        fs::write(&xtensa_config, b"target-profile-b").unwrap();
+        let changed_plan = plan_session(&options).unwrap();
+        assert_ne!(first_plan.confirm_digest, changed_plan.confirm_digest);
+        assert_ne!(
+            first_plan.gdb.xtensa_config.unwrap().sha256,
+            changed_plan.gdb.xtensa_config.unwrap().sha256
+        );
+        let error = test_session(&options, &first_plan.confirm_digest).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ConfirmationMismatch);
+    }
+
+    #[test]
     fn remote_protocol_failure_still_restores_target_and_closes_openocd() {
         let directory = tempdir().unwrap();
         let openocd = write_fake_openocd(directory.path());
@@ -1017,6 +1210,7 @@ mod tests {
                 shutdown_timeout_ms: 5_000,
             },
             gdb_executable: gdb,
+            gdb_xtensa_config: None,
             expected_target: "fake.cpu0".to_string(),
             gdb_version_timeout_ms: 5_000,
             gdb_startup_timeout_ms: 5_000,
@@ -1059,6 +1253,7 @@ mod tests {
                 shutdown_timeout_ms: 5_000,
             },
             gdb_executable: gdb,
+            gdb_xtensa_config: None,
             expected_target: "other.cpu0".to_string(),
             gdb_version_timeout_ms: 5_000,
             gdb_startup_timeout_ms: 5_000,
@@ -1169,7 +1364,7 @@ mod tests {
             let executable = directory.join("fake-remote-gdb.cmd");
             fs::write(
                 &executable,
-                "@echo off\r\nif \"%1\"==\"--version\" goto version\r\necho ^(gdb^)\r\nset /p first=\r\nif not \"%first%\"==\"1-gdb-version\" exit /b 3\r\necho ~\"GNU gdb 17.1-test\\n\"\r\necho 1^^done\r\necho ^(gdb^)\r\nset /p second=\r\nif not \"%second:~0,23%\"==\"2-target-select remote \" exit /b 4\r\necho =thread-group-started,id=\"i1\",pid=\"42000\"\r\necho 2^^connected\r\necho ^(gdb^)\r\nset /p third=\r\nif not \"%third%\"==\"3-target-detach\" exit /b 5\r\necho 3^^done\r\necho ^(gdb^)\r\nset /p fourth=\r\nif not \"%fourth%\"==\"4-gdb-exit\" exit /b 6\r\necho 4^^exit\r\nexit /b 0\r\n:version\r\necho GNU gdb 17.1-test\r\nexit /b 0\r\n",
+                "@echo off\r\nif \"%1\"==\"--version\" goto version\r\nif defined XTENSA_GNU_CONFIG exit /b 8\r\necho ^(gdb^)\r\nset /p first=\r\nif not \"%first%\"==\"1-gdb-version\" exit /b 3\r\necho ~\"GNU gdb 17.1-test\\n\"\r\necho 1^^done\r\necho ^(gdb^)\r\nset /p second=\r\nif not \"%second:~0,23%\"==\"2-target-select remote \" exit /b 4\r\necho =thread-group-started,id=\"i1\",pid=\"42000\"\r\necho 2^^connected\r\necho ^(gdb^)\r\nset /p third=\r\nif not \"%third%\"==\"3-target-detach\" exit /b 5\r\necho 3^^done\r\necho ^(gdb^)\r\nset /p fourth=\r\nif not \"%fourth%\"==\"4-gdb-exit\" exit /b 6\r\necho 4^^exit\r\nexit /b 0\r\n:version\r\necho GNU gdb 17.1-test\r\nexit /b 0\r\n",
             )
             .unwrap();
             executable
@@ -1181,7 +1376,7 @@ mod tests {
             let executable = directory.join("fake-remote-gdb");
             fs::write(
                 &executable,
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' 'GNU gdb 17.1-test'\n  exit 0\nfi\nprintf '%s\\n' '(gdb)'\nIFS= read -r first\n[ \"$first\" = '1-gdb-version' ] || exit 3\nprintf '%s\\n' '~\"GNU gdb 17.1-test\\n\"' '1^done' '(gdb)'\nIFS= read -r second\ncase \"$second\" in '2-target-select remote 127.0.0.1:'*) ;; *) exit 4 ;; esac\nprintf '%s\\n' '=thread-group-started,id=\"i1\",pid=\"42000\"' '2^connected' '(gdb)'\nIFS= read -r third\n[ \"$third\" = '3-target-detach' ] || exit 5\nprintf '%s\\n' '3^done' '(gdb)'\nIFS= read -r fourth\n[ \"$fourth\" = '4-gdb-exit' ] || exit 6\nprintf '%s\\n' '4^exit'\n",
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' 'GNU gdb 17.1-test'\n  exit 0\nfi\n[ -z \"${XTENSA_GNU_CONFIG+x}\" ] || exit 8\nprintf '%s\\n' '(gdb)'\nIFS= read -r first\n[ \"$first\" = '1-gdb-version' ] || exit 3\nprintf '%s\\n' '~\"GNU gdb 17.1-test\\n\"' '1^done' '(gdb)'\nIFS= read -r second\ncase \"$second\" in '2-target-select remote 127.0.0.1:'*) ;; *) exit 4 ;; esac\nprintf '%s\\n' '=thread-group-started,id=\"i1\",pid=\"42000\"' '2^connected' '(gdb)'\nIFS= read -r third\n[ \"$third\" = '3-target-detach' ] || exit 5\nprintf '%s\\n' '3^done' '(gdb)'\nIFS= read -r fourth\n[ \"$fourth\" = '4-gdb-exit' ] || exit 6\nprintf '%s\\n' '4^exit'\n",
             )
             .unwrap();
             let mut permissions = fs::metadata(&executable).unwrap().permissions();
@@ -1189,6 +1384,28 @@ mod tests {
             fs::set_permissions(&executable, permissions).unwrap();
             executable
         }
+    }
+
+    fn write_fake_remote_gdb_requiring_xtensa_config(directory: &Path) -> PathBuf {
+        let executable = write_fake_remote_gdb(directory);
+        let script = fs::read_to_string(&executable).unwrap();
+        let script = if cfg!(windows) {
+            script.replace(
+                "if defined XTENSA_GNU_CONFIG exit /b 8",
+                "if not defined XTENSA_GNU_CONFIG exit /b 8",
+            )
+        } else {
+            script.replace(
+                "[ -z \"${XTENSA_GNU_CONFIG+x}\" ] || exit 8",
+                "[ -n \"${XTENSA_GNU_CONFIG:-}\" ] || exit 8",
+            )
+        };
+        fs::write(
+            &executable,
+            script.replace("GNU gdb 17.1-test", "GNU gdb (esp-gdb) 17.1-test"),
+        )
+        .unwrap();
+        executable
     }
 
     fn write_fake_remote_gdb_with_wrong_connect_token(directory: &Path) -> PathBuf {

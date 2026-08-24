@@ -18,7 +18,8 @@ commands, flash, arbitrary MI, or arbitrary monitor commands.
 ## Decision
 
 1. Add `openocd session plan/test`. The plan binds the exact OpenOCD and GDB
-   executable files and versions, ordered top-level configuration manifests and
+   executable files and versions, an optional exact Espressif Xtensa target
+   configuration file, ordered top-level OpenOCD configuration manifests and
    search paths, all process and target-state deadlines, the fixed MI command
    sequence, an exact expected OpenOCD current-target name, and the target
    restoration policy. Execution requires its exact combined digest.
@@ -30,10 +31,15 @@ commands, flash, arbitrary MI, or arbitrary monitor commands.
    `curstate` through bounded Tcl RPC. Refuse to start GDB unless that name
    exactly matches the confirmed `--expected-target` and its state is exactly
    `running`.
-4. Launch GDB only as `--nx --nh --quiet --interpreter=mi2`. The entire exchange
-   is fixed to `1-gdb-version`, `2-target-select remote 127.0.0.1:<dynamic>`,
-   `3-target-detach`, and `4-gdb-exit`, requiring result classes `done`,
-   `connected`, `done`, and `exit` with matching tokens.
+4. Launch GDB only as `--nx --nh --quiet --interpreter=mi2`. Remove ambient
+   `XTENSA_GNU_CONFIG` unconditionally. If `--gdb-xtensa-config` was selected,
+   canonicalize and hash that file during planning, bind the selection and
+   identity in the digest, and set only that fixed environment variable during
+   confirmed execution. The file is a native host module and is not loaded by
+   planning. The entire MI exchange is fixed to `1-gdb-version`,
+   `2-target-select remote 127.0.0.1:<dynamic>`, `3-target-detach`, and
+   `4-gdb-exit`, requiring result classes `done`, `connected`, `done`, and
+   `exit` with matching tokens.
 5. After GDB cleanup, query the original current target again. If `running` is
    not proven, issue one fixed `targets <validated-name>; resume` fallback and
    poll `curstate` within the bound deadline. Success requires a final exact
@@ -70,9 +76,13 @@ commands, flash, arbitrary MI, or arbitrary monitor commands.
 - The runtime adapter/USB serial identity is not currently digest-bound by this
   OpenOCD workflow. The plan reports that limit; reviewed driver-specific
   configuration may bind a serial where the adapter supports it.
-- Automated tests cover the attach-halt restoration path with controlled
-  processes. Physical ESP32-S3 acceptance still requires a separately confirmed
-  digest and must not be inferred from this implementation checkpoint.
+- The first physical ESP32-S3 attempt proved the failure cleanup path but not
+  interoperability: generic Espressif GDB expected a 388-byte register packet
+  while OpenOCD returned the ESP32-S3 608-byte layout. The target-specific
+  profile produces the matching register inventory. Automated tests now bind
+  and deliver that profile, clear ambient configuration, restore the target on
+  protocol failure, and reject profile drift. Physical success still requires
+  a new separately confirmed digest.
 
 ## References
 

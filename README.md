@@ -98,6 +98,7 @@ lifecycle:
 cargo run -- openocd session plan \
   --openocd-executable path/to/openocd \
   --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
   --expected-target <exact-openocd-target-name> \
   --config path/to/board.cfg \
   --search path/to/openocd/scripts \
@@ -106,6 +107,7 @@ cargo run -- openocd session plan \
 cargo run -- openocd session test \
   --openocd-executable path/to/openocd \
   --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
   --expected-target <exact-openocd-target-name> \
   --config path/to/board.cfg \
   --search path/to/openocd/scripts \
@@ -113,9 +115,18 @@ cargo run -- openocd session test \
   --json
 ```
 
-The combined digest binds both executable identities, the OpenOCD config
-manifest and search paths, the exact expected OpenOCD current-target name,
-fixed MI2 protocol, deadlines, and restoration policy. The test refuses to
+The optional `--gdb-xtensa-config` selects the exact native target profile
+loaded through Espressif GDB's `XTENSA_GNU_CONFIG` environment variable. Its
+canonical path, size, and SHA-256 are bound by the combined digest. Ambient
+values are removed even when the option is omitted. The selected file is
+native host code and is loaded only by the confirmed test, not by the plan.
+Use the actual `xtensa-esp-elf-gdb` binary plus the target-specific profile
+instead of relying on a launcher that dynamically selects unbound children.
+
+The combined digest binds both executable identities, the optional Xtensa
+profile selection and identity, the OpenOCD config manifest and search paths,
+the exact expected OpenOCD current-target name, fixed MI2 protocol, deadlines,
+and restoration policy. The test refuses to
 start GDB unless the runtime current target exactly matches that name and is
 `running`. It then permits only version, remote connect, detach, and GDB exit.
 Because default OpenOCD attach may halt the CPU, the tool verifies `running`
@@ -510,8 +521,13 @@ output, and Windows Job Object cleanup without opening a remote connection. A
 confirmed combined-session implementation now adds a running-origin
 precondition, fixed MI version/connect/detach/exit exchange, fixed resume
 fallback, final running-state verification, and complete two-process cleanup.
-Its controlled regression path passes; physical ESP32-S3 acceptance awaits the
-new plan digest. Therefore GDB/MI symbols and target inspection, general
+Its controlled regression path passes. The first physical ESP32-S3 attempt
+failed closed during remote register negotiation because a generic Espressif
+GDB was launched without its ESP32-S3 Xtensa profile. Both process trees were
+cleaned, the fixed fallback restored CPU0 to `running`, probe-rs reattached,
+and UART heartbeats resumed. The exact profile is now hash-bound, but physical
+combined-session acceptance awaits a new plan digest. Therefore GDB/MI symbols
+and target inspection, general
 ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
 watchpoints, asynchronous request cancellation, durable crash recovery,
