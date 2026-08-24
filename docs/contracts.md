@@ -125,6 +125,48 @@ This checkpoint advertises `server_launch=true`, `tcl_rpc=true`, and
 version response do not prove target examination, CPU state preservation, or
 debugger semantics.
 
+## Bounded GDB/MI host lifecycle
+
+`openocd gdb inspect` is an independent `R0_READ_ONLY` host operation. It
+resolves one exact executable, runs only `--version` with a 100..=30000 ms
+deadline (default 10000), requires a line beginning with `GNU gdb`, and hashes
+the executable with a 512 MiB maximum. Stdout and stderr are drained
+concurrently with the same 64 KiB per-stream version-probe limit used by
+OpenOCD inspection. A successful inspection keeps
+`gdb_mi_host_process=false` and all remote or target capabilities false.
+
+`openocd gdb test` repeats that exact inspection and then starts the selected
+binary with the fixed arguments `--nx --nh --quiet --interpreter=mi2`. It
+does not accept extra GDB arguments, CLI commands, MI commands, initialization
+files, symbol files, or target endpoints. Input is direct ASCII terminated by
+LF; no shell or locale-dependent text pipeline is involved. Startup and
+shutdown deadlines are independently bounded to 100..=60000 ms (default
+10000) and 100..=30000 ms (default 3000).
+
+The only input sequence is `1-gdb-version` followed by `2-gdb-exit`. Readiness
+requires a valid MI startup prompt. The first request must produce the
+token-correlated result `1^done`; the exit request must produce `2^exit`,
+followed by a successful process exit. The framing parser recognizes prompts,
+result, async, and quoted stream record categories plus result tokens and
+classes. It deliberately does not claim to parse arbitrary nested MI values or
+provide a general debugger command channel.
+
+MI stdout and diagnostic stderr are drained concurrently, forwarded to the
+parent stderr, completely hashed, and retained up to 256 KiB per stream. Lines
+are limited to 16 KiB and the event queue to 256 records. Truncation, oversized
+lines, dropped events, malformed records, unmatched tokens, incomplete drains,
+or unsuccessful exit are `PROTOCOL_ERROR`. A Windows Job Object or Unix process
+group owns the complete descendant tree on success, timeout, protocol failure,
+and drop.
+
+A successful test has `scope="managed_gdb_mi_lifecycle"`,
+`risk="R0_READ_ONLY"`, and `gdb_mi_host_process=true`. This proves only the
+selected local process and fixed MI2 handshake. `remote_target_connection`,
+symbol loading, register/memory/stack access, breakpoints, execution control,
+and flash remain false. The OpenOCD server result also continues to advertise
+`gdb_mi=false`: the two independently proven host processes have not yet been
+combined into a target session.
+
 `probes test --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` operation. It opens the selected probe, attaches to the
 target, and disconnects without requesting erase, program, reset, halt,

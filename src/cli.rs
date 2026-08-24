@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use crate::{
     backend::{
         DebugBackend,
-        openocd::{self, OpenOcdInspectOptions, OpenOcdServerOptions},
+        openocd::{
+            self, GdbInspectOptions, GdbMiTestOptions, OpenOcdInspectOptions, OpenOcdServerOptions,
+        },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
     },
@@ -98,6 +100,10 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum OpenOcdCommand {
     Inspect(OpenOcdInspectSelection),
+    Gdb {
+        #[command(subcommand)]
+        command: OpenOcdGdbCommand,
+    },
     Server {
         #[command(subcommand)]
         command: OpenOcdServerCommand,
@@ -121,6 +127,52 @@ pub struct OpenOcdInspectSelection {
         help = "bounded OpenOCD --version deadline in milliseconds (100..=30000)"
     )]
     pub timeout_ms: u64,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdGdbCommand {
+    Inspect(GdbInspectSelection),
+    Test(GdbMiTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct GdbInspectSelection {
+    #[arg(long, default_value = "gdb", value_name = "PATH")]
+    pub executable: PathBuf,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_GDB_VERSION_TIMEOUT_MS,
+        help = "bounded GDB --version deadline in milliseconds (100..=30000)"
+    )]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct GdbMiTestSelection {
+    #[arg(long, default_value = "gdb", value_name = "PATH")]
+    pub executable: PathBuf,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_GDB_VERSION_TIMEOUT_MS,
+        help = "bounded GDB --version deadline in milliseconds (100..=30000)"
+    )]
+    pub version_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_GDB_MI_STARTUP_TIMEOUT_MS,
+        help = "bounded MI startup and version handshake deadline in milliseconds (100..=60000)"
+    )]
+    pub startup_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_GDB_MI_SHUTDOWN_TIMEOUT_MS,
+        help = "bounded MI exit deadline in milliseconds (100..=30000)"
+    )]
+    pub shutdown_timeout_ms: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -527,6 +579,18 @@ impl Cli {
             } => "openocd.inspect",
             Command::Openocd {
                 command:
+                    OpenOcdCommand::Gdb {
+                        command: OpenOcdGdbCommand::Inspect(_),
+                    },
+            } => "openocd.gdb.inspect",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Gdb {
+                        command: OpenOcdGdbCommand::Test(_),
+                    },
+            } => "openocd.gdb.test",
+            Command::Openocd {
+                command:
                     OpenOcdCommand::Server {
                         command: OpenOcdServerCommand::Plan(_),
                     },
@@ -731,6 +795,46 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report.executable.resolved,
                     report.executable.version_line,
                     report.configuration.top_level_files.len(),
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Gdb {
+                    command: OpenOcdGdbCommand::Inspect(selection),
+                },
+        } => {
+            let report = openocd::inspect_gdb(&GdbInspectOptions {
+                executable: selection.executable.clone(),
+                timeout_ms: selection.timeout_ms,
+            })?;
+            Ok(CommandResult::serializable(
+                "openocd.gdb.inspect",
+                &report,
+                format!(
+                    "GDB host inspection complete\nExecutable: {}\nVersion: {}\nMI process: disabled\nRemote target connection: disabled",
+                    report.executable.resolved, report.executable.version_line,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Gdb {
+                    command: OpenOcdGdbCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_gdb_mi(&gdb_mi_test_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.gdb.test",
+                &report,
+                format!(
+                    "GDB/MI host lifecycle complete\nExecutable: {}\nInterpreter: {}\nVersion command: {}^{}\nExit command: {}^{}\nRemote target connection: disabled",
+                    report.executable.resolved,
+                    report.protocol.interpreter,
+                    report.handshake.version_command.token,
+                    report.handshake.version_command.result_class,
+                    report.shutdown.token,
+                    report.shutdown.result_class.as_deref().unwrap_or("missing"),
                 ),
             ))
         }
@@ -1392,6 +1496,15 @@ fn openocd_server_options(selection: &OpenOcdServerSelection) -> OpenOcdServerOp
         executable: selection.executable.clone(),
         config_files: selection.config_files.clone(),
         search_dirs: selection.search_dirs.clone(),
+        version_timeout_ms: selection.version_timeout_ms,
+        startup_timeout_ms: selection.startup_timeout_ms,
+        shutdown_timeout_ms: selection.shutdown_timeout_ms,
+    }
+}
+
+fn gdb_mi_test_options(selection: &GdbMiTestSelection) -> GdbMiTestOptions {
+    GdbMiTestOptions {
+        executable: selection.executable.clone(),
         version_timeout_ms: selection.version_timeout_ms,
         startup_timeout_ms: selection.startup_timeout_ms,
         shutdown_timeout_ms: selection.shutdown_timeout_ms,

@@ -1,6 +1,6 @@
 ---
 name: embedded-debugger
-description: Use embedded-debugger to inspect and control embedded targets through probe-rs or Replay, including exact probe selection, persistent debug sessions, bounded core control, registers, memory, and hardware breakpoints. Trigger for embedded flashing/debugging requests that need structured evidence or safe session cleanup.
+description: Use embedded-debugger for structured embedded flashing and debugging through probe-rs or Replay, plus guarded OpenOCD and GDB host diagnostics. Trigger when work needs exact probe selection, bounded target control, evidence, safe session cleanup, or verified debug-tool lifecycles.
 ---
 
 # Embedded Debugger
@@ -16,6 +16,19 @@ OpenOCD shell parsing.
 2. Select the probe by its complete selector, including serial identity. Select the exact target name; never infer either from a friendly board name.
 3. For native operations, surface the returned capability matrix and `effects` before taking an R1 action. Replay is the safe path for contract tests and offline analysis.
 4. When a serial console is relevant, use the `baud` skill for port identity and read-only monitoring. Keep DTR/RTS false unless the board protocol explicitly requires otherwise.
+
+## OpenOCD and GDB host checks
+
+Use `openocd inspect` before any OpenOCD configuration execution. Configuration
+files are Tcl; crossing into `openocd server test` requires a reviewed
+`openocd server plan` and its exact confirmation digest.
+
+Use `openocd gdb inspect --executable <PATH> --json` to prove an exact GNU GDB
+file, then `openocd gdb test --executable <PATH> --json` to prove only the
+fixed local MI2 version/exit lifecycle. A successful
+`gdb_mi_host_process=true` does not authorize or prove a remote target session.
+Do not infer symbol, register, memory, stack, breakpoint, execution-control, or
+flash support while those capability fields remain false.
 
 ## Persistent session
 

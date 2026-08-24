@@ -523,3 +523,51 @@ endpoint discovery, Tcl readiness, graceful shutdown, descendant cleanup,
 probe release, and runtime recovery all passed. It does not accept arbitrary
 configuration as benign, claim target-state preservation, or enable GDB/MI,
 CPU1 control, target operations, or flash.
+
+## GDB/MI host lifecycle acceptance (2026-08-24)
+
+- Espressif's recommended Windows x64 `xtensa-esp-elf-gdb`
+  `17.1_20260402` archive was selected from the current ESP-IDF `tools.json`.
+  The downloaded archive was exactly 44,820,924 bytes and matched the published
+  SHA-256
+  `7525ae46b39fc87568717d8f0cc3dfbcdb77b96435dd80acfce6918b0abc2b8a`.
+  It was installed as a portable tool under
+  `D:\Code\tools\embedded\espressif\xtensa-esp-elf-gdb\17.1_20260402`
+  without changing `PATH`.
+- The exact selected binary was `xtensa-esp-elf-gdb-no-python.exe`. It
+  identified itself as `GNU gdb (esp-gdb) 17.1_20260402`, was 14,596,096
+  bytes, and had SHA-256
+  `5ce33ee35b9075251532fc8ea6f1745ce0885764689f0014ff1c3a3f42bcd71a`.
+- The original 2000 ms version deadline failed closed on a cold Windows start
+  at 2005 ms with no retained output. The process was terminated and drained;
+  it was not accepted as available. The GDB-specific default was then calibrated
+  to 10000 ms. A cold `openocd gdb inspect` passed in 2818 ms with exit code 0,
+  complete 286-byte stdout, no stderr, and all remote/target capabilities false.
+- `openocd gdb test` launched only
+  `--nx --nh --quiet --interpreter=mi2` inside a Windows Job Object. It observed
+  the startup prompt in 28 ms, accepted 13 quoted version stream records, and
+  correlated `1-gdb-version` with `1^done` in 1 ms.
+- The fixed `2-gdb-exit` command returned `2^exit`. GDB exited with code 0;
+  shutdown took 5 ms, `graceful=true`,
+  `forced_process_tree_kill=false`, and
+  `process_tree_cleanup_complete=true`. Stdout contained 913 bytes with SHA-256
+  `4d685e1ff6823828f172f0d392f742882881a4f290ba54a175e24bb47b3de10f`;
+  stderr was empty. Neither stream was truncated, oversized, dropped, or
+  incompletely drained.
+- A final reproducibility run using the completed contract also passed with the
+  same 13 stream records and stdout SHA-256. Normal scheduler variation changed
+  startup/version/shutdown timing from 28/1/5 ms to 32/0/23 ms without changing
+  any protocol, exit, or cleanup result. Its JSON stdout and protocol stderr
+  are retained under
+  `target/hardware-acceptance/2026-08-24-gdb-mi-host`.
+- The ESP32-S3 remained physically connected during this host acceptance, but
+  the command did not start OpenOCD, open a GDB remote endpoint, load an ELF,
+  connect to the USB/JTAG probe, inspect a CPU, or issue any target command.
+  Therefore no confirmation digest or UART recovery claim applies to this
+  `R0_READ_ONLY` checkpoint.
+
+This accepts exact GDB identity, fixed MI2 framing and token correlation,
+bounded output, graceful exit, and descendant cleanup on the host. It enables
+only `gdb_mi_host_process` in the GDB test result. It does not combine GDB with
+OpenOCD or qualify symbols, registers, memory, stack, breakpoints, execution
+control, target-state preservation, CPU1, or flash.

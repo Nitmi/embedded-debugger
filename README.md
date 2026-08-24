@@ -65,6 +65,32 @@ stderr and in bounded summaries; telnet is disabled, and the complete process
 tree is isolated and cleaned up. This checkpoint exposes the dynamic GDB
 endpoint but does not yet claim GDB/MI, target operations, or flash.
 
+The GDB host process is enabled as a separate read-only checkpoint:
+
+```console
+cargo run -- openocd gdb inspect \
+  --executable path/to/gdb \
+  --json
+
+cargo run -- openocd gdb test \
+  --executable path/to/gdb \
+  --json
+```
+
+`gdb inspect` resolves and hashes one exact executable (maximum 512 MiB), runs
+only bounded `--version`, and requires a `GNU gdb` identity. `gdb test` repeats
+that inspection, disables initialization files, fixes
+`--interpreter=mi2`, and permits only tokenized `1-gdb-version` and
+`2-gdb-exit` commands. It requires the startup prompt, `1^done`, `2^exit`, a
+successful process exit, complete bounded output, and descendant cleanup. The
+default GDB version and MI startup deadlines are 10000 ms; shutdown is 3000 ms.
+Both commands are `scope="host_only"` or
+`scope="managed_gdb_mi_lifecycle"` and `risk="R0_READ_ONLY"`: they do not start
+OpenOCD, load symbols, open a remote endpoint, connect to a probe, or touch a
+target. Only `gdb_mi_host_process` becomes true in the test result. Remote
+connection, register/memory/stack access, breakpoints, execution control, and
+flash remain false.
+
 Native probe discovery is available through the embedded probe-rs library:
 
 ```console
@@ -403,8 +429,9 @@ See [docs/contracts.md](docs/contracts.md),
 [ADR-0002](docs/decisions/0002-core-state-follows-session-lifetime.md),
 [ADR-0003](docs/decisions/0003-persistent-session-jsonl-lease.md), and
 [ADR-0004](docs/decisions/0004-fail-closed-mcp-supervision.md), and
-[ADR-0005](docs/decisions/0005-openocd-host-inspection-boundary.md), and
-[ADR-0006](docs/decisions/0006-guarded-openocd-server-lifecycle.md).
+[ADR-0005](docs/decisions/0005-openocd-host-inspection-boundary.md),
+[ADR-0006](docs/decisions/0006-guarded-openocd-server-lifecycle.md), and
+[ADR-0007](docs/decisions/0007-bounded-gdb-mi-host-lifecycle.md).
 
 ## Current status
 
@@ -433,8 +460,10 @@ bounds logs, and enforces process-tree cleanup. Its exact-confirmation Windows
 lifecycle passed on ESP32-S3 native USB-JTAG, including dynamic endpoints, Tcl
 version/shutdown, exit and port cleanup, probe-rs reattach, and UART heartbeat
 recovery. OpenOCD reported CPU0 examination success but CPU1 examination
-failure, so GDB/MI target operations, general
-ELF/HEX loading, RTT, memory writes,
+failure. A separate Espressif GDB 17.1 host-only checkpoint now proves fixed
+MI2 startup, token-correlated version/exit commands, graceful exit, bounded
+output, and Windows Job Object cleanup without opening a remote connection.
+Therefore GDB/MI target operations, general ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
 watchpoints, asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,

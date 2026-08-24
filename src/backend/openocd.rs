@@ -16,8 +16,16 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{DebugError, ErrorCode, Result, SuggestedAction};
 
+mod gdb;
 mod server;
 
+pub use gdb::{
+    DEFAULT_GDB_MI_SHUTDOWN_TIMEOUT_MS, DEFAULT_GDB_MI_STARTUP_TIMEOUT_MS,
+    DEFAULT_GDB_VERSION_TIMEOUT_MS, GdbInspectOptions, GdbInspection, GdbMiTestOptions,
+    GdbMiTestReport, MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS, MAX_GDB_MI_STARTUP_TIMEOUT_MS,
+    MAX_GDB_VERSION_TIMEOUT_MS, MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS,
+    MIN_GDB_VERSION_TIMEOUT_MS, inspect_gdb, test_gdb_mi,
+};
 pub use server::{
     DEFAULT_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS, DEFAULT_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
     MAX_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS, MAX_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
@@ -185,6 +193,9 @@ pub fn inspect_executable(
         command,
         &resolved_display,
         Duration::from_millis(timeout_ms),
+        "OpenOCD",
+        "openocd",
+        "version_probe",
     )?;
 
     executable_inspection_from_output(requested_display, resolved_display, timeout_ms, output)
@@ -493,18 +504,25 @@ fn run_bounded_command(
     mut command: Command,
     executable: &str,
     timeout: Duration,
+    tool_label: &str,
+    backend: &str,
+    capability: &str,
 ) -> Result<BoundedProcessOutput> {
     let started = Instant::now();
     let mut child = command.spawn().map_err(|source| {
         if source.kind() == std::io::ErrorKind::PermissionDenied {
-            DebugError::io("start OpenOCD version probe", Some(executable), &source)
+            DebugError::io(
+                &format!("start {tool_label} version probe"),
+                Some(executable),
+                &source,
+            )
         } else {
             DebugError::unavailable(
                 ErrorCode::CapabilityUnavailable,
-                "OpenOCD executable could not be started",
+                format!("{tool_label} executable could not be started"),
                 json!({
-                    "backend": "openocd",
-                    "capability": "version_probe",
+                    "backend": backend,
+                    "capability": capability,
                     "executable": executable,
                     "cause": source.to_string(),
                 }),
@@ -537,11 +555,11 @@ fn run_bounded_command(
                 let (stdout, stderr) = finish_streams(stdout_reader, stderr_reader);
                 let mut error = DebugError::new(
                     ErrorCode::Timeout,
-                    "OpenOCD version probe exceeded its deadline",
+                    format!("{tool_label} version probe exceeded its deadline"),
                     5,
                     json!({
-                        "backend": "openocd",
-                        "capability": "version_probe",
+                        "backend": backend,
+                        "capability": capability,
                         "executable": executable,
                         "timeout_ms": duration_ms(timeout),
                         "elapsed_ms": duration_ms(started.elapsed()),
@@ -563,7 +581,7 @@ fn run_bounded_command(
                 let _ = child.wait();
                 let _ = finish_streams(stdout_reader, stderr_reader);
                 return Err(DebugError::io(
-                    "poll OpenOCD version probe",
+                    &format!("poll {tool_label} version probe"),
                     Some(executable),
                     &source,
                 ));
@@ -901,7 +919,15 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let output = run_bounded_command(success, "test-helper", Duration::from_secs(5)).unwrap();
+        let output = run_bounded_command(
+            success,
+            "test-helper",
+            Duration::from_secs(5),
+            "OpenOCD",
+            "openocd",
+            "version_probe",
+        )
+        .unwrap();
         assert!(output.success);
         assert!(output.stdout.drain_complete);
         assert!(
@@ -916,8 +942,15 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let error =
-            run_bounded_command(timeout, "test-helper", Duration::from_millis(100)).unwrap_err();
+        let error = run_bounded_command(
+            timeout,
+            "test-helper",
+            Duration::from_millis(100),
+            "OpenOCD",
+            "openocd",
+            "version_probe",
+        )
+        .unwrap_err();
         assert_eq!(error.code, ErrorCode::Timeout);
         assert!(error.retryable);
     }

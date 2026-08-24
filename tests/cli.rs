@@ -45,6 +45,46 @@ fn write_fake_openocd(directory: &Path) -> PathBuf {
     }
 }
 
+fn write_fake_gdb(directory: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let executable = directory.join("fake-gdb.cmd");
+        fs::write(
+            &executable,
+            "@echo off\r\nif \"%1\"==\"--version\" goto version\r\necho =thread-group-added,id=\"i1\"\r\necho ^(gdb^)\r\nset /p first=\r\nif not \"%first%\"==\"1-gdb-version\" exit /b 3\r\necho ~\"GNU gdb (esp-gdb) 17.1-test\\n\"\r\necho 1^^done\r\necho ^(gdb^)\r\nset /p second=\r\nif not \"%second%\"==\"2-gdb-exit\" exit /b 4\r\necho 2^^exit\r\nexit /b 0\r\n:version\r\necho GNU gdb ^(esp-gdb^) 17.1-test\r\nexit /b 0\r\n",
+        )
+        .unwrap();
+        executable
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = directory.join("fake-gdb");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' 'GNU gdb (esp-gdb) 17.1-test'\n  exit 0\nfi\nprintf '%s\\n' '=thread-group-added,id=\"i1\"' '(gdb)'\nIFS= read -r first\n[ \"$first\" = '1-gdb-version' ] || exit 3\nprintf '%s\\n' '~\"GNU gdb (esp-gdb) 17.1-test\\n\"' '1^done' '(gdb)'\nIFS= read -r second\n[ \"$second\" = '2-gdb-exit' ] || exit 4\nprintf '%s\\n' '2^exit'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        executable
+    }
+}
+
+fn write_fake_gdb_with_wrong_token(directory: &Path) -> PathBuf {
+    let executable = write_fake_gdb(directory);
+    let script = fs::read_to_string(&executable).unwrap();
+    let script = if cfg!(windows) {
+        script.replace("echo 1^^done", "echo 9^^done")
+    } else {
+        script.replace("'1^done'", "'9^done'")
+    };
+    fs::write(&executable, script).unwrap();
+    executable
+}
+
 fn spawn_replay_supervisor(idle_timeout_ms: u64, max_restarts: u32) -> std::process::Child {
     ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
         .args([
@@ -1334,6 +1374,196 @@ fn openocd_inspect_returns_a_host_only_versioned_contract() {
     assert_eq!(result["data"]["capabilities"]["gdb_mi"], false);
     assert_eq!(result["data"]["capabilities"]["target_operations"], false);
     assert_eq!(result["data"]["capabilities"]["flash"], false);
+}
+
+#[test]
+fn openocd_gdb_inspect_returns_a_host_only_versioned_contract() {
+    let directory = tempdir().unwrap();
+    let executable = write_fake_gdb(directory.path());
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("gdb")
+        .arg("inspect")
+        .arg("--executable")
+        .arg(&executable)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["schema_version"], "1.0");
+    assert_eq!(result["operation"], "openocd.gdb.inspect");
+    assert_eq!(result["data"]["backend"], "openocd");
+    assert_eq!(result["data"]["component"], "gdb");
+    assert_eq!(result["data"]["scope"], "host_only");
+    assert_eq!(result["data"]["risk"], "R0_READ_ONLY");
+    assert_eq!(result["data"]["complete"], true);
+    assert_eq!(
+        result["data"]["executable"]["version_line"],
+        "GNU gdb (esp-gdb) 17.1-test"
+    );
+    assert_eq!(result["data"]["executable"]["vendor"], "espressif");
+    assert_eq!(
+        result["data"]["executable_file"]["sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(result["data"]["capabilities"]["gdb_mi_host_process"], false);
+    assert_eq!(
+        result["data"]["capabilities"]["remote_target_connection"],
+        false
+    );
+    assert_eq!(result["data"]["capabilities"]["target_operations"], false);
+    assert_eq!(result["data"]["capabilities"]["flash"], false);
+}
+
+#[test]
+fn openocd_gdb_test_proves_a_bounded_token_correlated_mi2_lifecycle() {
+    let directory = tempdir().unwrap();
+    let executable = write_fake_gdb(directory.path());
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("gdb")
+        .arg("test")
+        .arg("--executable")
+        .arg(&executable)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["schema_version"], "1.0");
+    assert_eq!(result["operation"], "openocd.gdb.test");
+    assert_eq!(result["data"]["scope"], "managed_gdb_mi_lifecycle");
+    assert_eq!(result["data"]["risk"], "R0_READ_ONLY");
+    assert_eq!(result["data"]["protocol"]["interpreter"], "mi2");
+    assert_eq!(
+        result["data"]["protocol"]["initialization_files_enabled"],
+        false
+    );
+    assert_eq!(
+        result["data"]["protocol"]["token_correlation_required"],
+        true
+    );
+    assert_eq!(
+        result["data"]["protocol"]["process_isolation"],
+        if cfg!(windows) {
+            "windows_job_object"
+        } else {
+            "unix_process_group"
+        }
+    );
+    assert_eq!(result["data"]["protocol"]["commands"][0]["token"], 1);
+    assert_eq!(
+        result["data"]["protocol"]["commands"][0]["command"],
+        "-gdb-version"
+    );
+    assert_eq!(
+        result["data"]["handshake"]["version_command"]["result_class"],
+        "done"
+    );
+    assert_eq!(result["data"]["handshake"]["version_stream_records"], 1);
+    assert_eq!(result["data"]["shutdown"]["result_class"], "exit");
+    assert_eq!(result["data"]["shutdown"]["graceful"], true);
+    assert_eq!(
+        result["data"]["shutdown"]["forced_process_tree_kill"],
+        false
+    );
+    assert_eq!(
+        result["data"]["shutdown"]["process_tree_cleanup_complete"],
+        true
+    );
+    assert_eq!(result["data"]["capabilities"]["gdb_mi_host_process"], true);
+    assert_eq!(
+        result["data"]["capabilities"]["remote_target_connection"],
+        false
+    );
+    assert_eq!(result["data"]["capabilities"]["register_read"], false);
+    assert_eq!(result["data"]["capabilities"]["memory_read"], false);
+    assert_eq!(result["data"]["capabilities"]["breakpoints"], false);
+    assert_eq!(result["data"]["capabilities"]["execution_control"], false);
+    assert_eq!(result["data"]["capabilities"]["flash"], false);
+    assert_eq!(result["data"]["output"]["stdout"]["truncated"], false);
+    assert_eq!(result["data"]["output"]["stdout"]["drain_complete"], true);
+    assert_eq!(
+        result["data"]["output"]["stdout"]["sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+}
+
+#[test]
+fn openocd_gdb_test_validates_timeouts_before_executable_lookup() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "openocd",
+            "gdb",
+            "test",
+            "--executable",
+            "deliberately-missing-gdb",
+            "--startup-timeout-ms",
+            "99",
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.gdb.test");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["timeout_kind"], "startup");
+}
+
+#[test]
+fn openocd_gdb_test_rejects_an_unmatched_result_token_and_cleans_up() {
+    let directory = tempdir().unwrap();
+    let executable = write_fake_gdb_with_wrong_token(directory.path());
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("gdb")
+        .arg("test")
+        .arg("--executable")
+        .arg(&executable)
+        .arg("--json")
+        .assert()
+        .code(6)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.gdb.test");
+    assert_eq!(result["error"]["code"], "PROTOCOL_ERROR");
+    assert_eq!(result["error"]["details"]["expected_token"], 1);
+    assert_eq!(result["error"]["details"]["observed_token"], 9);
+    assert_eq!(
+        result["error"]["details"]["shutdown"]["process_tree_cleanup_complete"],
+        true
+    );
+    assert_eq!(
+        result["error"]["details"]["output"]["stdout"]["drain_complete"],
+        true
+    );
 }
 
 #[test]

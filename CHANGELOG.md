@@ -19,6 +19,12 @@ All notable changes to this project will be documented in this file.
   cleanup. ESP32-S3 native USB-JTAG passed the Windows lifecycle, probe-release,
   and UART-recovery checks; CPU1 examination remains unqualified and GDB/MI,
   target operations, and OpenOCD flash remain disabled.
+- Host-only `openocd gdb inspect/test` with exact GNU GDB identity and executable
+  hashing, fixed `mi2` with initialization files disabled, direct ASCII input,
+  token-correlated `-gdb-version`/`-gdb-exit`, bounded and hashed MI output,
+  fail-closed framing validation, and Windows Job Object / Unix process-group
+  cleanup. Espressif GDB 17.1 passed the native Windows host lifecycle; remote
+  connection and all target-facing capabilities remain disabled.
 - Versioned success and error envelopes for Agent-safe CLI automation.
 - Stable error codes and exit codes.
 - Backend capability model and deterministic Replay backend.
