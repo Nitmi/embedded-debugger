@@ -400,12 +400,56 @@ fn transition_target(
     required_state: &str,
     timeout_ms: u64,
 ) -> OpenOcdTargetTransition {
+    let command = format!("targets {target_name}; {action}");
+    transition_target_with_command(
+        server,
+        target_name,
+        action,
+        &command,
+        required_state,
+        timeout_ms,
+    )
+}
+
+pub(super) fn transition_target_with_command(
+    server: &ManagedServerSession,
+    target_name: &str,
+    action: &str,
+    command: &str,
+    required_state: &str,
+    timeout_ms: u64,
+) -> OpenOcdTargetTransition {
+    transition_target_with_checked_command(
+        server,
+        target_name,
+        action,
+        command,
+        required_state,
+        timeout_ms,
+        |response| Ok(response.trim().to_string()),
+    )
+}
+
+pub(super) fn transition_target_with_checked_command<F>(
+    server: &ManagedServerSession,
+    target_name: &str,
+    action: &str,
+    command: &str,
+    required_state: &str,
+    timeout_ms: u64,
+    classify_response: F,
+) -> OpenOcdTargetTransition
+where
+    F: FnOnce(&str) -> std::result::Result<String, String>,
+{
     let started = Instant::now();
     let deadline = started + Duration::from_millis(timeout_ms);
-    let command = format!("targets {target_name}; {action}");
     let (command_response, command_error) =
-        match server.tcl_request(&command, deadline.saturating_duration_since(Instant::now())) {
-            Ok(response) => (Some(bounded_text(response.trim())), None),
+        match server.tcl_request(command, deadline.saturating_duration_since(Instant::now())) {
+            Ok(response) => match classify_response(response.trim()) {
+                Ok(response) => (Some(bounded_text(&response)), None),
+                Err(error) => (Some(bounded_text(response.trim())), Some(error)),
+            },
             Err(error) => (None, Some(error)),
         };
 
@@ -445,7 +489,7 @@ fn transition_target(
 
     OpenOcdTargetTransition {
         action: action.to_string(),
-        command,
+        command: command.to_string(),
         command_response,
         command_error,
         required_state: required_state.to_string(),
@@ -457,7 +501,7 @@ fn transition_target(
     }
 }
 
-fn transition_reached_state(transition: &OpenOcdTargetTransition, state: &str) -> bool {
+pub(super) fn transition_reached_state(transition: &OpenOcdTargetTransition, state: &str) -> bool {
     transition
         .observation
         .as_ref()
@@ -465,13 +509,20 @@ fn transition_reached_state(transition: &OpenOcdTargetTransition, state: &str) -
 }
 
 fn validate_target_options(options: &OpenOcdTargetOptions) -> Result<()> {
-    if options.expected_target != options.expected_target.trim() {
+    validate_expected_target_and_timeout(&options.expected_target, options.target_state_timeout_ms)
+}
+
+pub(super) fn validate_expected_target_and_timeout(
+    expected_target: &str,
+    target_state_timeout_ms: u64,
+) -> Result<()> {
+    if expected_target != expected_target.trim() {
         return Err(DebugError::config(
             "expected OpenOCD target name must not contain surrounding whitespace",
-            json!({"expected_target": bounded_text(&options.expected_target)}),
+            json!({"expected_target": bounded_text(expected_target)}),
         ));
     }
-    validate_target_name(&options.expected_target)
+    validate_target_name(expected_target)
         .map(|_| ())
         .map_err(|error| {
             DebugError::config(
@@ -480,13 +531,13 @@ fn validate_target_options(options: &OpenOcdTargetOptions) -> Result<()> {
             )
         })?;
     if !(super::MIN_OPENOCD_TARGET_STATE_TIMEOUT_MS..=super::MAX_OPENOCD_TARGET_STATE_TIMEOUT_MS)
-        .contains(&options.target_state_timeout_ms)
+        .contains(&target_state_timeout_ms)
     {
         return Err(DebugError::config(
             "OpenOCD target transition timeout is outside the supported range",
             json!({
                 "timeout_kind": "target_state",
-                "timeout_ms": options.target_state_timeout_ms,
+                "timeout_ms": target_state_timeout_ms,
                 "minimum": super::MIN_OPENOCD_TARGET_STATE_TIMEOUT_MS,
                 "maximum": super::MAX_OPENOCD_TARGET_STATE_TIMEOUT_MS,
             }),

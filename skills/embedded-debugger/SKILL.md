@@ -34,6 +34,17 @@ not retry failure automatically. A success proves only fixed selected-target
 halt/run; it does not authorize reset, GDB, register/memory/stack access,
 breakpoints, flash, monitor commands, or arbitrary Tcl.
 
+For reset, use the independent `openocd reset plan/test` workflow. Before
+requesting confirmation, surface that OpenOCD resets all defined targets and
+runs configuration-defined reset events, while the tool observes and recovers
+only the exact selected target. The fixed test requires a running origin, exact
+Tcl catch code 0 for reset and recovery, a halted selected-target observation,
+one fixed catch-wrapped selected-target resume, final running, and complete
+cleanup. Require the exact reset digest immediately before execution. Do not
+claim non-selected target restoration, and never retry a failed reset test
+automatically. Success does not authorize `reset init`, another reset mode,
+GDB, target-data access, breakpoints, flash, monitor commands, or user Tcl.
+
 Use `openocd gdb inspect --executable <PATH> --json` to prove an exact GNU GDB
 file, then `openocd gdb test --executable <PATH> --json` to prove only the
 fixed local MI2 version/exit lifecycle. A successful

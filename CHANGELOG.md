@@ -61,6 +61,18 @@ All notable changes to this project will be documented in this file.
   ESP32-S3 CPU0 run proved `running -> halted -> running`, graceful shutdown,
   dynamic-port cleanup, exact probe reuse, and UART recovery; CPU1 remains
   unqualified.
+- Confirmed `openocd reset plan/test` for one fixed global `reset halt` and
+  selected-target recovery. The digest binds OpenOCD/config identities, exact
+  selected current-target name, global reset scope, fixed reset/recovery Tcl
+  `catch` envelopes, deadlines, and one selected-target resume policy.
+  Execution refuses a mismatched or non-running selected target before reset,
+  requires catch code 0 plus the required state after both transitions, always
+  attempts the fixed recovery after any reset result, and requires complete
+  server cleanup. Effects disclose that OpenOCD resets all defined targets and
+  fires configuration-defined reset events; non-selected target inventory and
+  final states remain unbound and unverified. Controlled regressions pass,
+  including nonzero catch code, ineffective reset, and failed recovery paths.
+  Physical acceptance requires a separately confirmed plan.
 - Versioned success and error envelopes for Agent-safe CLI automation.
 - Stable error codes and exit codes.
 - Backend capability model and deterministic Replay backend.
@@ -203,9 +215,11 @@ All notable changes to this project will be documented in this file.
 - OpenOCD host inspection, a confirmed managed server, GDB/MI host validation,
   a confirmed fixed remote attach/detach lifecycle, and one fixed direct CPU0
   halt/resume roundtrip are implemented; the latter is physically accepted on
-  ESP32-S3. General OpenOCD target discovery/control, reset, symbol/ELF loading,
-  register or memory inspection, breakpoints/watchpoints, and flashing are not.
-  The MCP adapter
+  ESP32-S3. A fixed global reset-halt and selected-target recovery workflow is
+  implemented but still awaits physical acceptance. General OpenOCD target
+  discovery/control, configurable reset, non-selected target restoration,
+  symbol/ELF loading, register or memory inspection, breakpoints/watchpoints,
+  and flashing are not. The MCP adapter
   currently exposes only the probe-rs/Replay persistent session contract;
   OpenOCD and flash planning/execution remain CLI operations.
 - Native raw BIN requires an explicit base address; Replay uses the fixture

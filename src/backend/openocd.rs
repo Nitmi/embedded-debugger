@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{DebugError, ErrorCode, Result, SuggestedAction};
 
 mod gdb;
+mod reset;
 mod server;
 mod session;
 mod target;
@@ -30,6 +31,11 @@ pub use gdb::{
     MAX_GDB_MI_STARTUP_TIMEOUT_MS, MAX_GDB_VERSION_TIMEOUT_MS, MIN_GDB_MI_COMMAND_TIMEOUT_MS,
     MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS, MIN_GDB_VERSION_TIMEOUT_MS,
     inspect_gdb, test_gdb_mi,
+};
+pub use reset::{
+    OpenOcdResetCapabilities, OpenOcdResetConfirmationBoundary, OpenOcdResetEffects,
+    OpenOcdResetOptions, OpenOcdResetPlan, OpenOcdResetPolicy, OpenOcdResetProtocol,
+    OpenOcdResetProtocolCommand, OpenOcdResetTestReport, plan_reset, test_reset,
 };
 pub use server::{
     DEFAULT_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS, DEFAULT_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,

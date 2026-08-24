@@ -184,6 +184,38 @@ released OpenOCD and both dynamic ports, permitted an exact probe-rs reattach,
 and recovered zero-transmit UART heartbeats. CPU1 examination still fails on
 this fixture and remains unqualified.
 
+Reset qualification is a separate global-effect checkpoint:
+
+```console
+cargo run -- openocd reset plan \
+  --executable path/to/openocd \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --json
+
+cargo run -- openocd reset test \
+  --executable path/to/openocd \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --confirm <confirm_digest> \
+  --json
+```
+
+The digest binds a fixed `reset halt` Tcl catch envelope, OpenOCD's global
+reset scope, exact selected current-target name, catch-wrapped selected-target
+recovery, deadlines, and the same executable/configuration identities. The test
+accepts only a running selected target, requires exact Tcl catch code 0 for both
+reset and recovery, proves that target halted, always attempts the one fixed
+recovery, and requires final running plus complete server cleanup. OpenOCD
+reset affects all defined targets and fires configuration-defined reset events;
+the operation does not inventory, restore, or verify non-selected target states.
+It does not use
+`reset init`, a second reset fallback, GDB, target-data access, breakpoints,
+flash, monitor input, or user Tcl. Do not automatically retry a failure.
+Controlled fixtures pass; physical targets require a separately confirmed plan.
+
 Native probe discovery is available through the embedded probe-rs library:
 
 ```console
@@ -577,7 +609,10 @@ multi-client arbitration, other physically accepted native segmented targets,
 and non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD
 `running -> halted -> running` command now passes controlled process/Tcl
 regressions and exact-digest physical acceptance on ESP32-S3 CPU0; it does not
-expose general execution control. The core
+expose general execution control. A separate fixed global-reset and
+selected-target-recovery command now passes controlled Tcl/status/cleanup
+regressions but remains behind exact-digest physical acceptance; it does not
+claim non-selected target restoration. The core
 status/halt/run/continue/continue-until-halt/step contract is complete in
 Replay. Its session-scoped native path, idle lease expiry, and slot-addressable
 hardware breakpoints are accepted on ESP32-S3 CPU0; live attach negotiates two

@@ -105,6 +105,10 @@ pub enum OpenOcdCommand {
         #[command(subcommand)]
         command: OpenOcdGdbCommand,
     },
+    Reset {
+        #[command(subcommand)]
+        command: OpenOcdResetCommand,
+    },
     Server {
         #[command(subcommand)]
         command: OpenOcdServerCommand,
@@ -329,6 +333,41 @@ pub struct OpenOcdSessionTestSelection {
     pub session: OpenOcdSessionSelection,
 
     #[arg(long, help = "exact confirm_digest returned by openocd session plan")]
+    pub confirm: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdResetCommand {
+    Plan(OpenOcdResetSelection),
+    Test(OpenOcdResetTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdResetSelection {
+    #[command(flatten)]
+    pub server: OpenOcdServerSelection,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "exact OpenOCD 'target current' name verified before and after global reset"
+    )]
+    pub expected_target: String,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_TARGET_STATE_TIMEOUT_MS,
+        help = "bounded reset/recovery state transition deadline in milliseconds (100..=30000)"
+    )]
+    pub target_state_timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdResetTestSelection {
+    #[command(flatten)]
+    pub reset: OpenOcdResetSelection,
+
+    #[arg(long, help = "exact confirm_digest returned by openocd reset plan")]
     pub confirm: String,
 }
 
@@ -735,6 +774,18 @@ impl Cli {
             } => "openocd.gdb.test",
             Command::Openocd {
                 command:
+                    OpenOcdCommand::Reset {
+                        command: OpenOcdResetCommand::Plan(_),
+                    },
+            } => "openocd.reset.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Reset {
+                        command: OpenOcdResetCommand::Test(_),
+                    },
+            } => "openocd.reset.test",
+            Command::Openocd {
+                command:
                     OpenOcdCommand::Server {
                         command: OpenOcdServerCommand::Plan(_),
                     },
@@ -1064,6 +1115,53 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report.openocd.executable.resolved,
                     report.gdb.executable.resolved,
                     report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Reset {
+                    command: OpenOcdResetCommand::Plan(selection),
+                },
+        } => {
+            let report = openocd::plan_reset(&openocd_reset_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.reset.plan",
+                &report,
+                format!(
+                    "OpenOCD reset-and-recovery plan ready\nRisk: {}\nOpenOCD: {}\nSelected target: {}\nReset scope: all defined targets\nSelected-target sequence: running -> reset halt -> halted -> running\nConfirm digest: {}",
+                    report.risk,
+                    report.openocd.executable.resolved,
+                    report.reset_policy.expected_current_target,
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Reset {
+                    command: OpenOcdResetCommand::Test(selection),
+                },
+        } => {
+            let report =
+                openocd::test_reset(&openocd_reset_options(&selection.reset), &selection.confirm)?;
+            Ok(CommandResult::serializable(
+                "openocd.reset.test",
+                &report,
+                format!(
+                    "OpenOCD reset roundtrip complete\nSelected target: {}\nStates: {} -> {} -> {}\nReset scope: all defined targets\nShutdown: graceful",
+                    report.initial.target_name,
+                    report.initial.state,
+                    report
+                        .reset
+                        .observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
+                    report
+                        .recovery
+                        .observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
                 ),
             ))
         }
@@ -1793,6 +1891,14 @@ fn openocd_session_options(selection: &OpenOcdSessionSelection) -> OpenOcdGdbSes
         gdb_startup_timeout_ms: selection.gdb_startup_timeout_ms,
         gdb_command_timeout_ms: selection.gdb_command_timeout_ms,
         gdb_shutdown_timeout_ms: selection.gdb_shutdown_timeout_ms,
+        target_state_timeout_ms: selection.target_state_timeout_ms,
+    }
+}
+
+fn openocd_reset_options(selection: &OpenOcdResetSelection) -> openocd::OpenOcdResetOptions {
+    openocd::OpenOcdResetOptions {
+        openocd: openocd_server_options(&selection.server),
+        expected_target: selection.expected_target.clone(),
         target_state_timeout_ms: selection.target_state_timeout_ms,
     }
 }

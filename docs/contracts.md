@@ -288,6 +288,60 @@ verified final restoration. Reset, GDB/MI, register/memory/stack reads,
 breakpoints, watchpoints, flash, monitor commands, and arbitrary Tcl remain
 false.
 
+## Confirmed OpenOCD reset and selected-target recovery
+
+`openocd reset plan` accepts the managed OpenOCD inputs, one exact
+`--expected-target`, and a target-state deadline bounded to 100..=30000 ms. It
+validates the target syntax and deadline before resolving the executable or
+reading configuration files. The resulting `R2_DEVICE_WRITE` plan is separate
+from every server, session, and target-roundtrip digest.
+
+The digest binds the exact executable identity/version, top-level configuration
+manifests, ordered search paths, loopback dynamic-endpoint lifecycle, all
+deadlines, exact selected current-target name, fixed reset/recovery Tcl catch
+envelopes, global reset scope, and selected-target recovery policy.
+Search-directory contents, transitive sources, Tcl and reset-event semantics,
+runtime adapter identity, dynamic port numbers, and non-selected target
+inventory and states remain explicitly unbound.
+
+`openocd reset test --confirm <DIGEST>` recomputes the plan and rejects a
+mismatch before configuration Tcl executes. Its complete fixed protocol is:
+
+```text
+target current
+  -> exact confirmed selected target name
+<validated-current-target> curstate
+  -> running
+format {__EMBEDDED_DEBUGGER_RESET_V1__%d} [catch {reset halt}]
+  -> exact catch code 0, then selected target polled until halted
+format {__EMBEDDED_DEBUGGER_RECOVERY_V1__%d} [catch {targets <validated-current-target>; resume}]
+  -> exact catch code 0, then selected target polled until running
+shutdown
+  -> graceful OpenOCD exit
+```
+
+OpenOCD defines reset as affecting all configured targets and firing reset
+events. The result therefore reports global reset effects while proving state
+only for the exact selected target. It does not inventory, restore, or verify
+non-selected targets. Configuration and reset-event Tcl may have effects beyond
+the fixed commands even though only top-level configuration files are hashed.
+
+The selected target must start `running`. A name mismatch or another initial
+state stops before reset. After every reset result, including a nonzero catch
+code, malformed envelope, transport error, or missing halted observation, the
+tool makes one fixed catch-wrapped selected-target resume attempt with a fresh
+deadline. It never issues a second reset automatically. Success requires catch
+code 0 for reset and recovery, selected-target `halted`, final `running`,
+graceful shutdown, complete output drains, and process-tree cleanup. Failure
+evidence retains every available transition and lifecycle field; failures must
+not be retried automatically.
+
+A complete physically accepted result enables only fixed reset-halt,
+selected-target resume, selected-target state observation, and final running
+verification. It does not enable `reset init`, configurable reset modes,
+non-selected target restoration, GDB/MI, register/memory/stack reads,
+breakpoints/watchpoints, flash, monitor commands, or arbitrary Tcl.
+
 `probes test --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` operation. It opens the selected probe, attaches to the
 target, and disconnects without requesting erase, program, reset, halt,
