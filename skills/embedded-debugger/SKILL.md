@@ -1,6 +1,6 @@
 ---
 name: embedded-debugger
-description: Use embedded-debugger for structured embedded flashing and debugging through probe-rs or Replay, plus guarded OpenOCD and GDB host diagnostics. Trigger when work needs exact probe selection, bounded target control, evidence, safe session cleanup, or verified debug-tool lifecycles.
+description: Use embedded-debugger for structured embedded flashing and debugging through probe-rs or Replay, plus confirmed OpenOCD and GDB lifecycles. Trigger when work needs exact probe selection, bounded target control, evidence, safe session cleanup, or verified debug-tool integration.
 ---
 
 # Embedded Debugger
@@ -29,6 +29,26 @@ fixed local MI2 version/exit lifecycle. A successful
 `gdb_mi_host_process=true` does not authorize or prove a remote target session.
 Do not infer symbol, register, memory, stack, breakpoint, execution-control, or
 flash support while those capability fields remain false.
+
+For the combined interoperability check, run `openocd session plan` with exact
+`--openocd-executable`, `--gdb-executable`, top-level `--config`, and `--search`
+inputs plus the exact OpenOCD `--expected-target` name. Surface its
+`R2_DEVICE_WRITE` effects and confirmation boundary, including the unbound
+runtime adapter identity, then require the user to return the exact digest
+before `openocd session test`. The test requires the current target name to
+match and its state to start and finish `running`; attach may halt it, detach
+normally resumes it, and the tool may issue one fixed OpenOCD resume fallback
+before final verification. Do not retry a lost or failed test automatically
+because target outcome may be indeterminate.
+
+A complete combined test proves only the selected tools' fixed MI2
+version/connect/detach/exit lifecycle, loopback endpoint, target-state
+observation, and restoration. It does not authorize ELF or symbol loading,
+explicit register/memory/stack reads, breakpoints, watchpoints, general
+execution control, flash, monitor commands, or arbitrary MI/Tcl input. Still
+surface the plan's implicit effects: remote negotiation may exchange target
+descriptions, memory-map metadata, stop/register state, and confirmed OpenOCD
+attach handlers may probe flash or reset/halt a protected target.
 
 ## Persistent session
 

@@ -8,7 +8,8 @@ use crate::{
     backend::{
         DebugBackend,
         openocd::{
-            self, GdbInspectOptions, GdbMiTestOptions, OpenOcdInspectOptions, OpenOcdServerOptions,
+            self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
+            OpenOcdInspectOptions, OpenOcdServerOptions,
         },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
@@ -107,6 +108,10 @@ pub enum OpenOcdCommand {
     Server {
         #[command(subcommand)]
         command: OpenOcdServerCommand,
+    },
+    Session {
+        #[command(subcommand)]
+        command: OpenOcdSessionCommand,
     },
 }
 
@@ -220,6 +225,99 @@ pub struct OpenOcdServerTestSelection {
     pub server: OpenOcdServerSelection,
 
     #[arg(long, help = "exact confirm_digest returned by openocd server plan")]
+    pub confirm: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdSessionCommand {
+    Plan(OpenOcdSessionSelection),
+    Test(OpenOcdSessionTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdSessionSelection {
+    #[arg(long, default_value = "openocd", value_name = "PATH")]
+    pub openocd_executable: PathBuf,
+
+    #[arg(long, default_value = "gdb", value_name = "PATH")]
+    pub gdb_executable: PathBuf,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "exact OpenOCD 'target current' name required before GDB starts"
+    )]
+    pub expected_target: String,
+
+    #[arg(long = "config", value_name = "FILE")]
+    pub config_files: Vec<PathBuf>,
+
+    #[arg(long = "search", value_name = "DIR")]
+    pub search_dirs: Vec<PathBuf>,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_VERSION_TIMEOUT_MS,
+        help = "bounded OpenOCD --version deadline in milliseconds (100..=30000)"
+    )]
+    pub openocd_version_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
+        help = "bounded OpenOCD server readiness deadline in milliseconds (100..=60000)"
+    )]
+    pub openocd_startup_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS,
+        help = "bounded OpenOCD server shutdown deadline in milliseconds (100..=30000)"
+    )]
+    pub openocd_shutdown_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_GDB_VERSION_TIMEOUT_MS,
+        help = "bounded GDB --version deadline in milliseconds (100..=30000)"
+    )]
+    pub gdb_version_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_GDB_MI_STARTUP_TIMEOUT_MS,
+        help = "bounded remote MI startup handshake deadline in milliseconds (100..=60000)"
+    )]
+    pub gdb_startup_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_GDB_MI_COMMAND_TIMEOUT_MS,
+        help = "bounded remote connect/detach command deadline in milliseconds (100..=60000)"
+    )]
+    pub gdb_command_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_GDB_MI_SHUTDOWN_TIMEOUT_MS,
+        help = "bounded remote MI exit deadline in milliseconds (100..=30000)"
+    )]
+    pub gdb_shutdown_timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_TARGET_STATE_TIMEOUT_MS,
+        help = "bounded target-state restoration deadline in milliseconds (100..=30000)"
+    )]
+    pub target_state_timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdSessionTestSelection {
+    #[command(flatten)]
+    pub session: OpenOcdSessionSelection,
+
+    #[arg(long, help = "exact confirm_digest returned by openocd session plan")]
     pub confirm: String,
 }
 
@@ -601,6 +699,18 @@ impl Cli {
                         command: OpenOcdServerCommand::Test(_),
                     },
             } => "openocd.server.test",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Session {
+                        command: OpenOcdSessionCommand::Plan(_),
+                    },
+            } => "openocd.session.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Session {
+                        command: OpenOcdSessionCommand::Test(_),
+                    },
+            } => "openocd.session.test",
         }
     }
 
@@ -877,6 +987,54 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report.readiness.bind_address,
                     report.readiness.gdb_port,
                     report.readiness.tcl_version_response,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Session {
+                    command: OpenOcdSessionCommand::Plan(selection),
+                },
+        } => {
+            let report = openocd::plan_session(&openocd_session_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.session.plan",
+                &report,
+                format!(
+                    "OpenOCD + GDB session plan ready\nRisk: {}\nOpenOCD: {}\nGDB: {}\nInitial/final target state: running\nConfirm digest: {}",
+                    report.risk,
+                    report.openocd.executable.resolved,
+                    report.gdb.executable.resolved,
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Session {
+                    command: OpenOcdSessionCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_session(
+                &openocd_session_options(&selection.session),
+                &selection.confirm,
+            )?;
+            Ok(CommandResult::serializable(
+                "openocd.session.test",
+                &report,
+                format!(
+                    "OpenOCD + GDB session complete\nEndpoint: {}\nConnect: {}^{}\nDetach: {}^{}\nTarget: {} -> {}",
+                    report.exchange.endpoint,
+                    report.exchange.connection.token,
+                    report.exchange.connection.result_class,
+                    report.exchange.detach.token,
+                    report.exchange.detach.result_class,
+                    report.target_restoration.initial.state,
+                    report
+                        .target_restoration
+                        .final_observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
                 ),
             ))
         }
@@ -1508,6 +1666,26 @@ fn gdb_mi_test_options(selection: &GdbMiTestSelection) -> GdbMiTestOptions {
         version_timeout_ms: selection.version_timeout_ms,
         startup_timeout_ms: selection.startup_timeout_ms,
         shutdown_timeout_ms: selection.shutdown_timeout_ms,
+    }
+}
+
+fn openocd_session_options(selection: &OpenOcdSessionSelection) -> OpenOcdGdbSessionOptions {
+    OpenOcdGdbSessionOptions {
+        openocd: OpenOcdServerOptions {
+            executable: selection.openocd_executable.clone(),
+            config_files: selection.config_files.clone(),
+            search_dirs: selection.search_dirs.clone(),
+            version_timeout_ms: selection.openocd_version_timeout_ms,
+            startup_timeout_ms: selection.openocd_startup_timeout_ms,
+            shutdown_timeout_ms: selection.openocd_shutdown_timeout_ms,
+        },
+        gdb_executable: selection.gdb_executable.clone(),
+        expected_target: selection.expected_target.clone(),
+        gdb_version_timeout_ms: selection.gdb_version_timeout_ms,
+        gdb_startup_timeout_ms: selection.gdb_startup_timeout_ms,
+        gdb_command_timeout_ms: selection.gdb_command_timeout_ms,
+        gdb_shutdown_timeout_ms: selection.gdb_shutdown_timeout_ms,
+        target_state_timeout_ms: selection.target_state_timeout_ms,
     }
 }
 

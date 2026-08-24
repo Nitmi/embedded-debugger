@@ -1723,6 +1723,179 @@ fn openocd_server_requires_an_explicit_top_level_config() {
 }
 
 #[test]
+fn openocd_session_plan_binds_both_tools_and_the_fixed_restoration_policy() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let make_plan = || {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .arg("openocd")
+            .arg("session")
+            .arg("plan")
+            .arg("--openocd-executable")
+            .arg(&openocd)
+            .arg("--gdb-executable")
+            .arg(&gdb)
+            .arg("--expected-target")
+            .arg("fake.cpu0")
+            .arg("--config")
+            .arg(&config)
+            .arg("--search")
+            .arg(directory.path())
+            .arg("--json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Value>(&output).unwrap()
+    };
+    let first = make_plan();
+    let second = make_plan();
+
+    assert_eq!(first["schema_version"], "1.0");
+    assert_eq!(first["operation"], "openocd.session.plan");
+    assert_eq!(first["data"]["operation"], "openocd.session.test");
+    assert_eq!(first["data"]["risk"], "R2_DEVICE_WRITE");
+    assert!(first["data"]["openocd"]["confirm_digest"].is_null());
+    assert_eq!(
+        first["data"]["openocd"]["configuration_effects"]["configuration_tcl_execution_required"],
+        true
+    );
+    assert_eq!(
+        first["data"]["protocol"]["commands"][1]["command"],
+        "-target-select remote 127.0.0.1:<dynamic_openocd_gdb_port>"
+    );
+    assert_eq!(
+        first["data"]["protocol"]["commands"][1]["expected_result_class"],
+        "connected"
+    );
+    assert_eq!(
+        first["data"]["target_state_policy"]["initial_state_required"],
+        "running"
+    );
+    assert_eq!(
+        first["data"]["target_state_policy"]["expected_current_target"],
+        "fake.cpu0"
+    );
+    assert_eq!(
+        first["data"]["target_state_policy"]["final_state_required"],
+        "running"
+    );
+    assert_eq!(
+        first["data"]["effects"]["fixed_resume_fallback_possible"],
+        true
+    );
+    assert_eq!(
+        first["data"]["effects"]["remote_negotiation_target_description_or_memory_map_possible"],
+        true
+    );
+    assert_eq!(
+        first["data"]["effects"]["openocd_attach_handler_reset_possible"],
+        true
+    );
+    assert_eq!(
+        first["data"]["effects"]["symbol_or_executable_loading_requested"],
+        false
+    );
+    assert_eq!(
+        first["data"]["effects"]["explicit_register_or_memory_command_requested"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["gdb_executable_file_hash_bound"],
+        true
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["runtime_port_number_bound"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["runtime_adapter_identity_bound"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirm_digest"],
+        second["data"]["confirm_digest"]
+    );
+}
+
+#[test]
+fn openocd_session_test_rejects_a_stale_digest_before_tcl_execution() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("session")
+        .arg("test")
+        .arg("--openocd-executable")
+        .arg(&openocd)
+        .arg("--gdb-executable")
+        .arg(&gdb)
+        .arg("--expected-target")
+        .arg("fake.cpu0")
+        .arg("--config")
+        .arg(&config)
+        .arg("--confirm")
+        .arg("00".repeat(32))
+        .arg("--json")
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.session.test");
+    assert_eq!(result["error"]["code"], "CONFIRMATION_MISMATCH");
+    assert_eq!(
+        result["error"]["suggested_actions"][0]["action"],
+        "review_openocd_session_plan"
+    );
+}
+
+#[test]
+fn openocd_session_validates_its_timeouts_before_filesystem_inputs() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "openocd",
+            "session",
+            "plan",
+            "--openocd-executable",
+            "deliberately-missing-openocd",
+            "--gdb-executable",
+            "deliberately-missing-gdb",
+            "--expected-target",
+            "fake.cpu0",
+            "--config",
+            "deliberately-missing.cfg",
+            "--gdb-command-timeout-ms",
+            "99",
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.session.plan");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["timeout_kind"], "gdb_command");
+}
+
+#[test]
 fn openocd_inspect_rejects_bad_timeout_before_filesystem_or_path_lookup() {
     let output = Command::cargo_bin("embedded-debugger")
         .unwrap()

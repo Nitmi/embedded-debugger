@@ -199,6 +199,31 @@ pub struct OpenOcdServerLogSummary {
     pub snippet: String,
 }
 
+pub(super) struct ManagedServerSession {
+    server: ManagedOpenOcd,
+    readiness: OpenOcdServerReadiness,
+    shutdown_timeout_ms: u64,
+}
+
+pub(super) struct ManagedServerCompletion {
+    pub readiness: OpenOcdServerReadiness,
+    pub shutdown: OpenOcdServerShutdown,
+    pub logs: OpenOcdServerLogs,
+}
+
+impl ManagedServerCompletion {
+    pub fn lifecycle_error(&self) -> Option<&'static str> {
+        if !self.shutdown.command_sent
+            || !self.shutdown.graceful
+            || !self.shutdown.exit_success
+            || !self.shutdown.process_tree_cleanup_complete
+        {
+            return Some("managed OpenOCD server did not complete a graceful shutdown");
+        }
+        validate_complete_logs(&self.logs).err()
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ServerConfirmationInput<'a> {
     schema_version: &'static str,
@@ -457,6 +482,45 @@ fn server_confirmation_error(expected: &str, received: &str) -> DebugError {
 }
 
 fn execute_server_plan(plan: OpenOcdServerPlan) -> Result<OpenOcdServerTestReport> {
+    let server = start_managed_server(&plan)?;
+    let completion = server.finish();
+    if let Some(message) = completion.lifecycle_error() {
+        return Err(protocol_error_with_lifecycle(
+            message,
+            json!({}),
+            &completion.shutdown,
+            &completion.logs,
+        ));
+    }
+
+    Ok(OpenOcdServerTestReport {
+        backend: plan.backend,
+        scope: "managed_server_lifecycle".to_string(),
+        risk: plan.risk,
+        complete: true,
+        confirm_digest: plan.confirm_digest,
+        executable: plan.executable,
+        executable_file: plan.executable_file,
+        configuration: plan.configuration,
+        lifecycle: plan.lifecycle,
+        readiness: completion.readiness,
+        shutdown: completion.shutdown,
+        effects: plan.effects,
+        confirmation_boundary: plan.confirmation_boundary,
+        capabilities: OpenOcdServerCapabilities {
+            server_launch: true,
+            tcl_rpc: true,
+            dynamic_gdb_endpoint: true,
+            telnet_server: false,
+            gdb_mi: false,
+            target_operations: false,
+            flash: false,
+        },
+        logs: completion.logs,
+    })
+}
+
+pub(super) fn start_managed_server(plan: &OpenOcdServerPlan) -> Result<ManagedServerSession> {
     let mut command = Command::new(&plan.executable.resolved);
     for search_dir in &plan.configuration.search_dirs {
         command.arg("-s").arg(search_dir);
@@ -491,40 +555,8 @@ fn execute_server_plan(plan: OpenOcdServerPlan) -> Result<OpenOcdServerTestRepor
             }
         };
 
-    let mut shutdown = server.cleanup(
-        Some(readiness.tcl_port),
-        true,
-        Duration::from_millis(plan.lifecycle.shutdown_timeout_ms),
-    );
-    let logs = server.finish_logs();
-    shutdown.process_tree_cleanup_complete &= output_streams_closed(&logs);
-
-    if !shutdown.command_sent
-        || !shutdown.graceful
-        || !shutdown.exit_success
-        || !shutdown.process_tree_cleanup_complete
-    {
-        return Err(protocol_error_with_lifecycle(
-            "managed OpenOCD server did not complete a graceful shutdown",
-            json!({}),
-            &shutdown,
-            &logs,
-        ));
-    }
-    validate_complete_logs(&logs)
-        .map_err(|message| protocol_error_with_lifecycle(message, json!({}), &shutdown, &logs))?;
-
-    let readiness_timeout_ms = plan.lifecycle.startup_timeout_ms;
-    Ok(OpenOcdServerTestReport {
-        backend: plan.backend,
-        scope: "managed_server_lifecycle".to_string(),
-        risk: plan.risk,
-        complete: true,
-        confirm_digest: plan.confirm_digest,
-        executable: plan.executable,
-        executable_file: plan.executable_file,
-        configuration: plan.configuration,
-        lifecycle: plan.lifecycle,
+    Ok(ManagedServerSession {
+        server,
         readiness: OpenOcdServerReadiness {
             probe: "tcl_rpc.version".to_string(),
             bind_address: OPENOCD_BIND_ADDRESS.to_string(),
@@ -533,22 +565,39 @@ fn execute_server_plan(plan: OpenOcdServerPlan) -> Result<OpenOcdServerTestRepor
             telnet_enabled: false,
             tcl_version_response: readiness.version_response,
             elapsed_ms: duration_ms(readiness.elapsed),
-            timeout_ms: readiness_timeout_ms,
+            timeout_ms: plan.lifecycle.startup_timeout_ms,
         },
-        shutdown,
-        effects: plan.effects,
-        confirmation_boundary: plan.confirmation_boundary,
-        capabilities: OpenOcdServerCapabilities {
-            server_launch: true,
-            tcl_rpc: true,
-            dynamic_gdb_endpoint: true,
-            telnet_server: false,
-            gdb_mi: false,
-            target_operations: false,
-            flash: false,
-        },
-        logs,
+        shutdown_timeout_ms: plan.lifecycle.shutdown_timeout_ms,
     })
+}
+
+impl ManagedServerSession {
+    pub fn readiness(&self) -> &OpenOcdServerReadiness {
+        &self.readiness
+    }
+
+    pub fn tcl_request(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> std::result::Result<String, String> {
+        tcl_request(self.readiness.tcl_port, command.as_bytes(), timeout, true)
+    }
+
+    pub fn finish(mut self) -> ManagedServerCompletion {
+        let mut shutdown = self.server.cleanup(
+            Some(self.readiness.tcl_port),
+            true,
+            Duration::from_millis(self.shutdown_timeout_ms),
+        );
+        let logs = self.server.finish_logs();
+        shutdown.process_tree_cleanup_complete &= output_streams_closed(&logs);
+        ManagedServerCompletion {
+            readiness: self.readiness,
+            shutdown,
+            logs,
+        }
+    }
 }
 
 fn validate_complete_logs(logs: &OpenOcdServerLogs) -> std::result::Result<(), &'static str> {

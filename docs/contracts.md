@@ -164,8 +164,70 @@ A successful test has `scope="managed_gdb_mi_lifecycle"`,
 selected local process and fixed MI2 handshake. `remote_target_connection`,
 symbol loading, register/memory/stack access, breakpoints, execution control,
 and flash remain false. The OpenOCD server result also continues to advertise
-`gdb_mi=false`: the two independently proven host processes have not yet been
-combined into a target session.
+`gdb_mi=false`: two independently successful host results do not prove a target
+session. Only the separately planned and confirmed operation below crosses that
+boundary.
+
+## Confirmed OpenOCD and GDB session
+
+`openocd session plan` accepts exact OpenOCD and GDB executable selections,
+one required exact `--expected-target <NAME>`, repeatable OpenOCD config and
+search inputs, and bounded OpenOCD version,
+startup, and shutdown, GDB version, startup, command, and shutdown, and target
+state deadlines. The target-state deadline defaults to 3000 ms and must be
+100..=30000 ms. The GDB remote command deadline defaults to 10000 ms and must
+be 100..=60000 ms. Session-specific scalar bounds are validated before either
+executable or configuration path is inspected.
+
+The returned `R2_DEVICE_WRITE` plan binds both exact executable hashes and
+recognized versions, the ordered top-level config manifests and search paths,
+the exact expected current-target name, the loopback/dynamic endpoint policy,
+all deadlines, the fixed MI2 contract, and target-state policy. Search
+directory contents, transitive Tcl sources, configuration semantics, and the
+runtime adapter/USB serial identity remain explicitly unbound. The
+runtime-selected port number is necessarily not known at planning time. No
+firmware or symbol identity is required because this operation accepts neither.
+
+`openocd session test --confirm <DIGEST>` recomputes the plan and rejects a
+nonmatching digest before configuration Tcl executes. After the guarded server
+becomes ready, bounded Tcl RPC reads `target current`, validates that name
+against a 128-byte ASCII allow list, and queries `<name> curstate`. GDB is not
+started unless the name exactly matches the confirmed `--expected-target` and
+the state is exactly `running`.
+
+The GDB process uses only `--nx --nh --quiet --interpreter=mi2`. Its complete
+input is fixed to these token-correlated commands and result classes:
+
+```text
+1-gdb-version                                      -> 1^done
+2-target-select remote 127.0.0.1:<dynamic-port>   -> 2^connected
+3-target-detach                                    -> 3^done
+4-gdb-exit                                         -> 4^exit
+```
+
+No extra GDB argument, initialization file, symbol, ELF, explicit target-data
+command, monitor command, or arbitrary MI command is accepted. Async and stream
+records may occur around the four results but retain the existing bounded
+framing and output requirements. The effects do not equate this narrow MI
+command set with a packet-free connection: ordinary remote negotiation may
+exchange stop state, target descriptions, memory-map metadata, or register
+state. Confirmed OpenOCD configuration may also install a GDB-attach handler
+that probes flash or resets and halts a protected target.
+
+OpenOCD's default GDB attach event may halt the current target. After GDB
+cleanup, the tool queries the original target state. If `running` is not
+proven, it issues exactly `targets <validated-initial-name>; resume`, polls the
+same target within the target-state deadline, and requires a final exact
+`running` state. A restoration failure is `VERIFICATION_FAILED`; errors include
+the available GDB cleanup/output, target restoration, OpenOCD readiness,
+shutdown, and log evidence. OpenOCD is always shut down and both process trees
+remain isolated and bounded on success and failure.
+
+A complete result enables only server launch, Tcl RPC, GDB/MI, remote target
+connection, state observation, attach/detach, and restoration resume.
+Symbol loading, register/memory/stack reads, breakpoints, watchpoints, general
+execution control, flash, and arbitrary commands remain false. Halted-origin
+sessions are not supported by this checkpoint.
 
 `probes test --probe <exact-selector> --target <exact-target>` is an
 `R1_REVERSIBLE_CONTROL` operation. It opens the selected probe, attaches to the

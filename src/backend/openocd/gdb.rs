@@ -30,6 +30,9 @@ pub const MAX_GDB_MI_STARTUP_TIMEOUT_MS: u64 = 60_000;
 pub const DEFAULT_GDB_MI_SHUTDOWN_TIMEOUT_MS: u64 = 3_000;
 pub const MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS: u64 = 100;
 pub const MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS: u64 = 30_000;
+pub const DEFAULT_GDB_MI_COMMAND_TIMEOUT_MS: u64 = 10_000;
+pub const MIN_GDB_MI_COMMAND_TIMEOUT_MS: u64 = 100;
+pub const MAX_GDB_MI_COMMAND_TIMEOUT_MS: u64 = 60_000;
 
 const MAX_GDB_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_MI_OUTPUT_BYTES_PER_STREAM: usize = 256 * 1024;
@@ -42,6 +45,12 @@ const VERSION_TOKEN: u64 = 1;
 const EXIT_TOKEN: u64 = 2;
 const VERSION_COMMAND: &str = "-gdb-version";
 const EXIT_COMMAND: &str = "-gdb-exit";
+const REMOTE_SELECT_TOKEN: u64 = 2;
+const REMOTE_DETACH_TOKEN: u64 = 3;
+const REMOTE_EXIT_TOKEN: u64 = 4;
+const REMOTE_SELECT_COMMAND_PLACEHOLDER: &str =
+    "-target-select remote 127.0.0.1:<dynamic_openocd_gdb_port>";
+const REMOTE_DETACH_COMMAND: &str = "-target-detach";
 const MI_LAUNCH_ARGUMENTS: [&str; 4] = ["--nx", "--nh", "--quiet", "--interpreter=mi2"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +242,21 @@ pub struct GdbMiRecordCounts {
     pub log_stream: u64,
 }
 
+pub(super) struct RemoteGdbExecution {
+    pub endpoint: String,
+    pub startup_elapsed: Duration,
+    pub version_elapsed: Duration,
+    pub version_result_class: String,
+    pub version_stream_records: u64,
+    pub connect_elapsed: Duration,
+    pub connect_result_class: String,
+    pub detach_elapsed: Duration,
+    pub detach_result_class: String,
+    pub record_counts: GdbMiRecordCounts,
+    pub shutdown: GdbMiShutdown,
+    pub output: GdbMiOutput,
+}
+
 pub fn inspect_gdb(options: &GdbInspectOptions) -> Result<GdbInspection> {
     validate_version_timeout(options.timeout_ms)?;
     validate_executable_request(&options.executable)?;
@@ -267,7 +291,7 @@ pub fn test_gdb_mi(options: &GdbMiTestOptions) -> Result<GdbMiTestReport> {
 
     let mut command = Command::new(&inspection.executable.resolved);
     command.args(MI_LAUNCH_ARGUMENTS);
-    let mut gdb = ManagedGdb::spawn(command, &inspection.executable.resolved)?;
+    let mut gdb = ManagedGdb::spawn(command, &inspection.executable.resolved, EXIT_TOKEN)?;
     let lifecycle = match gdb.run_lifecycle(
         Duration::from_millis(options.startup_timeout_ms),
         Duration::from_millis(options.shutdown_timeout_ms),
@@ -338,6 +362,66 @@ pub fn test_gdb_mi(options: &GdbMiTestOptions) -> Result<GdbMiTestReport> {
     })
 }
 
+pub(super) fn execute_remote_gdb(
+    executable: &str,
+    gdb_port: u16,
+    startup_timeout_ms: u64,
+    command_timeout_ms: u64,
+    shutdown_timeout_ms: u64,
+) -> Result<RemoteGdbExecution> {
+    let endpoint = format!("127.0.0.1:{gdb_port}");
+    let mut command = Command::new(executable);
+    command.args(MI_LAUNCH_ARGUMENTS);
+    let mut gdb = ManagedGdb::spawn(command, executable, REMOTE_EXIT_TOKEN)?;
+    let lifecycle = match gdb.run_remote_lifecycle(
+        &endpoint,
+        Duration::from_millis(startup_timeout_ms),
+        Duration::from_millis(command_timeout_ms),
+        Duration::from_millis(shutdown_timeout_ms),
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(failure) => {
+            return Err(finalize_failure(gdb, failure, shutdown_timeout_ms));
+        }
+    };
+
+    let mut shutdown = gdb.cleanup(Duration::from_millis(shutdown_timeout_ms));
+    let record_counts = gdb.record_counts.clone();
+    let output = gdb.finish_output();
+    shutdown.process_tree_cleanup_complete &= output_streams_closed(&output);
+    if !shutdown.command_sent
+        || !shutdown.result_observed
+        || !shutdown.graceful
+        || !shutdown.exit_success
+        || !shutdown.process_tree_cleanup_complete
+    {
+        return Err(protocol_error_with_lifecycle(
+            "remote GDB/MI process did not complete a graceful shutdown",
+            json!({"endpoint": endpoint}),
+            &shutdown,
+            &output,
+        ));
+    }
+    validate_complete_output(&output).map_err(|message| {
+        protocol_error_with_lifecycle(message, json!({"endpoint": endpoint}), &shutdown, &output)
+    })?;
+
+    Ok(RemoteGdbExecution {
+        endpoint,
+        startup_elapsed: lifecycle.startup_elapsed,
+        version_elapsed: lifecycle.version_elapsed,
+        version_result_class: lifecycle.version_result_class,
+        version_stream_records: lifecycle.version_stream_records,
+        connect_elapsed: lifecycle.connect_elapsed,
+        connect_result_class: lifecycle.connect_result_class,
+        detach_elapsed: lifecycle.detach_elapsed,
+        detach_result_class: lifecycle.detach_result_class,
+        record_counts,
+        shutdown,
+        output,
+    })
+}
+
 fn protocol_contract() -> GdbMiProtocol {
     GdbMiProtocol {
         interpreter: "mi2".to_string(),
@@ -358,6 +442,43 @@ fn protocol_contract() -> GdbMiProtocol {
             },
             GdbMiPlannedCommand {
                 token: EXIT_TOKEN,
+                command: EXIT_COMMAND.to_string(),
+                expected_result_class: "exit".to_string(),
+            },
+        ],
+    }
+}
+
+pub(super) fn remote_protocol_contract() -> GdbMiProtocol {
+    GdbMiProtocol {
+        interpreter: "mi2".to_string(),
+        launch_arguments: MI_LAUNCH_ARGUMENTS
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        initialization_files_enabled: false,
+        input_encoding: "ascii".to_string(),
+        line_terminator: "lf".to_string(),
+        token_correlation_required: true,
+        process_isolation: process_isolation().to_string(),
+        commands: vec![
+            GdbMiPlannedCommand {
+                token: VERSION_TOKEN,
+                command: VERSION_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REMOTE_SELECT_TOKEN,
+                command: REMOTE_SELECT_COMMAND_PLACEHOLDER.to_string(),
+                expected_result_class: "connected".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REMOTE_DETACH_TOKEN,
+                command: REMOTE_DETACH_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REMOTE_EXIT_TOKEN,
                 command: EXIT_COMMAND.to_string(),
                 expected_result_class: "exit".to_string(),
             },
@@ -788,13 +909,14 @@ struct ManagedGdb {
     started: Instant,
     observed_status: Option<ExitStatus>,
     record_counts: GdbMiRecordCounts,
+    exit_token: u64,
     exit_command_sent: bool,
     exit_command_started: Option<Instant>,
     exit_result_class: Option<String>,
 }
 
 impl ManagedGdb {
-    fn spawn(mut command: Command, executable: &str) -> Result<Self> {
+    fn spawn(mut command: Command, executable: &str, exit_token: u64) -> Result<Self> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -845,6 +967,7 @@ impl ManagedGdb {
             started: Instant::now(),
             observed_status: None,
             record_counts: GdbMiRecordCounts::default(),
+            exit_token,
             exit_command_sent: false,
             exit_command_started: None,
             exit_result_class: None,
@@ -877,6 +1000,61 @@ impl ManagedGdb {
             version_elapsed,
             version_result_class,
             version_stream_records,
+        })
+    }
+
+    fn run_remote_lifecycle(
+        &mut self,
+        endpoint: &str,
+        startup_timeout: Duration,
+        command_timeout: Duration,
+        shutdown_timeout: Duration,
+    ) -> std::result::Result<RemoteLifecycleSuccess, LifecycleFailure> {
+        let startup_deadline = self.started + startup_timeout;
+        self.wait_for_prompt(startup_deadline)?;
+        let startup_elapsed = self.started.elapsed();
+
+        let streams_before_version = stream_record_count(&self.record_counts);
+        let version_started = Instant::now();
+        self.send_command(VERSION_TOKEN, VERSION_COMMAND)?;
+        let version_result_class = self.wait_for_result(VERSION_TOKEN, "done", startup_deadline)?;
+        let version_elapsed = version_started.elapsed();
+        let version_stream_records =
+            stream_record_count(&self.record_counts).saturating_sub(streams_before_version);
+
+        let connect_command = format!("-target-select remote {endpoint}");
+        let connect_started = Instant::now();
+        self.send_command(REMOTE_SELECT_TOKEN, &connect_command)?;
+        let connect_result_class = self.wait_for_result(
+            REMOTE_SELECT_TOKEN,
+            "connected",
+            connect_started + command_timeout,
+        )?;
+        let connect_elapsed = connect_started.elapsed();
+
+        let detach_started = Instant::now();
+        self.send_command(REMOTE_DETACH_TOKEN, REMOTE_DETACH_COMMAND)?;
+        let detach_result_class = self.wait_for_result(
+            REMOTE_DETACH_TOKEN,
+            "done",
+            detach_started + command_timeout,
+        )?;
+        let detach_elapsed = detach_started.elapsed();
+
+        self.send_command(REMOTE_EXIT_TOKEN, EXIT_COMMAND)?;
+        let shutdown_deadline = Instant::now() + shutdown_timeout;
+        self.wait_for_result(REMOTE_EXIT_TOKEN, "exit", shutdown_deadline)?;
+        self.wait_for_exit(shutdown_deadline)?;
+
+        Ok(RemoteLifecycleSuccess {
+            startup_elapsed,
+            version_elapsed,
+            version_result_class,
+            version_stream_records,
+            connect_elapsed,
+            connect_result_class,
+            detach_elapsed,
+            detach_result_class,
         })
     }
 
@@ -1012,7 +1190,7 @@ impl ManagedGdb {
         })?;
         self.record_counts.observe(&record);
         if let ParsedRecord::Result { token, class } = &record
-            && *token == Some(EXIT_TOKEN)
+            && *token == Some(self.exit_token)
         {
             self.exit_result_class = Some(class.clone());
         }
@@ -1044,7 +1222,7 @@ impl ManagedGdb {
                     }),
                 )
             })?;
-        if token == EXIT_TOKEN {
+        if token == self.exit_token && command == EXIT_COMMAND {
             self.exit_command_sent = true;
             self.exit_command_started = Some(Instant::now());
         }
@@ -1116,7 +1294,7 @@ impl ManagedGdb {
         let mut command_error = None;
         if !self.exit_command_sent
             && self.observed_status.is_none()
-            && let Err(failure) = self.send_command(EXIT_TOKEN, EXIT_COMMAND)
+            && let Err(failure) = self.send_command(self.exit_token, EXIT_COMMAND)
         {
             command_error = Some(failure.message);
         }
@@ -1174,7 +1352,7 @@ impl ManagedGdb {
             .exit_command_started
             .map_or_else(|| cleanup_started.elapsed(), |started| started.elapsed());
         GdbMiShutdown {
-            token: EXIT_TOKEN,
+            token: self.exit_token,
             command: EXIT_COMMAND.to_string(),
             expected_result_class: "exit".to_string(),
             command_sent: self.exit_command_sent,
@@ -1224,6 +1402,18 @@ struct LifecycleSuccess {
     version_elapsed: Duration,
     version_result_class: String,
     version_stream_records: u64,
+}
+
+#[derive(Debug)]
+struct RemoteLifecycleSuccess {
+    startup_elapsed: Duration,
+    version_elapsed: Duration,
+    version_result_class: String,
+    version_stream_records: u64,
+    connect_elapsed: Duration,
+    connect_result_class: String,
+    detach_elapsed: Duration,
+    detach_result_class: String,
 }
 
 #[derive(Debug)]

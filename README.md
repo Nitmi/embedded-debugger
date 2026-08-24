@@ -91,6 +91,49 @@ target. Only `gdb_mi_host_process` becomes true in the test result. Remote
 connection, register/memory/stack access, breakpoints, execution control, and
 flash remain false.
 
+The first combined OpenOCD + GDB checkpoint is a separately confirmed target
+lifecycle:
+
+```console
+cargo run -- openocd session plan \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --json
+
+cargo run -- openocd session test \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --confirm <confirm_digest> \
+  --json
+```
+
+The combined digest binds both executable identities, the OpenOCD config
+manifest and search paths, the exact expected OpenOCD current-target name,
+fixed MI2 protocol, deadlines, and restoration policy. The test refuses to
+start GDB unless the runtime current target exactly matches that name and is
+`running`. It then permits only version, remote connect, detach, and GDB exit.
+Because default OpenOCD attach may halt the CPU, the tool verifies `running`
+after GDB cleanup and sends one fixed OpenOCD `resume` fallback when needed.
+The operation remains `R2_DEVICE_WRITE` because confirmed config Tcl can do
+more than the wrapper requests. It loads no ELF or symbols and sends no
+explicit target-data, breakpoint, flash, monitor, or arbitrary command. Normal
+remote negotiation may still exchange stop state, target descriptions,
+memory-map metadata, or register state; a confirmed OpenOCD attach handler may
+also probe flash or reset/halt a protected target. These effects are present in
+the plan even though exposed register, memory, stack, breakpoint, watchpoint,
+general execution control, flash, and arbitrary-command capabilities stay
+false.
+OpenOCD does not currently expose a digest-bound USB adapter serial through
+this workflow, so the confirmation boundary reports runtime adapter identity as
+unbound; use an adapter-specific serial setting in reviewed configuration when
+the driver supports one.
+
 Native probe discovery is available through the embedded probe-rs library:
 
 ```console
@@ -431,7 +474,8 @@ See [docs/contracts.md](docs/contracts.md),
 [ADR-0004](docs/decisions/0004-fail-closed-mcp-supervision.md), and
 [ADR-0005](docs/decisions/0005-openocd-host-inspection-boundary.md),
 [ADR-0006](docs/decisions/0006-guarded-openocd-server-lifecycle.md), and
-[ADR-0007](docs/decisions/0007-bounded-gdb-mi-host-lifecycle.md).
+[ADR-0007](docs/decisions/0007-bounded-gdb-mi-host-lifecycle.md), and
+[ADR-0008](docs/decisions/0008-confirmed-openocd-gdb-session.md).
 
 ## Current status
 
@@ -462,8 +506,13 @@ version/shutdown, exit and port cleanup, probe-rs reattach, and UART heartbeat
 recovery. OpenOCD reported CPU0 examination success but CPU1 examination
 failure. A separate Espressif GDB 17.1 host-only checkpoint now proves fixed
 MI2 startup, token-correlated version/exit commands, graceful exit, bounded
-output, and Windows Job Object cleanup without opening a remote connection.
-Therefore GDB/MI target operations, general ELF/HEX loading, RTT, memory writes,
+output, and Windows Job Object cleanup without opening a remote connection. A
+confirmed combined-session implementation now adds a running-origin
+precondition, fixed MI version/connect/detach/exit exchange, fixed resume
+fallback, final running-state verification, and complete two-process cleanup.
+Its controlled regression path passes; physical ESP32-S3 acceptance awaits the
+new plan digest. Therefore GDB/MI symbols and target inspection, general
+ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
 watchpoints, asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,

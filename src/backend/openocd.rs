@@ -18,19 +18,34 @@ use crate::error::{DebugError, ErrorCode, Result, SuggestedAction};
 
 mod gdb;
 mod server;
+mod session;
 
 pub use gdb::{
-    DEFAULT_GDB_MI_SHUTDOWN_TIMEOUT_MS, DEFAULT_GDB_MI_STARTUP_TIMEOUT_MS,
-    DEFAULT_GDB_VERSION_TIMEOUT_MS, GdbInspectOptions, GdbInspection, GdbMiTestOptions,
-    GdbMiTestReport, MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS, MAX_GDB_MI_STARTUP_TIMEOUT_MS,
-    MAX_GDB_VERSION_TIMEOUT_MS, MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS,
-    MIN_GDB_VERSION_TIMEOUT_MS, inspect_gdb, test_gdb_mi,
+    DEFAULT_GDB_MI_COMMAND_TIMEOUT_MS, DEFAULT_GDB_MI_SHUTDOWN_TIMEOUT_MS,
+    DEFAULT_GDB_MI_STARTUP_TIMEOUT_MS, DEFAULT_GDB_VERSION_TIMEOUT_MS, GdbExecutableFileIdentity,
+    GdbExecutableInspection, GdbInspectOptions, GdbInspection, GdbMiCommandResult, GdbMiHandshake,
+    GdbMiOutput, GdbMiProtocol, GdbMiRecordCounts, GdbMiShutdown, GdbMiTestOptions,
+    GdbMiTestReport, MAX_GDB_MI_COMMAND_TIMEOUT_MS, MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS,
+    MAX_GDB_MI_STARTUP_TIMEOUT_MS, MAX_GDB_VERSION_TIMEOUT_MS, MIN_GDB_MI_COMMAND_TIMEOUT_MS,
+    MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS, MIN_GDB_VERSION_TIMEOUT_MS,
+    inspect_gdb, test_gdb_mi,
 };
 pub use server::{
     DEFAULT_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS, DEFAULT_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
     MAX_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS, MAX_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
     MIN_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS, MIN_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
-    OpenOcdServerOptions, OpenOcdServerPlan, OpenOcdServerTestReport, plan_server, test_server,
+    OpenOcdExecutableFileIdentity, OpenOcdServerConfirmationBoundary, OpenOcdServerEffects,
+    OpenOcdServerLifecyclePlan, OpenOcdServerLogs, OpenOcdServerOptions, OpenOcdServerPlan,
+    OpenOcdServerReadiness, OpenOcdServerShutdown, OpenOcdServerTestReport, plan_server,
+    test_server,
+};
+pub use session::{
+    DEFAULT_OPENOCD_TARGET_STATE_TIMEOUT_MS, MAX_OPENOCD_TARGET_STATE_TIMEOUT_MS,
+    MIN_OPENOCD_TARGET_STATE_TIMEOUT_MS, OpenOcdGdbExchange, OpenOcdGdbSessionCapabilities,
+    OpenOcdGdbSessionConfirmationBoundary, OpenOcdGdbSessionEffects, OpenOcdGdbSessionOptions,
+    OpenOcdGdbSessionPlan, OpenOcdGdbSessionTestReport, OpenOcdSessionGdbPlan,
+    OpenOcdSessionServerPlan, OpenOcdTargetRestoration, OpenOcdTargetStateObservation,
+    OpenOcdTargetStatePolicy, plan_session, test_session,
 };
 
 pub const DEFAULT_OPENOCD_VERSION_TIMEOUT_MS: u64 = 2_000;

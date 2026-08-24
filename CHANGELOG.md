@@ -25,6 +25,20 @@ All notable changes to this project will be documented in this file.
   fail-closed framing validation, and Windows Job Object / Unix process-group
   cleanup. Espressif GDB 17.1 passed the native Windows host lifecycle; remote
   connection and all target-facing capabilities remain disabled.
+- Confirmed `openocd session plan/test` for the first combined OpenOCD + GDB
+  target lifecycle. The digest binds both executable identities, OpenOCD config
+  manifests/search paths, an exact expected current-target name, fixed MI2
+  version/connect/detach/exit commands, deadlines, and a running-origin
+  restoration policy. Execution validates the current target name/state
+  through bounded Tcl, refuses a mismatched target or non-running origin,
+  verifies running after detach, applies one fixed resume fallback when needed,
+  and cleans both process trees on every path. It accepts no ELF, symbols,
+  explicit target-data command, breakpoints, flash command, monitor input, or
+  arbitrary command. Effects disclose that remote negotiation may exchange
+  target descriptions, memory-map metadata, stop/register state, and that
+  confirmed OpenOCD attach handlers may probe flash or reset a protected
+  target. Controlled regression coverage passes while physical ESP32-S3
+  acceptance remains pending exact-digest confirmation.
 - Versioned success and error envelopes for Agent-safe CLI automation.
 - Stable error codes and exit codes.
 - Backend capability model and deterministic Replay backend.
@@ -164,11 +178,12 @@ All notable changes to this project will be documented in this file.
 
 ### Known limitations
 
-- OpenOCD host inspection is implemented, but configuration Tcl execution,
-  server lifecycle, Tcl RPC, GDB/MI, target discovery/control, and flashing are
-  not. The MCP adapter currently exposes only the probe-rs/Replay persistent
-  session contract; flash planning/execution and one-shot commands remain CLI
-  operations.
+- OpenOCD host inspection, a confirmed managed server, GDB/MI host validation,
+  and a confirmed fixed remote attach/detach lifecycle are implemented. General
+  OpenOCD target discovery/control, symbol/ELF loading, register or memory
+  inspection, breakpoints/watchpoints, and flashing are not. The MCP adapter
+  currently exposes only the probe-rs/Replay persistent session contract;
+  OpenOCD and flash planning/execution remain CLI operations.
 - Native raw BIN requires an explicit base address; Replay uses the fixture
   address unless the same address is supplied. ESP-IDF ELF requires explicit
   format and flash capacity inputs and is physically accepted only on ESP32-S3.
