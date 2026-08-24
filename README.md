@@ -525,9 +525,12 @@ Its controlled regression path passes. The first physical ESP32-S3 attempt
 failed closed during remote register negotiation because a generic Espressif
 GDB was launched without its ESP32-S3 Xtensa profile. Both process trees were
 cleaned, the fixed fallback restored CPU0 to `running`, probe-rs reattached,
-and UART heartbeats resumed. The exact profile is now hash-bound, but physical
-combined-session acceptance awaits a new plan digest. Therefore GDB/MI symbols
-and target inspection, general
+and UART heartbeats resumed. The exact profile is now hash-bound, and a second,
+separately confirmed physical run completed the fixed MI version/connect/
+detach/exit exchange. The fixed fallback restored CPU0 to `running`, both
+process trees and dynamic ports were released, probe-rs reattached, and UART
+heartbeats continued. This accepts only the narrow combined lifecycle;
+therefore GDB/MI symbols and target inspection, general
 ELF/HEX loading, RTT, memory writes,
 Generic/MMIO reads, register writes, software/symbolic/conditional breakpoints,
 watchpoints, asynchronous request cancellation, durable crash recovery,

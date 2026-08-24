@@ -611,5 +611,53 @@ control, target-state preservation, CPU1, or flash.
 This accepts the confirmed protocol-failure cleanup, target restoration,
 process/port release, probe reuse, and UART recovery paths. It does not accept
 successful OpenOCD/GDB interoperability. The implementation now supports a
-digest-bound `--gdb-xtensa-config`; a new plan and separate confirmation are
-required before one further physical attempt.
+digest-bound `--gdb-xtensa-config`; at this failure checkpoint, a new plan and
+separate confirmation were required before one further physical attempt.
+
+## Profile-bound OpenOCD and GDB session acceptance (2026-08-24)
+
+- The user separately confirmed the deterministic profile-bound digest
+  `57acda7c2ef2654454d22dde8dad88abc43cd188be4f5978f196ac16cb2e545d`.
+  It selected exact current target `esp32s3.cpu0`, OpenOCD SHA-256
+  `58ceca283262cd313fdb6b4ba94195b01502a15dc61b6ae0b986077449010179`,
+  GDB SHA-256
+  `5ce33ee35b9075251532fc8ea6f1745ce0885764689f0014ff1c3a3f42bcd71a`,
+  and `esp32s3-builtin.cfg` SHA-256
+  `62f5bb4f81cf28455bab48d158227c3f4f280dcaab0838e0472c4249e7696611`.
+  The newly bound `xtensa_esp32s3.so` profile was 705,483 bytes with SHA-256
+  `8bea9f0f2225db46a5ab682b257cd3590969ae4173ab2ceddde24d6e830dbee4`;
+  ambient `XTENSA_GNU_CONFIG` was not inherited.
+- COM3 was re-enumerated immediately before execution as exact USB device
+  `303A:1001 / E0:72:A1:D4:1F:DC`. A five-second read-only monitor at 115200
+  baud, DTR/RTS false, and zero transmit received consecutive heartbeats
+  `10102..10106` (210 bytes).
+- The single confirmed run started OpenOCD on dynamic loopback Tcl/GDB ports
+  14773/14774 and proved readiness in 209 ms. It verified
+  `esp32s3.cpu0=running`, observed the MI startup prompt in 22 ms, completed
+  `1-gdb-version -> done`, connected with
+  `2-target-select -> connected` in 591 ms, detached with
+  `3-target-detach -> done`, and exited with `4-gdb-exit -> exit`.
+- The exact target was `halted` after normal GDB detach, so the implementation
+  requested its one fixed resume fallback. The final observation proved
+  `esp32s3.cpu0=running` in 3 ms. GDB exited 0 gracefully in 3 ms; OpenOCD
+  accepted framed `shutdown` and exited 0 gracefully in 11 ms. Neither process
+  tree was force-killed, all output drains completed without truncation,
+  oversized lines, dropped events, or read errors, and no listener remained on
+  14773/14774. OpenOCD continued to report CPU1 examination failure with
+  `OCD_ID=00000000`, so CPU1 remains unqualified.
+- A subsequent exact probe-rs test on
+  `303a:1001:E0:72:A1:D4:1F:DC` completed attach/disconnect, proving probe
+  release. A final five-second zero-transmit UART monitor received heartbeats
+  `10192..10195` after one partial pre-heartbeat log fragment (188 bytes),
+  proving observable application recovery. No related OpenOCD, GDB, or
+  embedded-debugger process and no dynamic-port listener remained. Evidence is
+  retained under
+  `target/hardware-acceptance/2026-08-24-openocd-gdb-session`.
+
+This accepts successful interoperability for the exact profile-bound,
+running-origin, fixed MI version/connect/detach/exit lifecycle on ESP32-S3 CPU0,
+including verified fallback restoration and complete host/probe cleanup. It
+does not accept CPU1, symbols or ELF loading, explicit register/memory/stack
+inspection, breakpoints, watchpoints, general execution control, OpenOCD flash,
+arbitrary MI/Tcl/monitor commands, or digest binding of the runtime USB adapter
+identity and dynamically selected port numbers.

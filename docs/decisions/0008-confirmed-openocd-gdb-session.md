@@ -81,8 +81,11 @@ commands, flash, arbitrary MI, or arbitrary monitor commands.
   while OpenOCD returned the ESP32-S3 608-byte layout. The target-specific
   profile produces the matching register inventory. Automated tests now bind
   and deliver that profile, clear ambient configuration, restore the target on
-  protocol failure, and reject profile drift. Physical success still requires
-  a new separately confirmed digest.
+  protocol failure, and reject profile drift. A new separately confirmed digest
+  then passed the physical fixed-MI lifecycle with the exact profile. Detach
+  left CPU0 halted, so the confirmed fixed fallback resumed it and the final
+  observation proved `running`; both processes, dynamic ports, and the exact
+  probe were released, and UART heartbeats continued.
 
 ## References
 

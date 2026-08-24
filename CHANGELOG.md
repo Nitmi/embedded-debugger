@@ -42,8 +42,13 @@ All notable changes to this project will be documented in this file.
   both processes and ports, permitted probe-rs reattach, and recovered UART
   heartbeats. Optional `--gdb-xtensa-config` now canonicalizes and hashes the
   exact Espressif target profile, binds its selection in the digest, clears any
-  ambient `XTENSA_GNU_CONFIG`, and sets only the confirmed path for GDB. A new
-  exact-digest physical success remains pending.
+  ambient `XTENSA_GNU_CONFIG`, and sets only the confirmed path for GDB. A
+  separately confirmed profile-bound run then completed the fixed MI exchange,
+  restored CPU0 to running with the fixed fallback, gracefully exited both
+  processes, released both dynamic ports and the exact probe, and recovered
+  UART heartbeats. The accepted scope remains the bounded attach/detach
+  lifecycle; symbols, target-data commands, breakpoints, flash, and arbitrary
+  commands remain disabled.
 - Versioned success and error envelopes for Agent-safe CLI automation.
 - Stable error codes and exit codes.
 - Backend capability model and deterministic Replay backend.
