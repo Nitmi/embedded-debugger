@@ -117,9 +117,12 @@ selected-target running restoration, and OpenOCD cleanup. Never retry
 automatically. Success proves only the exact returned bytes and SHA-256 for the
 confirmed declared range. It does not authorize region inference, memory
 writes, symbols/ELF, register/stack commands, breakpoints, execution control,
-flash, monitor commands, arbitrary MI/Tcl, CPU1, or another target. Until a
-physical acceptance is recorded, describe OpenOCD memory snapshots as
-implemented and controlled-tested, not hardware-qualified.
+flash, monitor commands, arbitrary MI/Tcl, CPU1, or another target. ESP32-S3
+CPU0 has passed one exact `0x42000000 + 32` acceptance run with complete
+coverage, a SHA-256 matching the prior probe-rs snapshot, fallback restoration,
+process cleanup, and UART recovery. Treat that qualification as exact to the
+confirmed target, range, tools, and configuration; the NVM declaration remains
+user-confirmed rather than independently verified from OpenOCD's memory map.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

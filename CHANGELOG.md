@@ -79,7 +79,12 @@ All notable changes to this project will be documented in this file.
   MMIO/unknown declarations, expressions, symbols/ELF, register/stack commands,
   breakpoints, execution control, flash, monitor input, and arbitrary MI/Tcl
   remain disabled. Controlled parser, process, digest, range, and CLI regressions
-  pass; physical target acceptance still requires a separate confirmed plan.
+  pass. A separately confirmed, non-retried ESP32-S3 CPU0 run returned complete
+  `0x42000000 + 32` coverage with the same SHA-256 as the prior probe-rs
+  snapshot, used the fixed resume fallback, cleaned both process trees and
+  dynamic ports, and recovered UART heartbeats. CPU1, other ranges and targets,
+  and independent verification of the user-declared NVM semantics remain
+  unqualified.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current

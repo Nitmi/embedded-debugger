@@ -229,8 +229,13 @@ gap-free coverage of the exact request. Partial or malformed results fail
 closed and still take the fixed detach, target-restoration, and cleanup paths.
 Memory writes, MMIO/unknown declarations, expressions, symbols, stack reads,
 breakpoints, execution control, flash, monitor input, and arbitrary commands
-remain unavailable. Physical target acceptance requires a separately reviewed
-digest and one non-retried run.
+remain unavailable. ESP32-S3 CPU0 has passed one separately confirmed,
+non-retried `0x42000000 + 32` physical snapshot: GDB returned complete coverage
+with the same SHA-256 as the prior probe-rs snapshot, the fixed fallback
+restored CPU0 to running, both process trees and ports were released, and UART
+heartbeats recovered. This acceptance does not independently verify the
+declared NVM semantics and does not extend to CPU1, another range, or another
+target/tool plan.
 
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
@@ -697,8 +702,10 @@ heartbeats continued. This accepts only the narrow combined lifecycle. A
 separate selected-register snapshot has passed its own exact-digest ESP32-S3
 CPU0 physical acceptance, including ordered values, fallback restoration,
 process cleanup, and UART recovery. A bounded declared-region memory snapshot
-is implemented behind another independent digest and controlled regressions but
-has not yet passed physical acceptance. GDB/MI symbols, stack inspection,
+has also passed its own exact-digest ESP32-S3 CPU0 physical acceptance for
+`0x42000000 + 32`, including complete byte coverage, fallback restoration,
+process cleanup, and UART recovery. Its NVM declaration remains user-confirmed,
+not OpenOCD-memory-map verified. GDB/MI symbols, stack inspection,
 general ELF/HEX loading, RTT, memory writes, Generic/MMIO or undeclared-region
 reads, register writes, software/symbolic/conditional breakpoints, watchpoints,
 asynchronous request cancellation, durable crash recovery,

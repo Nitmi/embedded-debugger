@@ -796,3 +796,66 @@ does not accept CPU1 restoration, a halted-origin path, symbols or ELF loading,
 memory/stack access, breakpoints/watchpoints, general execution control, flash,
 arbitrary MI/Tcl/monitor commands, or digest binding of runtime adapter identity
 and dynamically selected port numbers.
+
+## Confirmed OpenOCD bounded-memory snapshot acceptance (2026-08-25)
+
+- The user independently confirmed exact digest
+  `40f185c3cdb99927a323a2955a7a6026e12cf07a46514c8e8b55aac667fc0c31`.
+  It bound `esp32s3.cpu0`, exact request `0x42000000 + 32`, the declared NVM
+  region `0x42000000 + 0x02000000`, complete-coverage parsing, the fixed
+  five-command GDB/MI protocol, all deadlines, and exact OpenOCD, GDB, Xtensa
+  profile, and top-level board-configuration identities. Region semantics were
+  explicitly user-confirmed and not independently verified from OpenOCD's
+  runtime memory map.
+- Immediately before execution, `baud list`, Windows PnP, and probe-rs all
+  identified the same accessible native USB-JTAG device as
+  `303A:1001 / E0:72:A1:D4:1F:DC`, with its serial interface on COM3. A
+  five-second 115200-baud monitor held DTR/RTS false, transmitted zero bytes,
+  and received 199 bytes with consecutive baseline heartbeats `294..298`.
+  A final host-only plan recomputation still produced the confirmed digest.
+- The confirmed physical command ran exactly once, with no automatic retry. It
+  started OpenOCD on dynamic loopback Tcl/GDB ports 4813/4814 and proved
+  readiness in 354 ms. OpenOCD reported the exact runtime adapter serial,
+  examined CPU0, and verified selected CPU0 initially `running`; CPU1
+  examination again failed with `OCD_ID=00000000`.
+- GDB completed the required result sequence
+  `done / connected / done / done / exit`. The concrete read completed in 26 ms
+  and returned one structured block covering exactly `[0x42000000,
+  0x42000020)`: `e905024038863740ee0000000900000000630000000000012000003c2c2f0000`.
+  Complete coverage was true, and SHA-256 was
+  `6e5c379f5b716afd7e4915e5881f62d44034c8b6ece90d8490df9f25cc6ce5af`,
+  exactly matching the previously accepted probe-rs snapshot at the same
+  address and length.
+- Normal detach completed but left CPU0 observed `halted`. The one fixed resume
+  fallback then proved final `esp32s3.cpu0=running` in 4 ms. GDB exited 0
+  gracefully in 17 ms and OpenOCD exited 0 gracefully in 59 ms; neither process
+  tree was force-killed. No related process or connection on ports 4813/4814
+  remained, and post-run serial/probe enumeration preserved the exact identity
+  with `accessible=true`.
+- OpenOCD attach handlers emitted CPU0 debug-controller/core reset messages,
+  halted the target, and probed flash mappings before the explicit read. The
+  wrapper issued no explicit reset, flash, memory-write, symbol, breakpoint,
+  monitor, or arbitrary command. CPU1's final state was not observed, so it
+  remains outside the accepted scope.
+- The immediate zero-transmit UART monitor received 167 bytes and clean
+  heartbeats `389..391` after two partial boundary records. A delayed monitor
+  then received 201 bytes with clean consecutive heartbeats `530..534`, proving
+  observable application recovery while preserving the disclosed non-atomic
+  external-I/O boundary.
+- Plans, the structured result, protocol log, serial/probe inventories, three
+  UART captures, and `memory-acceptance-summary.json` are retained under
+  `target/hardware-acceptance/2026-08-24-openocd-memory-snapshot`. The result
+  and stderr SHA-256 values are respectively
+  `1354d32fb5586055364f8015a34497a69acbb201364ac01954791609942f13b1` and
+  `552b4ec1e188a9151b9c23e19050825b78b73806764859462788ba3d89e9cbe0`;
+  the acceptance-summary SHA-256 is
+  `cdc28b2eb4d445addfa64fc7da656e60fb11164ece00ea281664c5d2d905dfc5`.
+
+This accepts one exact running-origin, bounded OpenOCD memory snapshot on
+ESP32-S3 CPU0, including complete byte coverage, fixed-protocol cleanup,
+fallback restoration, resource release, and observable firmware recovery. It
+does not independently prove the declared NVM mapping, qualify CPU1 or another
+address/range, accept a halted-origin path, or authorize memory writes,
+symbols/ELF, register/stack commands, breakpoints/watchpoints, general execution
+control, flash, arbitrary MI/Tcl/monitor commands, runtime-adapter digest
+binding, or dynamic-port binding.
