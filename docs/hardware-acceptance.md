@@ -859,3 +859,69 @@ address/range, accept a halted-origin path, or authorize memory writes,
 symbols/ELF, register/stack commands, breakpoints/watchpoints, general execution
 control, flash, arbitrary MI/Tcl/monitor commands, runtime-adapter digest
 binding, or dynamic-port binding.
+
+## Confirmed OpenOCD bounded-stack snapshot acceptance (2026-08-27)
+
+- The user independently confirmed exact digest
+  `f03172e03098e8da27210b5b4d97a53fa6178884c84d09d8f7557ebc13cbf5ae`.
+  It bound `esp32s3.cpu0`, `--max-frames 8`, inclusive range `0..7`, fixed
+  `-stack-list-frames --no-frame-filters 0 7`, the five-command GDB/MI
+  protocol, all deadlines, strict result policy, and exact OpenOCD, GDB,
+  Xtensa-profile, and top-level board-configuration identities. It did not bind
+  runtime adapter identity, dynamic ports, or implicit unwinder read addresses.
+- Immediately before execution, `baud list`, Windows PnP, and probe-rs all
+  identified the same accessible native USB-JTAG device as
+  `303A:1001 / E0:72:A1:D4:1F:DC`, with its serial interface on COM3. A
+  five-second 115200-baud monitor held DTR/RTS false, transmitted zero bytes,
+  and received 200 bytes with consecutive baseline heartbeats `442..446`. A
+  final host-only plan recomputation still produced the confirmed digest.
+- The confirmed physical command ran exactly once, with no automatic retry. It
+  started OpenOCD on dynamic loopback Tcl/GDB ports 6794/6795 and proved
+  readiness in 307 ms. OpenOCD reported the exact runtime adapter serial,
+  examined CPU0, and verified selected CPU0 initially `running`; CPU1
+  examination again failed with `OCD_ID=00000000`.
+- GDB completed the required result sequence
+  `done / connected / done / done / exit`. The concrete stack request completed
+  in 5 ms and returned two contiguous frames: level 0 at `0x420129FF` and level
+  1 at `0x40378695`, both `arch=xtensa` and `func=??`. The 8-frame limit was not
+  reached and GDB reported no additional frame within this request, but physical
+  call-stack completeness remains explicitly unproven. No ELF/symbol identity,
+  frame filter, argument, local, or value request was used.
+- Normal detach completed but left CPU0 observed `halted`. The one fixed resume
+  fallback then proved final `esp32s3.cpu0=running` in 5 ms. GDB exited 0
+  gracefully in 7 ms and OpenOCD exited 0 gracefully in 32 ms; neither process
+  tree was force-killed. The initially observed Windows `TIME_WAIT` sockets
+  expired, leaving zero related processes and zero connections on ports
+  6794/6795. Post-run serial/PnP/probe enumeration preserved the exact identity
+  with `accessible=true`.
+- OpenOCD attach handlers emitted CPU0 debug-controller/core reset messages,
+  halted the target, probed flash mappings, and exchanged a memory map before
+  the explicit stack command. GDB unwinding may have implicitly read registers
+  and target memory at addresses derived from live state; those addresses were
+  not bound or independently audited. The wrapper issued no explicit reset,
+  flash, memory/register, symbol, breakpoint, monitor, or arbitrary command.
+  CPU1's final state was not observed and remains outside the accepted scope.
+- The immediate zero-transmit UART monitor received 199 bytes with clean
+  consecutive heartbeats `520..524`. A delayed monitor received 201 bytes with
+  clean consecutive heartbeats `677..681`, proving observable application
+  recovery. All captures used 115200 baud, DTR/RTS false, and zero transmitted
+  bytes.
+- The final plan, structured result, complete protocol log, serial/PnP/probe
+  inventories, three UART captures, cleanup evidence, and
+  `stack-acceptance-summary.json` are retained under
+  `target/hardware-acceptance/2026-08-27-openocd-stack-snapshot`. The result and
+  stderr SHA-256 values are respectively
+  `4384db32f68102c315f43982f6f6de9e079d98e7314579c1a65262c0019f96bc`
+  and `62cb1525196a1aed06c00b677c2e5a063152c65d72d3688615279b1cbd0a0cd8`;
+  the acceptance-summary SHA-256 is
+  `451cdb3a2ca3afa217b9d8a08d9251739179e8c82b33d219f3cadf5339dd7f42`.
+
+This accepts one exact running-origin, bounded OpenOCD stack snapshot on
+ESP32-S3 CPU0, including two GDB-reported frames, fixed-protocol cleanup,
+fallback restoration, resource release, and observable firmware recovery. It
+does not prove a complete physical call stack, bound or validate implicit
+unwinder memory addresses, verify symbols or firmware identity, qualify CPU1 or
+another target/frame limit/tool plan, accept a halted-origin path, or authorize
+argument/local/value inspection, explicit register/memory commands,
+breakpoints/watchpoints, general execution control, flash, or arbitrary
+MI/Tcl/monitor commands.

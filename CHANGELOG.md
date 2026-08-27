@@ -98,7 +98,11 @@ All notable changes to this project will be documented in this file.
   risk is explicit, and physical call-stack completeness remains unproven.
   Connected failures still attempt fixed detach, GDB exit, target restoration,
   and OpenOCD cleanup. Controlled parser, lifecycle, digest, bounds, and CLI
-  regressions pass; physical stack-snapshot acceptance is still pending.
+  regressions pass. A separately confirmed, non-retried ESP32-S3 CPU0 run with
+  `--max-frames 8` returned two unsymbolized frames, used the fixed resume
+  fallback, cleaned both process trees and dynamic ports, and recovered UART
+  heartbeats. Implicit unwind addresses, physical call-stack completeness,
+  symbols, CPU1, and any other plan remain unqualified.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current

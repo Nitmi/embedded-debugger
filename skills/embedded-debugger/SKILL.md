@@ -141,7 +141,12 @@ fixed detach, exit, selected-target running restoration, and OpenOCD cleanup.
 Success does not authorize ELF/symbol loading, frame filters,
 argument/local/value reads, explicit memory/register commands, breakpoints,
 execution control, flash, monitor commands, arbitrary MI/Tcl, CPU1, or another
-target. No physical stack-snapshot acceptance is recorded yet.
+target. ESP32-S3 CPU0 has passed one exact `--max-frames 8` acceptance run that
+returned two unsymbolized frames, used fallback restoration, released both
+process trees and dynamic ports, and recovered UART heartbeats. Treat that
+qualification as exact to the confirmed target, limit, tools, profile, and
+configuration; it still does not bind implicit unwind-read addresses or prove
+physical call-stack completeness or symbol correctness.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

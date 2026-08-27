@@ -282,7 +282,13 @@ OpenOCD cleanup. Do not retry automatically. This workflow does not authorize
 symbol/ELF loading, argument/local/value inspection, explicit memory/register
 commands, breakpoints, execution control, flash, monitor input, or arbitrary
 MI/Tcl. Controlled parser and two-process lifecycle regressions pass; no
-physical stack-snapshot acceptance is claimed yet.
+physical acceptance is inferred from those tests alone. ESP32-S3 CPU0 has now
+passed one separately confirmed, non-retried `--max-frames 8` snapshot: GDB
+returned two unsymbolized frames, the fixed fallback restored CPU0 to running,
+both process trees and dynamic ports were released, and UART heartbeats
+recovered. This exact acceptance does not bind implicit unwind-read addresses,
+prove physical call-stack completeness or symbols, qualify CPU1, or extend to
+another frame limit, target, tool, profile, or configuration.
 
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
@@ -757,11 +763,13 @@ process cleanup, and UART recovery. A bounded declared-region memory snapshot
 has also passed its own exact-digest ESP32-S3 CPU0 physical acceptance for
 `0x42000000 + 32`, including complete byte coverage, fallback restoration,
 process cleanup, and UART recovery. Its NVM declaration remains user-confirmed,
-not OpenOCD-memory-map verified. A separate bounded stack-snapshot workflow now
-passes controlled parser, process, restoration, and digest regressions, but has
-not yet passed physical acceptance. It binds only the returned frame range;
-implicit unwind-read addresses and physical call-stack completeness remain
-unproven. GDB/MI symbols, symbolized stack inspection, argument/local/value
+not OpenOCD-memory-map verified. A separate bounded stack-snapshot workflow has
+also passed one exact-digest ESP32-S3 CPU0 physical acceptance with
+`--max-frames 8`: GDB returned two unsymbolized frames, fallback restoration
+proved final running, resources were released, and UART recovered. Only the
+returned frame range is bound; implicit unwind-read addresses, symbol identity,
+and physical call-stack completeness remain unproven. GDB/MI symbols,
+symbolized stack inspection, argument/local/value
 inspection, general ELF/HEX loading, RTT, memory writes, Generic/MMIO or
 undeclared-region reads, register writes, software/symbolic/conditional
 breakpoints, watchpoints,
