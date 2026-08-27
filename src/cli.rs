@@ -10,7 +10,7 @@ use crate::{
         openocd::{
             self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
             OpenOcdInspectOptions, OpenOcdMemorySnapshotOptions, OpenOcdRegisterSnapshotOptions,
-            OpenOcdServerOptions, OpenOcdTargetOptions,
+            OpenOcdServerOptions, OpenOcdStackSnapshotOptions, OpenOcdTargetOptions,
         },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
@@ -109,6 +109,10 @@ pub enum OpenOcdCommand {
     Reset {
         #[command(subcommand)]
         command: OpenOcdResetCommand,
+    },
+    Stack {
+        #[command(subcommand)]
+        command: OpenOcdStackCommand,
     },
     Memory {
         #[command(subcommand)]
@@ -370,6 +374,34 @@ pub struct OpenOcdRegistersTestSelection {
     pub registers: OpenOcdRegistersSelection,
 
     #[arg(long, help = "exact confirm_digest returned by openocd registers plan")]
+    pub confirm: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdStackCommand {
+    Plan(OpenOcdStackSelection),
+    Test(OpenOcdStackTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdStackSelection {
+    #[command(flatten)]
+    pub session: OpenOcdSessionSelection,
+
+    #[arg(
+        long,
+        value_name = "COUNT",
+        help = "exact maximum returned frame count, limited to 1..=32"
+    )]
+    pub max_frames: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdStackTestSelection {
+    #[command(flatten)]
+    pub stack: OpenOcdStackSelection,
+
+    #[arg(long, help = "exact confirm_digest returned by openocd stack plan")]
     pub confirm: String,
 }
 
@@ -888,6 +920,18 @@ impl Cli {
             } => "openocd.reset.test",
             Command::Openocd {
                 command:
+                    OpenOcdCommand::Stack {
+                        command: OpenOcdStackCommand::Plan(_),
+                    },
+            } => "openocd.stack.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Stack {
+                        command: OpenOcdStackCommand::Test(_),
+                    },
+            } => "openocd.stack.test",
+            Command::Openocd {
+                command:
                     OpenOcdCommand::Memory {
                         command: OpenOcdMemoryCommand::Plan(_),
                     },
@@ -1286,6 +1330,67 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report
                         .recovery
                         .observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Stack {
+                    command: OpenOcdStackCommand::Plan(selection),
+                },
+        } => {
+            let report = openocd::plan_stack_snapshot(&openocd_stack_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.stack.plan",
+                &report,
+                format!(
+                    "OpenOCD bounded stack snapshot plan ready\nRisk: {}\nTarget: {}\nMaximum returned frames: {}\nImplicit unwind-read addresses: unbound\nInitial/final target state: running\nConfirm digest: {}",
+                    report.risk,
+                    report.target_state_policy.expected_current_target,
+                    report.stack_policy.maximum_frames_requested,
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Stack {
+                    command: OpenOcdStackCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_stack_snapshot(
+                &openocd_stack_options(&selection.stack),
+                &selection.confirm,
+            )?;
+            let top = report
+                .exchange
+                .snapshot
+                .frames
+                .first()
+                .map(|frame| {
+                    format!(
+                        "{} {}",
+                        frame.address,
+                        frame.function.as_deref().unwrap_or("<unsymbolized>")
+                    )
+                })
+                .unwrap_or_else(|| "missing".to_string());
+            Ok(CommandResult::serializable(
+                "openocd.stack.test",
+                &report,
+                format!(
+                    "OpenOCD bounded stack snapshot complete\nTarget: {}\nFrames: {}/{}\nTop: {}\nAdditional GDB frames possible: {}\nTarget state: {} -> {}\nShutdown: graceful",
+                    report.target_restoration.initial.target_name,
+                    report.exchange.snapshot.returned_frames,
+                    report.exchange.snapshot.maximum_frames,
+                    top,
+                    report.exchange.snapshot.additional_gdb_frames_possible,
+                    report.target_restoration.initial.state,
+                    report
+                        .target_restoration
+                        .final_observation
                         .as_ref()
                         .map_or("missing", |observation| observation.state.as_str()),
                 ),
@@ -2130,6 +2235,13 @@ fn openocd_register_options(
     OpenOcdRegisterSnapshotOptions {
         session: openocd_session_options(&selection.session),
         registers: selection.registers.clone(),
+    }
+}
+
+fn openocd_stack_options(selection: &OpenOcdStackSelection) -> OpenOcdStackSnapshotOptions {
+    OpenOcdStackSnapshotOptions {
+        session: openocd_session_options(&selection.session),
+        maximum_frames: selection.max_frames,
     }
 }
 

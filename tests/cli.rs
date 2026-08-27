@@ -2067,6 +2067,152 @@ fn openocd_registers_validate_selection_before_filesystem_inputs() {
 }
 
 #[test]
+fn openocd_stack_plan_binds_limit_protocol_unwind_risk_and_restoration() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let make_plan = |maximum_frames: &str| {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .arg("openocd")
+            .arg("stack")
+            .arg("plan")
+            .arg("--openocd-executable")
+            .arg(&openocd)
+            .arg("--gdb-executable")
+            .arg(&gdb)
+            .arg("--expected-target")
+            .arg("fake.cpu0")
+            .arg("--config")
+            .arg(&config)
+            .arg("--search")
+            .arg(directory.path())
+            .arg("--max-frames")
+            .arg(maximum_frames)
+            .arg("--json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Value>(&output).unwrap()
+    };
+    let first = make_plan("8");
+    let second = make_plan("8");
+    let changed = make_plan("9");
+
+    assert_eq!(first["operation"], "openocd.stack.plan");
+    assert_eq!(first["data"]["operation"], "openocd.stack.test");
+    assert_eq!(first["data"]["risk"], "R2_DEVICE_WRITE");
+    assert_eq!(first["data"]["stack_policy"]["maximum_frames_requested"], 8);
+    assert_eq!(
+        first["data"]["protocol"]["commands"][2]["command"],
+        "-stack-list-frames --no-frame-filters 0 7"
+    );
+    assert_eq!(
+        first["data"]["target_state_policy"]["normal_restoration_command"],
+        "4-target-detach"
+    );
+    assert_eq!(
+        first["data"]["effects"]["explicit_bounded_stack_unwind_requested"],
+        true
+    );
+    assert_eq!(
+        first["data"]["effects"]["unwinder_target_memory_addresses_bound"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["implicit_unwinder_target_access_addresses_bound"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirm_digest"],
+        second["data"]["confirm_digest"]
+    );
+    assert_ne!(
+        first["data"]["confirm_digest"],
+        changed["data"]["confirm_digest"]
+    );
+}
+
+#[test]
+fn openocd_stack_test_rejects_a_stale_digest_before_tcl_execution() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("stack")
+        .arg("test")
+        .arg("--openocd-executable")
+        .arg(&openocd)
+        .arg("--gdb-executable")
+        .arg(&gdb)
+        .arg("--expected-target")
+        .arg("fake.cpu0")
+        .arg("--config")
+        .arg(&config)
+        .arg("--max-frames")
+        .arg("8")
+        .arg("--confirm")
+        .arg("00".repeat(32))
+        .arg("--json")
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.stack.test");
+    assert_eq!(result["error"]["code"], "CONFIRMATION_MISMATCH");
+    assert_eq!(
+        result["error"]["suggested_actions"][0]["action"],
+        "review_openocd_stack_snapshot_plan"
+    );
+    assert!(result["error"]["details"]["openocd_readiness"].is_null());
+}
+
+#[test]
+fn openocd_stack_validates_limit_before_filesystem_inputs() {
+    for maximum_frames in ["0", "33"] {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .args([
+                "openocd",
+                "stack",
+                "plan",
+                "--openocd-executable",
+                "deliberately-missing-openocd",
+                "--gdb-executable",
+                "deliberately-missing-gdb",
+                "--expected-target",
+                "fake.cpu0",
+                "--config",
+                "deliberately-missing.cfg",
+                "--max-frames",
+                maximum_frames,
+                "--json",
+            ])
+            .assert()
+            .code(7)
+            .get_output()
+            .stdout
+            .clone();
+        let result: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(result["operation"], "openocd.stack.plan");
+        assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    }
+}
+
+#[test]
 fn openocd_memory_plan_binds_range_region_protocol_and_restoration() {
     let directory = tempdir().unwrap();
     let openocd = write_fake_openocd(directory.path());

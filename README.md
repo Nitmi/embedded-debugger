@@ -229,13 +229,60 @@ gap-free coverage of the exact request. Partial or malformed results fail
 closed and still take the fixed detach, target-restoration, and cleanup paths.
 Memory writes, MMIO/unknown declarations, expressions, symbols, stack reads,
 breakpoints, execution control, flash, monitor input, and arbitrary commands
-remain unavailable. ESP32-S3 CPU0 has passed one separately confirmed,
-non-retried `0x42000000 + 32` physical snapshot: GDB returned complete coverage
+remain unavailable in the memory-snapshot workflow. ESP32-S3 CPU0 has passed
+one separately confirmed, non-retried `0x42000000 + 32` physical snapshot: GDB
+returned complete coverage
 with the same SHA-256 as the prior probe-rs snapshot, the fixed fallback
 restored CPU0 to running, both process trees and ports were released, and UART
 heartbeats recovered. This acceptance does not independently verify the
 declared NVM semantics and does not extend to CPU1, another range, or another
 target/tool plan.
+
+Bounded OpenOCD stack inspection is an independent confirmed checkpoint:
+
+```console
+cargo run -- openocd stack plan \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --max-frames 16 \
+  --json
+
+cargo run -- openocd stack test \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --max-frames 16 \
+  --confirm <confirm_digest> \
+  --json
+```
+
+The plan accepts an exact 1..=32 frame limit and binds the fixed command
+`3-stack-list-frames --no-frame-filters 0 <limit-1>`. It loads no ELF or symbol
+file, runs no Python frame filters, and requests no arguments, locals, or
+values. Structured parsing requires levels to be contiguous from zero and each
+frame to contain a 64-bit hexadecimal address. Optional function/source text is
+bounded metadata only; without a firmware identity it is not a symbolization
+claim. Reaching the requested limit reports that additional GDB frames may
+exist, and the result never claims that the physical call stack is complete.
+
+The returned frame count is bounded, but the underlying unwind is not an
+address-bounded memory operation: GDB may read live registers and target memory
+at addresses derived from unwind state. A corrupted stack or unwind state can
+therefore reach an unexpected or side-effectful address. That unbound effect is
+explicit in the R2 plan and confirmation boundary. Connected failures still
+attempt fixed detach, GDB exit, selected-target running restoration, and
+OpenOCD cleanup. Do not retry automatically. This workflow does not authorize
+symbol/ELF loading, argument/local/value inspection, explicit memory/register
+commands, breakpoints, execution control, flash, monitor input, or arbitrary
+MI/Tcl. Controlled parser and two-process lifecycle regressions pass; no
+physical stack-snapshot acceptance is claimed yet.
 
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
@@ -655,7 +702,12 @@ See [docs/contracts.md](docs/contracts.md),
 [ADR-0005](docs/decisions/0005-openocd-host-inspection-boundary.md),
 [ADR-0006](docs/decisions/0006-guarded-openocd-server-lifecycle.md), and
 [ADR-0007](docs/decisions/0007-bounded-gdb-mi-host-lifecycle.md), and
-[ADR-0008](docs/decisions/0008-confirmed-openocd-gdb-session.md).
+[ADR-0008](docs/decisions/0008-confirmed-openocd-gdb-session.md),
+[ADR-0009](docs/decisions/0009-confirmed-openocd-target-state-roundtrip.md),
+[ADR-0010](docs/decisions/0010-confirmed-openocd-reset-recovery.md),
+[ADR-0011](docs/decisions/0011-confirmed-openocd-register-snapshot.md),
+[ADR-0012](docs/decisions/0012-confirmed-openocd-memory-snapshot.md), and
+[ADR-0013](docs/decisions/0013-confirmed-openocd-stack-snapshot.md).
 
 ## Current status
 
@@ -705,9 +757,14 @@ process cleanup, and UART recovery. A bounded declared-region memory snapshot
 has also passed its own exact-digest ESP32-S3 CPU0 physical acceptance for
 `0x42000000 + 32`, including complete byte coverage, fallback restoration,
 process cleanup, and UART recovery. Its NVM declaration remains user-confirmed,
-not OpenOCD-memory-map verified. GDB/MI symbols, stack inspection,
-general ELF/HEX loading, RTT, memory writes, Generic/MMIO or undeclared-region
-reads, register writes, software/symbolic/conditional breakpoints, watchpoints,
+not OpenOCD-memory-map verified. A separate bounded stack-snapshot workflow now
+passes controlled parser, process, restoration, and digest regressions, but has
+not yet passed physical acceptance. It binds only the returned frame range;
+implicit unwind-read addresses and physical call-stack completeness remain
+unproven. GDB/MI symbols, symbolized stack inspection, argument/local/value
+inspection, general ELF/HEX loading, RTT, memory writes, Generic/MMIO or
+undeclared-region reads, register writes, software/symbolic/conditional
+breakpoints, watchpoints,
 asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,
 and non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD

@@ -124,6 +124,25 @@ process cleanup, and UART recovery. Treat that qualification as exact to the
 confirmed target, range, tools, and configuration; the NVM declaration remains
 user-confirmed rather than independently verified from OpenOCD's memory map.
 
+For OpenOCD stack inspection, use only the independent
+`openocd stack plan/test` workflow with an explicit `--max-frames` in 1..=32.
+Surface the fixed zero-based inclusive range, disabled frame filters, no
+ELF/symbol identity, and the R2 distinction between bounded returned frames and
+unbound implicit unwind reads. GDB may read target registers and memory at
+addresses derived from live unwind state; invalid state can reach an unexpected
+or side-effectful address even though no explicit memory command is sent.
+
+Require the exact new digest before `test` and never retry automatically. The
+fixed exchange permits only version, remote connect, one
+`-stack-list-frames --no-frame-filters 0 <limit-1>`, detach, and exit. Treat
+function/source fields as optional bounded GDB metadata, not verified symbols;
+do not claim a complete physical call stack. A connected failure still follows
+fixed detach, exit, selected-target running restoration, and OpenOCD cleanup.
+Success does not authorize ELF/symbol loading, frame filters,
+argument/local/value reads, explicit memory/register commands, breakpoints,
+execution control, flash, monitor commands, arbitrary MI/Tcl, CPU1, or another
+target. No physical stack-snapshot acceptance is recorded yet.
+
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state
 observation, and restoration. It does not authorize ELF or symbol loading,

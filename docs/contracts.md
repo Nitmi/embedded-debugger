@@ -336,6 +336,64 @@ register/stack commands, memory writes, breakpoints/watchpoints, general
 execution control, flash, monitor input, arbitrary MI/Tcl, and unverified
 region inference remain unavailable.
 
+## Confirmed OpenOCD bounded stack snapshot
+
+`openocd stack plan` reuses the exact OpenOCD/GDB/session inputs and requires
+`--max-frames` in 1..=32. The limit is validated before executable or
+configuration lookup. Its independent digest binds the tool/config/profile
+identities, exact selected target, deadlines, running-restoration policy,
+frame limit, inclusive range `0..limit-1`, disabled-frame-filter policy,
+result validation, effects, and confirmation boundary.
+
+The operation remains `R2_DEVICE_WRITE`. OpenOCD configuration is executable
+Tcl, the optional Xtensa profile is native host code, attach handlers may probe
+flash/reset/halt, and attachment may interrupt the target. In addition, stack
+unwinding may read target registers and memory at addresses derived from live
+registers, stack contents, and architecture unwind rules. The returned frame
+count is bounded, but those implicit target-read addresses cannot be known or
+bound by the confirmation digest. Invalid unwind state can therefore reach an
+unexpected or side-effectful target address. The plan reports
+`unwinder_target_memory_addresses_bound=false` and
+`implicit_unwinder_target_access_addresses_bound=false`.
+
+A confirmed test requires the exact selected target to start `running` and
+permits only:
+
+```text
+1-gdb-version                                                   -> 1^done
+2-target-select remote 127.0.0.1:<dynamic-port>                -> 2^connected
+3-stack-list-frames --no-frame-filters 0 <confirmed-high>      -> 3^done
+4-target-detach                                                 -> 4^done
+5-gdb-exit                                                      -> 5^exit
+```
+
+The `stack` response must use the GDB/MI result-list shape
+`stack=[frame={...}, ...]`. Each tuple must contain decimal `level` and a
+0x-prefixed hexadecimal `addr`; levels must be unique and contiguous from zero.
+Only documented optional `func`, `file`, `fullname`, `line`, `from`, `arch`,
+and `addr_flags` scalar fields are accepted. Optional text is bounded to 4096
+bytes per field and rejects control characters. Empty results, duplicate or
+unknown fields, nested values, malformed numbers, noncontiguous levels, extra
+top-level variables, and more frames than confirmed are `PROTOCOL_ERROR`.
+
+Python frame filters are explicitly disabled. No ELF or symbol file is loaded,
+and no argument, local, or value is requested. Optional function/source fields
+are returned as GDB-reported metadata only; the plan requires no firmware
+identity and makes no symbol accuracy claim. If `returned_frames` equals the
+confirmed limit, `additional_gdb_frames_possible=true`. The report always keeps
+`physical_call_stack_completeness_proven=false`, including when fewer frames are
+returned, because unwindability is not proof of the physical call stack.
+
+A connected-path failure still attempts fixed token-4 detach before bounded
+token-5 exit. Every path then observes the original selected target, uses only
+the fixed resume fallback when `running` is not proven, requires final running,
+and shuts down OpenOCD with complete output/process evidence. Failures are not
+retried automatically. Success enables only the bounded stack snapshot in
+addition to the accepted connection and restoration capabilities. Symbol/ELF
+loading, argument/local/value inspection, explicit memory/register commands,
+breakpoints/watchpoints, general execution control, flash, monitor input, and
+arbitrary MI/Tcl remain false.
+
 ## Confirmed OpenOCD target state roundtrip
 
 `openocd target plan` accepts one exact OpenOCD executable, at least one

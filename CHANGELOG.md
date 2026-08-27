@@ -85,6 +85,20 @@ All notable changes to this project will be documented in this file.
   dynamic ports, and recovered UART heartbeats. CPU1, other ranges and targets,
   and independent verification of the user-declared NVM semantics remain
   unqualified.
+- Confirmed `openocd stack plan/test` for the first 1..=32 GDB-reported frames.
+  Its separate digest binds the exact inclusive range, fixed
+  `-stack-list-frames --no-frame-filters` command, tool/config/profile
+  identities, target, deadlines, strict structured result policy, effects, and
+  restoration. The parser handles the official `stack=[frame={...}]`
+  result-list without string rewriting, requires contiguous levels and bounded
+  hexadecimal addresses, and rejects duplicate/unknown/nested/extra or
+  malformed data. No ELF, symbol, frame filter, argument, local, or value input
+  is accepted. The result limit does not bind target addresses implicitly read
+  by the unwinder; that possible register/memory access and side-effectful-read
+  risk is explicit, and physical call-stack completeness remains unproven.
+  Connected failures still attempt fixed detach, GDB exit, target restoration,
+  and OpenOCD cleanup. Controlled parser, lifecycle, digest, bounds, and CLI
+  regressions pass; physical stack-snapshot acceptance is still pending.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current

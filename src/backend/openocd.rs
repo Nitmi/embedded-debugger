@@ -22,6 +22,7 @@ mod registers;
 mod reset;
 mod server;
 mod session;
+mod stack;
 mod target;
 
 pub use gdb::{
@@ -29,10 +30,11 @@ pub use gdb::{
     DEFAULT_GDB_MI_STARTUP_TIMEOUT_MS, DEFAULT_GDB_VERSION_TIMEOUT_MS, GdbExecutableFileIdentity,
     GdbExecutableInspection, GdbInspectOptions, GdbInspection, GdbMiCommandResult, GdbMiHandshake,
     GdbMiMemoryBlock, GdbMiMemorySnapshot, GdbMiOutput, GdbMiProtocol, GdbMiRecordCounts,
-    GdbMiRegisterInventory, GdbMiRegisterValue, GdbMiShutdown, GdbMiTestOptions, GdbMiTestReport,
-    MAX_GDB_MI_COMMAND_TIMEOUT_MS, MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS, MAX_GDB_MI_STARTUP_TIMEOUT_MS,
-    MAX_GDB_VERSION_TIMEOUT_MS, MIN_GDB_MI_COMMAND_TIMEOUT_MS, MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS,
-    MIN_GDB_MI_STARTUP_TIMEOUT_MS, MIN_GDB_VERSION_TIMEOUT_MS, inspect_gdb, test_gdb_mi,
+    GdbMiRegisterInventory, GdbMiRegisterValue, GdbMiShutdown, GdbMiStackFrame, GdbMiStackSnapshot,
+    GdbMiTestOptions, GdbMiTestReport, MAX_GDB_MI_COMMAND_TIMEOUT_MS,
+    MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS, MAX_GDB_MI_STARTUP_TIMEOUT_MS, MAX_GDB_VERSION_TIMEOUT_MS,
+    MIN_GDB_MI_COMMAND_TIMEOUT_MS, MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS,
+    MIN_GDB_VERSION_TIMEOUT_MS, inspect_gdb, test_gdb_mi,
 };
 pub use memory::{
     OpenOcdDeclaredMemoryRegion, OpenOcdMemorySnapshotCapabilities,
@@ -70,6 +72,13 @@ pub use session::{
     OpenOcdGdbSessionPlan, OpenOcdGdbSessionTestReport, OpenOcdSessionGdbPlan,
     OpenOcdSessionServerPlan, OpenOcdTargetRestoration, OpenOcdTargetStateObservation,
     OpenOcdTargetStatePolicy, plan_session, test_session,
+};
+pub use stack::{
+    MAX_OPENOCD_STACK_SNAPSHOT_FRAMES, OpenOcdStackSnapshotCapabilities,
+    OpenOcdStackSnapshotConfirmationBoundary, OpenOcdStackSnapshotEffects,
+    OpenOcdStackSnapshotExchange, OpenOcdStackSnapshotOptions, OpenOcdStackSnapshotPlan,
+    OpenOcdStackSnapshotPolicy, OpenOcdStackSnapshotTestReport, plan_stack_snapshot,
+    test_stack_snapshot,
 };
 pub use target::{
     OpenOcdTargetCapabilities, OpenOcdTargetConfirmationBoundary, OpenOcdTargetEffects,

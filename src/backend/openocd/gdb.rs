@@ -17,7 +17,10 @@ use process_wrap::std::JobObject;
 use process_wrap::std::ProcessGroup;
 use process_wrap::std::{ChildWrapper, CommandWrap};
 use serde::Serialize;
-use serde_gdbmi::parser::{DataSymbol, ResponseBody as StructuredResponseBody, Value as MiValue};
+use serde_gdbmi::{
+    lexer::{self, Token as MiToken},
+    parser::{DataSymbol, ResponseBody as StructuredResponseBody, Value as MiValue},
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -66,6 +69,9 @@ const REGISTER_VALUES_COMMAND_PLACEHOLDER: &str =
 const MEMORY_READ_TOKEN: u64 = 3;
 const MEMORY_DETACH_TOKEN: u64 = 4;
 const MEMORY_EXIT_TOKEN: u64 = 5;
+const STACK_LIST_TOKEN: u64 = 3;
+const STACK_DETACH_TOKEN: u64 = 4;
+const STACK_EXIT_TOKEN: u64 = 5;
 const MI_LAUNCH_ARGUMENTS: [&str; 4] = ["--nx", "--nh", "--quiet", "--interpreter=mi2"];
 pub(super) const XTENSA_GNU_CONFIG_ENV: &str = "XTENSA_GNU_CONFIG";
 
@@ -293,6 +299,29 @@ pub struct GdbMiMemorySnapshot {
     pub blocks: Vec<GdbMiMemoryBlock>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiStackFrame {
+    pub level: u64,
+    pub address: Address,
+    pub function: Option<String>,
+    pub file: Option<String>,
+    pub fullname: Option<String>,
+    pub line: Option<u64>,
+    pub module: Option<String>,
+    pub architecture: Option<String>,
+    pub address_flags: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiStackSnapshot {
+    pub maximum_frames: u64,
+    pub returned_frames: u64,
+    pub frame_limit_reached: bool,
+    pub additional_gdb_frames_possible: bool,
+    pub physical_call_stack_completeness_proven: bool,
+    pub frames: Vec<GdbMiStackFrame>,
+}
+
 pub(super) struct RemoteGdbExecution {
     pub endpoint: String,
     pub startup_elapsed: Duration,
@@ -342,6 +371,25 @@ pub(super) struct RemoteMemoryExecution {
     pub read_result_class: String,
     pub read_command: String,
     pub snapshot: GdbMiMemorySnapshot,
+    pub detach_elapsed: Duration,
+    pub detach_result_class: String,
+    pub record_counts: GdbMiRecordCounts,
+    pub shutdown: GdbMiShutdown,
+    pub output: GdbMiOutput,
+}
+
+pub(super) struct RemoteStackExecution {
+    pub endpoint: String,
+    pub startup_elapsed: Duration,
+    pub version_elapsed: Duration,
+    pub version_result_class: String,
+    pub version_stream_records: u64,
+    pub connect_elapsed: Duration,
+    pub connect_result_class: String,
+    pub list_elapsed: Duration,
+    pub list_result_class: String,
+    pub list_command: String,
+    pub snapshot: GdbMiStackSnapshot,
     pub detach_elapsed: Duration,
     pub detach_result_class: String,
     pub record_counts: GdbMiRecordCounts,
@@ -676,6 +724,78 @@ pub(super) fn execute_remote_memory_snapshot(
     })
 }
 
+pub(super) fn execute_remote_stack_snapshot(
+    executable: &str,
+    xtensa_config: Option<&str>,
+    gdb_port: u16,
+    maximum_frames: u64,
+    startup_timeout_ms: u64,
+    command_timeout_ms: u64,
+    shutdown_timeout_ms: u64,
+) -> Result<RemoteStackExecution> {
+    let endpoint = format!("127.0.0.1:{gdb_port}");
+    let mut command = Command::new(executable);
+    command
+        .args(MI_LAUNCH_ARGUMENTS)
+        .env_remove(XTENSA_GNU_CONFIG_ENV);
+    if let Some(config) = xtensa_config {
+        command.env(XTENSA_GNU_CONFIG_ENV, config);
+    }
+    let mut gdb = ManagedGdb::spawn(command, executable, STACK_EXIT_TOKEN)?;
+    let lifecycle = match gdb.run_stack_lifecycle(
+        &endpoint,
+        maximum_frames,
+        Duration::from_millis(startup_timeout_ms),
+        Duration::from_millis(command_timeout_ms),
+        Duration::from_millis(shutdown_timeout_ms),
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(failure) => {
+            return Err(finalize_failure(gdb, failure, shutdown_timeout_ms));
+        }
+    };
+
+    let mut shutdown = gdb.cleanup(Duration::from_millis(shutdown_timeout_ms));
+    let record_counts = gdb.record_counts.clone();
+    let output = gdb.finish_output();
+    shutdown.process_tree_cleanup_complete &= output_streams_closed(&output);
+    if !shutdown.command_sent
+        || !shutdown.result_observed
+        || !shutdown.graceful
+        || !shutdown.exit_success
+        || !shutdown.process_tree_cleanup_complete
+    {
+        return Err(protocol_error_with_lifecycle(
+            "stack-snapshot GDB/MI process did not complete a graceful shutdown",
+            json!({"endpoint": endpoint}),
+            &shutdown,
+            &output,
+        ));
+    }
+    validate_complete_output(&output).map_err(|message| {
+        protocol_error_with_lifecycle(message, json!({"endpoint": endpoint}), &shutdown, &output)
+    })?;
+
+    Ok(RemoteStackExecution {
+        endpoint,
+        startup_elapsed: lifecycle.startup_elapsed,
+        version_elapsed: lifecycle.version_elapsed,
+        version_result_class: lifecycle.version_result_class,
+        version_stream_records: lifecycle.version_stream_records,
+        connect_elapsed: lifecycle.connect_elapsed,
+        connect_result_class: lifecycle.connect_result_class,
+        list_elapsed: lifecycle.list_elapsed,
+        list_result_class: lifecycle.list_result_class,
+        list_command: lifecycle.list_command,
+        snapshot: lifecycle.snapshot,
+        detach_elapsed: lifecycle.detach_elapsed,
+        detach_result_class: lifecycle.detach_result_class,
+        record_counts,
+        shutdown,
+        output,
+    })
+}
+
 fn protocol_contract() -> GdbMiProtocol {
     GdbMiProtocol {
         interpreter: "mi2".to_string(),
@@ -822,6 +942,48 @@ pub(super) fn memory_protocol_contract(address: Address, length_bytes: u64) -> G
             },
             GdbMiPlannedCommand {
                 token: MEMORY_EXIT_TOKEN,
+                command: EXIT_COMMAND.to_string(),
+                expected_result_class: "exit".to_string(),
+            },
+        ],
+    }
+}
+
+pub(super) fn stack_protocol_contract(maximum_frames: u64) -> GdbMiProtocol {
+    GdbMiProtocol {
+        interpreter: "mi2".to_string(),
+        launch_arguments: MI_LAUNCH_ARGUMENTS
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        initialization_files_enabled: false,
+        input_encoding: "ascii".to_string(),
+        line_terminator: "lf".to_string(),
+        token_correlation_required: true,
+        process_isolation: process_isolation().to_string(),
+        commands: vec![
+            GdbMiPlannedCommand {
+                token: VERSION_TOKEN,
+                command: VERSION_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REMOTE_SELECT_TOKEN,
+                command: REMOTE_SELECT_COMMAND_PLACEHOLDER.to_string(),
+                expected_result_class: "connected".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: STACK_LIST_TOKEN,
+                command: stack_list_command(maximum_frames),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: STACK_DETACH_TOKEN,
+                command: REMOTE_DETACH_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: STACK_EXIT_TOKEN,
                 command: EXIT_COMMAND.to_string(),
                 expected_result_class: "exit".to_string(),
             },
@@ -1665,6 +1827,124 @@ impl ManagedGdb {
         failure
     }
 
+    fn run_stack_lifecycle(
+        &mut self,
+        endpoint: &str,
+        maximum_frames: u64,
+        startup_timeout: Duration,
+        command_timeout: Duration,
+        shutdown_timeout: Duration,
+    ) -> std::result::Result<StackLifecycleSuccess, LifecycleFailure> {
+        let startup_deadline = self.started + startup_timeout;
+        self.wait_for_prompt(startup_deadline)?;
+        let startup_elapsed = self.started.elapsed();
+
+        let streams_before_version = stream_record_count(&self.record_counts);
+        let version_started = Instant::now();
+        self.send_command(VERSION_TOKEN, VERSION_COMMAND)?;
+        let version_result_class = self.wait_for_result(VERSION_TOKEN, "done", startup_deadline)?;
+        let version_elapsed = version_started.elapsed();
+        let version_stream_records =
+            stream_record_count(&self.record_counts).saturating_sub(streams_before_version);
+
+        let connect_command = format!("-target-select remote {endpoint}");
+        let connect_started = Instant::now();
+        self.send_command(REMOTE_SELECT_TOKEN, &connect_command)?;
+        let connect_result_class = self.wait_for_result(
+            REMOTE_SELECT_TOKEN,
+            "connected",
+            connect_started + command_timeout,
+        )?;
+        let connect_elapsed = connect_started.elapsed();
+
+        let snapshot = match self.run_stack_snapshot(maximum_frames, command_timeout) {
+            Ok(snapshot) => snapshot,
+            Err(failure) => return Err(self.with_stack_detach_attempt(failure, command_timeout)),
+        };
+
+        let detach_started = Instant::now();
+        self.send_command(STACK_DETACH_TOKEN, REMOTE_DETACH_COMMAND)?;
+        let detach_result_class =
+            self.wait_for_result(STACK_DETACH_TOKEN, "done", detach_started + command_timeout)?;
+        let detach_elapsed = detach_started.elapsed();
+
+        self.send_command(STACK_EXIT_TOKEN, EXIT_COMMAND)?;
+        let shutdown_deadline = Instant::now() + shutdown_timeout;
+        self.wait_for_result(STACK_EXIT_TOKEN, "exit", shutdown_deadline)?;
+        self.wait_for_exit(shutdown_deadline)?;
+
+        Ok(StackLifecycleSuccess {
+            startup_elapsed,
+            version_elapsed,
+            version_result_class,
+            version_stream_records,
+            connect_elapsed,
+            connect_result_class,
+            list_elapsed: snapshot.list_elapsed,
+            list_result_class: snapshot.list_result_class,
+            list_command: snapshot.list_command,
+            snapshot: snapshot.snapshot,
+            detach_elapsed,
+            detach_result_class,
+        })
+    }
+
+    fn run_stack_snapshot(
+        &mut self,
+        maximum_frames: u64,
+        command_timeout: Duration,
+    ) -> std::result::Result<StackSnapshotSuccess, LifecycleFailure> {
+        let list_command = stack_list_command(maximum_frames);
+        let list_started = Instant::now();
+        self.send_command(STACK_LIST_TOKEN, &list_command)?;
+        let list_result =
+            self.wait_for_result_record(STACK_LIST_TOKEN, "done", list_started + command_timeout)?;
+        let list_elapsed = list_started.elapsed();
+        let snapshot = parse_stack_snapshot(&list_result.variables, maximum_frames)?;
+
+        Ok(StackSnapshotSuccess {
+            list_elapsed,
+            list_result_class: list_result.class,
+            list_command,
+            snapshot,
+        })
+    }
+
+    fn with_stack_detach_attempt(
+        &mut self,
+        mut failure: LifecycleFailure,
+        command_timeout: Duration,
+    ) -> LifecycleFailure {
+        let started = Instant::now();
+        let attempt = self
+            .send_command(STACK_DETACH_TOKEN, REMOTE_DETACH_COMMAND)
+            .and_then(|()| {
+                self.wait_for_result(STACK_DETACH_TOKEN, "done", started + command_timeout)
+            });
+        let evidence = match attempt {
+            Ok(result_class) => json!({
+                "attempted": true,
+                "complete": true,
+                "token": STACK_DETACH_TOKEN,
+                "command": REMOTE_DETACH_COMMAND,
+                "result_class": result_class,
+                "elapsed_ms": duration_ms(started.elapsed()),
+            }),
+            Err(detach_failure) => json!({
+                "attempted": true,
+                "complete": false,
+                "token": STACK_DETACH_TOKEN,
+                "command": REMOTE_DETACH_COMMAND,
+                "elapsed_ms": duration_ms(started.elapsed()),
+                "failure": lifecycle_failure_value(&detach_failure),
+            }),
+        };
+        let mut details = failure.details.as_object().cloned().unwrap_or_default();
+        details.insert("cleanup_detach".to_string(), evidence);
+        failure.details = Value::Object(details);
+        failure
+    }
+
     fn wait_for_prompt(&mut self, deadline: Instant) -> std::result::Result<(), LifecycleFailure> {
         loop {
             match self.next_record(deadline, "startup prompt")? {
@@ -2093,6 +2373,30 @@ struct MemorySnapshotSuccess {
 }
 
 #[derive(Debug)]
+struct StackLifecycleSuccess {
+    startup_elapsed: Duration,
+    version_elapsed: Duration,
+    version_result_class: String,
+    version_stream_records: u64,
+    connect_elapsed: Duration,
+    connect_result_class: String,
+    list_elapsed: Duration,
+    list_result_class: String,
+    list_command: String,
+    snapshot: GdbMiStackSnapshot,
+    detach_elapsed: Duration,
+    detach_result_class: String,
+}
+
+#[derive(Debug)]
+struct StackSnapshotSuccess {
+    list_elapsed: Duration,
+    list_result_class: String,
+    list_command: String,
+    snapshot: GdbMiStackSnapshot,
+}
+
+#[derive(Debug)]
 struct MiResultRecord {
     class: String,
     variables: HashMap<String, MiValue>,
@@ -2479,6 +2783,224 @@ fn parse_memory_snapshot(
     })
 }
 
+fn stack_list_command(maximum_frames: u64) -> String {
+    let maximum_frame_index = maximum_frames.saturating_sub(1);
+    format!("-stack-list-frames --no-frame-filters 0 {maximum_frame_index}")
+}
+
+fn parse_stack_snapshot(
+    variables: &HashMap<String, MiValue>,
+    maximum_frames: u64,
+) -> std::result::Result<GdbMiStackSnapshot, LifecycleFailure> {
+    const MAX_STACK_TEXT_FIELD_BYTES: usize = 4 * 1024;
+
+    if maximum_frames == 0 {
+        return Err(protocol_failure(
+            "GDB/MI stack snapshot requires a non-zero frame limit",
+            json!({"maximum_frames": maximum_frames}),
+        ));
+    }
+    let values = exact_list_variable(variables, "stack", "stack snapshot")?;
+    if values.is_empty() {
+        return Err(protocol_failure(
+            "GDB/MI stack snapshot returned no frames",
+            json!({"maximum_frames": maximum_frames}),
+        ));
+    }
+    let returned_frames = u64::try_from(values.len()).map_err(|_| {
+        protocol_failure(
+            "GDB/MI stack snapshot frame count exceeded the supported integer range",
+            json!({}),
+        )
+    })?;
+    if returned_frames > maximum_frames {
+        return Err(protocol_failure(
+            "GDB/MI stack snapshot returned more frames than requested",
+            json!({
+                "returned_frames": returned_frames,
+                "maximum_frames": maximum_frames,
+            }),
+        ));
+    }
+
+    let mut frames = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let MiValue::Dict(fields) = value else {
+            return Err(protocol_failure(
+                "GDB/MI stack list contained a non-frame entry",
+                json!({"frame_index": index}),
+            ));
+        };
+        for field in fields.keys() {
+            if !matches!(
+                field.as_str(),
+                "level"
+                    | "addr"
+                    | "func"
+                    | "file"
+                    | "fullname"
+                    | "line"
+                    | "from"
+                    | "arch"
+                    | "addr_flags"
+            ) {
+                return Err(protocol_failure(
+                    "GDB/MI stack frame contained an unexpected field",
+                    json!({"frame_index": index, "field": bounded_line(field)}),
+                ));
+            }
+        }
+        let level = parse_decimal_stack_field(fields, "level", index)?;
+        let expected_level = u64::try_from(index).map_err(|_| {
+            protocol_failure(
+                "GDB/MI stack frame index exceeded the supported integer range",
+                json!({"frame_index": index}),
+            )
+        })?;
+        if level != expected_level {
+            return Err(protocol_failure(
+                "GDB/MI stack frames were not contiguous from level zero",
+                json!({
+                    "frame_index": index,
+                    "expected_level": expected_level,
+                    "observed_level": level,
+                }),
+            ));
+        }
+        let address = parse_stack_address(fields, index)?;
+        let line = fields
+            .contains_key("line")
+            .then(|| parse_decimal_stack_field(fields, "line", index))
+            .transpose()?;
+        frames.push(GdbMiStackFrame {
+            level,
+            address: Address(address),
+            function: optional_bounded_stack_field(
+                fields,
+                "func",
+                index,
+                MAX_STACK_TEXT_FIELD_BYTES,
+            )?,
+            file: optional_bounded_stack_field(fields, "file", index, MAX_STACK_TEXT_FIELD_BYTES)?,
+            fullname: optional_bounded_stack_field(
+                fields,
+                "fullname",
+                index,
+                MAX_STACK_TEXT_FIELD_BYTES,
+            )?,
+            line,
+            module: optional_bounded_stack_field(
+                fields,
+                "from",
+                index,
+                MAX_STACK_TEXT_FIELD_BYTES,
+            )?,
+            architecture: optional_bounded_stack_field(
+                fields,
+                "arch",
+                index,
+                MAX_STACK_TEXT_FIELD_BYTES,
+            )?,
+            address_flags: optional_bounded_stack_field(
+                fields,
+                "addr_flags",
+                index,
+                MAX_STACK_TEXT_FIELD_BYTES,
+            )?,
+        });
+    }
+
+    let frame_limit_reached = returned_frames == maximum_frames;
+    Ok(GdbMiStackSnapshot {
+        maximum_frames,
+        returned_frames,
+        frame_limit_reached,
+        additional_gdb_frames_possible: frame_limit_reached,
+        physical_call_stack_completeness_proven: false,
+        frames,
+    })
+}
+
+fn parse_decimal_stack_field(
+    fields: &HashMap<String, MiValue>,
+    key: &str,
+    frame_index: usize,
+) -> std::result::Result<u64, LifecycleFailure> {
+    let value = exact_string_field(fields, key, "stack frame")?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(protocol_failure(
+            "GDB/MI stack frame contained invalid decimal metadata",
+            json!({"frame_index": frame_index, "field": key, "value": bounded_line(value)}),
+        ));
+    }
+    value.parse::<u64>().map_err(|_| {
+        protocol_failure(
+            "GDB/MI stack frame decimal metadata exceeded 64 bits",
+            json!({"frame_index": frame_index, "field": key, "value": bounded_line(value)}),
+        )
+    })
+}
+
+fn parse_stack_address(
+    fields: &HashMap<String, MiValue>,
+    frame_index: usize,
+) -> std::result::Result<u64, LifecycleFailure> {
+    let value = exact_string_field(fields, "addr", "stack frame")?;
+    let Some(digits) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    else {
+        return Err(protocol_failure(
+            "GDB/MI stack frame address was not hexadecimal",
+            json!({"frame_index": frame_index, "value": bounded_line(value)}),
+        ));
+    };
+    if digits.is_empty()
+        || digits.len() > 16
+        || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(protocol_failure(
+            "GDB/MI stack frame address had an invalid hexadecimal payload",
+            json!({"frame_index": frame_index, "value": bounded_line(value)}),
+        ));
+    }
+    u64::from_str_radix(digits, 16).map_err(|_| {
+        protocol_failure(
+            "GDB/MI stack frame address exceeded 64 bits",
+            json!({"frame_index": frame_index, "value": bounded_line(value)}),
+        )
+    })
+}
+
+fn optional_bounded_stack_field(
+    fields: &HashMap<String, MiValue>,
+    key: &str,
+    frame_index: usize,
+    maximum_bytes: usize,
+) -> std::result::Result<Option<String>, LifecycleFailure> {
+    let Some(value) = fields.get(key) else {
+        return Ok(None);
+    };
+    let MiValue::String(value) = value else {
+        return Err(protocol_failure(
+            "GDB/MI stack frame optional metadata was not a string",
+            json!({"frame_index": frame_index, "field": key}),
+        ));
+    };
+    if value.is_empty() || value.len() > maximum_bytes || value.chars().any(char::is_control) {
+        return Err(protocol_failure(
+            "GDB/MI stack frame optional metadata exceeded the safe text boundary",
+            json!({
+                "frame_index": frame_index,
+                "field": key,
+                "bytes": value.len(),
+                "maximum_bytes": maximum_bytes,
+            }),
+        ));
+    }
+    Ok(Some(value.clone()))
+}
+
 fn parse_hex_u64_field(
     fields: &HashMap<String, MiValue>,
     key: &str,
@@ -2835,6 +3357,9 @@ fn parse_result_record(
     payload: &str,
 ) -> std::result::Result<ParsedRecord, String> {
     let class = parse_class(payload, "result")?;
+    if payload.starts_with("done,stack=") {
+        return parse_stack_result_record(line, token, class);
+    }
     let response = serde_gdbmi::parser::Response::try_from(line)
         .map_err(|error| format!("result record has invalid structured MI data: {error}"))?;
     let parsed_token = response
@@ -2860,6 +3385,123 @@ fn parse_result_record(
         class,
         variables: data.variables,
     })
+}
+
+fn parse_stack_result_record(
+    line: &str,
+    token: Option<u64>,
+    class: String,
+) -> std::result::Result<ParsedRecord, String> {
+    if class != "done" {
+        return Err("stack result used an unexpected result class".to_string());
+    }
+    let tokens = lexer::lex(line)
+        .map_err(|error| format!("stack result has invalid structured MI data: {error}"))?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut tokens = tokens.into_iter();
+
+    if let Some(expected_token) = token {
+        match tokens.next() {
+            Some(MiToken::Text(value)) if value == expected_token.to_string() => {}
+            _ => return Err("stack result token was not represented exactly once".to_string()),
+        }
+    }
+    match tokens.next() {
+        Some(MiToken::Punct('^')) => {}
+        _ => return Err("stack result marker was missing".to_string()),
+    }
+    match tokens.next() {
+        Some(MiToken::Text(value)) if value == "done" => {}
+        _ => return Err("stack result class was not done".to_string()),
+    }
+    match tokens.next() {
+        Some(MiToken::Punct(',')) => {}
+        _ => return Err("stack result variable separator was missing".to_string()),
+    }
+    match tokens.next() {
+        Some(MiToken::Text(value)) if value == "stack" => {}
+        _ => return Err("stack result did not contain the exact stack variable".to_string()),
+    }
+    match tokens.next() {
+        Some(MiToken::Punct('=')) => {}
+        _ => return Err("stack result assignment was missing".to_string()),
+    }
+    let frames = match tokens.next() {
+        Some(MiToken::Bracketed(frames)) => parse_named_stack_frame_list(frames)?,
+        _ => return Err("stack result was not a result-list".to_string()),
+    };
+    if tokens.next().is_some() {
+        return Err("stack result contained unexpected trailing variables".to_string());
+    }
+
+    Ok(ParsedRecord::Result {
+        token,
+        class,
+        variables: HashMap::from([("stack".to_string(), MiValue::List(frames))]),
+    })
+}
+
+fn parse_named_stack_frame_list(
+    frames: lexer::TokenStream,
+) -> std::result::Result<Vec<MiValue>, String> {
+    let mut tokens = frames.into_iter().peekable();
+    let mut parsed = Vec::new();
+    while tokens.peek().is_some() {
+        match tokens.next() {
+            Some(MiToken::Text(value)) if value == "frame" => {}
+            _ => return Err("stack result-list entry was not named frame".to_string()),
+        }
+        match tokens.next() {
+            Some(MiToken::Punct('=')) => {}
+            _ => return Err("stack frame result assignment was missing".to_string()),
+        }
+        let fields = match tokens.next() {
+            Some(MiToken::Braced(fields)) => parse_stack_frame_fields(fields)?,
+            _ => return Err("stack frame result was not a tuple".to_string()),
+        };
+        parsed.push(MiValue::Dict(fields));
+        if tokens.peek().is_none() {
+            break;
+        }
+        match tokens.next() {
+            Some(MiToken::Punct(',')) if tokens.peek().is_some() => {}
+            _ => return Err("stack result-list separator was malformed".to_string()),
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_stack_frame_fields(
+    fields: lexer::TokenStream,
+) -> std::result::Result<HashMap<String, MiValue>, String> {
+    let mut tokens = fields.into_iter().peekable();
+    let mut parsed = HashMap::new();
+    while tokens.peek().is_some() {
+        let key = match tokens.next() {
+            Some(MiToken::Text(key)) => key,
+            _ => return Err("stack frame field name was malformed".to_string()),
+        };
+        match tokens.next() {
+            Some(MiToken::Punct('=')) => {}
+            _ => return Err("stack frame field assignment was missing".to_string()),
+        }
+        let value = match tokens.next() {
+            Some(MiToken::Text(value)) => MiValue::String(value),
+            _ => return Err("stack frame field was not a scalar string".to_string()),
+        };
+        if parsed.insert(key, value).is_some() {
+            return Err("stack frame contained a duplicate field".to_string());
+        }
+        if tokens.peek().is_none() {
+            break;
+        }
+        match tokens.next() {
+            Some(MiToken::Punct(',')) if tokens.peek().is_some() => {}
+            _ => return Err("stack frame field separator was malformed".to_string()),
+        }
+    }
+    Ok(parsed)
 }
 
 fn reject_token(token: Option<u64>, kind: &str) -> std::result::Result<(), String> {
@@ -3130,6 +3772,68 @@ mod tests {
     }
 
     #[test]
+    fn stack_result_lists_are_parsed_and_bounded_structurally() {
+        let record = parse_record(
+            "3^done,stack=[frame={level=\"0\",addr=\"0X40370010\",func=\"app_main\",file=\"main.c\",fullname=\"D:/src/main.c\",line=\"42\",arch=\"xtensa\"},frame={level=\"1\",addr=\"0x40370020\",from=\"rom\",addr_flags=\"is-entry\"}]",
+        )
+        .unwrap();
+        let ParsedRecord::Result { variables, .. } = record else {
+            panic!("expected result record");
+        };
+        let snapshot = parse_stack_snapshot(&variables, 4).unwrap();
+
+        assert_eq!(snapshot.maximum_frames, 4);
+        assert_eq!(snapshot.returned_frames, 2);
+        assert!(!snapshot.frame_limit_reached);
+        assert!(!snapshot.additional_gdb_frames_possible);
+        assert!(!snapshot.physical_call_stack_completeness_proven);
+        assert_eq!(snapshot.frames[0].address, Address(0x4037_0010));
+        assert_eq!(snapshot.frames[0].function.as_deref(), Some("app_main"));
+        assert_eq!(snapshot.frames[0].line, Some(42));
+        assert_eq!(snapshot.frames[1].module.as_deref(), Some("rom"));
+        assert_eq!(
+            snapshot.frames[1].address_flags.as_deref(),
+            Some("is-entry")
+        );
+    }
+
+    #[test]
+    fn stack_results_fail_closed_on_shape_level_address_or_field_violations() {
+        let malformed_records = [
+            "3^done,stack=[{level=\"0\",addr=\"0x1\"}]",
+            "3^done,stack=[frame={level=\"0\",level=\"0\",addr=\"0x1\"}]",
+            "3^done,stack=[frame={level=\"0\",addr=\"0x1\",args=[]}]",
+            "3^done,stack=[frame={level=\"0\",addr=\"0x1\"}],extra=\"x\"",
+        ];
+        for line in malformed_records {
+            assert!(parse_record(line).is_err(), "{line}");
+        }
+
+        let invalid_snapshots = [
+            "3^done,stack=[]",
+            "3^done,stack=[frame={level=\"1\",addr=\"0x1\"}]",
+            "3^done,stack=[frame={level=\"0\",addr=\"not-hex\"}]",
+            "3^done,stack=[frame={level=\"0\",addr=\"0x1\",unexpected=\"x\"}]",
+        ];
+        for line in invalid_snapshots {
+            let record = parse_record(line).unwrap();
+            let ParsedRecord::Result { variables, .. } = record else {
+                panic!("expected result record");
+            };
+            assert!(parse_stack_snapshot(&variables, 2).is_err(), "{line}");
+        }
+
+        let record = parse_record(
+            "3^done,stack=[frame={level=\"0\",addr=\"0x1\"},frame={level=\"1\",addr=\"0x2\"}]",
+        )
+        .unwrap();
+        let ParsedRecord::Result { variables, .. } = record else {
+            panic!("expected result record");
+        };
+        assert!(parse_stack_snapshot(&variables, 1).is_err());
+    }
+
+    #[test]
     fn test_options_validate_scalar_bounds_before_executable_lookup() {
         let mut options = GdbMiTestOptions {
             executable: PathBuf::from("missing-gdb"),
@@ -3174,6 +3878,18 @@ mod tests {
         assert_eq!(
             contract.commands[2].command,
             "-data-read-memory-bytes 0x20000004 8"
+        );
+        assert_eq!(contract.commands[3].command, REMOTE_DETACH_COMMAND);
+        assert_eq!(contract.commands[4].command, EXIT_COMMAND);
+    }
+
+    #[test]
+    fn stack_protocol_contract_binds_the_exact_bounded_unfiltered_range() {
+        let contract = stack_protocol_contract(8);
+        assert_eq!(contract.commands.len(), 5);
+        assert_eq!(
+            contract.commands[2].command,
+            "-stack-list-frames --no-frame-filters 0 7"
         );
         assert_eq!(contract.commands[3].command, REMOTE_DETACH_COMMAND);
         assert_eq!(contract.commands[4].command, EXIT_COMMAND);
