@@ -444,8 +444,18 @@ and a matching build ID is not obtained from the target, so
 `runtime_firmware_identity_bound=false` are mandatory. Physical call-stack
 completeness and implicit unwind-read addresses also remain unproven. This
 feature adds no target command or capability and retains the base R2/no-retry
-policy. It requires its own physical qualification; the earlier no-ELF
-ESP32-S3 stack acceptance does not qualify it.
+policy.
+
+One exact `esp32s3.cpu0`, `--max-frames 8` annotated plan has passed a
+separately confirmed, non-retried physical qualification. It returned two GDB
+frames, resolved the exact top address into eight bounded DWARF annotations,
+marked that inline result truncated, and retained the adjusted caller as
+structured unresolved evidence. The fixed fallback proved final running,
+managed-process cleanup completed, both dynamic ports were reusable, and UART
+heartbeats recovered. This acceptance is exact to that ELF SHA-256, target,
+tools, profile, configuration, limit, and policy. It does not change the
+mandatory runtime-identity, unwind-address, physical-completeness, CPU1,
+external-data, source-read, or disabled-capability statements above.
 
 ## Confirmed OpenOCD target state roundtrip
 

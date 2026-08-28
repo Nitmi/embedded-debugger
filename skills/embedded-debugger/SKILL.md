@@ -164,8 +164,16 @@ function/source output as identity-bound offline annotation only. Always preserv
 `runtime_firmware_identity_verified=false`: choosing an ELF does not prove the
 target runs it. Never claim physical call-stack completeness, and retain the
 same R2 effects, unbound unwind-read warning, disabled capabilities, and
-no-automatic-retry rule. The existing ESP32-S3 stack acceptance did not use
-`--elf` and does not qualify this new contract.
+no-automatic-retry rule.
+
+ESP32-S3 CPU0 has passed one exact annotated acceptance with `--max-frames 8`
+and the bound heartbeat ELF. The top frame resolved to eight bounded DWARF
+annotations and reported truncation; the adjusted caller remained unresolved.
+The fixed fallback restored running, both managed processes cleaned up, both
+ports were reusable, and UART recovered. Treat this as acceptance of partial
+offline annotation only for that exact ELF, target, limit, tools, profile, and
+configuration. Do not infer complete resolution, current target/ELF equality,
+CPU1 support, or broader symbol correctness.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

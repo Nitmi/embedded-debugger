@@ -343,9 +343,18 @@ connected target is running those bytes; reports therefore keep
 `runtime_firmware_identity_verified=false` and
 `physical_call_stack_completeness_proven=false`. The base OpenOCD/GDB protocol,
 unbound unwind-read risk, R2 classification, no-retry rule, and all disabled
-debug capabilities remain unchanged. The earlier ESP32-S3 physical stack
-acceptance did not include `--elf`, so it does not physically qualify the new
-annotated contract.
+debug capabilities remain unchanged.
+
+This annotated contract has passed one separately confirmed, non-retried
+ESP32-S3 CPU0 physical run with `--max-frames 8` and an exact 2,221,600-byte
+Xtensa ELF. The top frame at `0x420129FF` resolved to eight bounded DWARF inline
+annotations and correctly reported truncation; the adjusted caller address
+`0x40378694` remained structured `unresolved`. The fixed fallback restored CPU0
+to running, both managed processes exited gracefully, the dynamic ports were
+reusable, and zero-transmit UART heartbeats recovered. This qualifies partial
+offline annotation for only that exact plan. It still does not prove that the
+current target ran the bound ELF, resolve every frame, qualify CPU1, or prove a
+complete physical call stack.
 
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
@@ -825,8 +834,11 @@ also passed one exact-digest ESP32-S3 CPU0 physical acceptance with
 `--max-frames 8`: GDB returned two unsymbolized frames, fallback restoration
 proved final running, resources were released, and UART recovered. Only the
 returned frame range is bound; implicit unwind-read addresses, symbol identity,
-and physical call-stack completeness remain unproven. GDB/MI symbols,
-symbolized stack inspection, argument/local/value
+and physical call-stack completeness remain unproven. The separate offline
+ELF-annotation contract has also passed one exact-plan ESP32-S3 CPU0 run: one
+top frame resolved to eight bounded DWARF annotations, one caller remained
+unresolved, and cleanup plus UART recovery completed. GDB-loaded symbols,
+trusted runtime symbolization, argument/local/value
 inspection, general ELF/HEX loading, RTT, memory writes, Generic/MMIO or
 undeclared-region reads, register writes, software/symbolic/conditional
 breakpoints, watchpoints,

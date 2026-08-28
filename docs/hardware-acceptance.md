@@ -925,3 +925,76 @@ another target/frame limit/tool plan, accept a halted-origin path, or authorize
 argument/local/value inspection, explicit register/memory commands,
 breakpoints/watchpoints, general execution control, flash, or arbitrary
 MI/Tcl/monitor commands.
+
+## Confirmed OpenOCD offline ELF stack-annotation acceptance (2026-08-29)
+
+- The user independently confirmed the exact outer digest
+  `661893f5aec8dd7f9f5a5196b54ae15807218c6fe9e1eb4c120a5ae88ee23b6c`.
+  Its inner bounded-stack digest remained
+  `f03172e03098e8da27210b5b4d97a53fa6178884c84d09d8f7557ebc13cbf5ae`.
+  The plan bound `esp32s3.cpu0`, `--max-frames 8`, the fixed five-command
+  protocol, exact tools/profile/configuration, and the 2,221,600-byte Xtensa
+  heartbeat ELF with SHA-256
+  `676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`.
+  It explicitly did not bind current target firmware identity, runtime adapter
+  identity, dynamic ports, or implicit unwind-read addresses.
+- Immediately before execution, all five bound file hashes still matched and
+  no related process was running. `baud list`, Windows PnP, and probe-rs found
+  only the same accessible `303A:1001 / E0:72:A1:D4:1F:DC` ESP USB-JTAG/serial
+  device on COM3. A five-second 115200-baud monitor held DTR/RTS false,
+  transmitted zero bytes, and received 199 bytes with consecutive heartbeats
+  `256..260`.
+- The confirmed command ran exactly once, with no automatic retry. OpenOCD used
+  dynamic loopback Tcl/GDB ports 11988/11989 and proved readiness in 227 ms.
+  It logged the exact adapter serial, examined CPU0, and observed selected CPU0
+  initially running. CPU1 examination again failed with
+  `OCD_ID=00000000` and remains unqualified.
+- GDB completed `done / connected / done / done / exit`. The exact bounded
+  stack request completed in 4 ms and returned level 0 `0x420129FF` plus level
+  1 `0x40378695`; neither GDB frame carried a usable function name. Offline
+  lookup kept level 0 exact and resolved it to eight innermost-to-outermost
+  DWARF annotations, beginning with `core::ptr::read_volatile::<u32>` and ending
+  with `<esp_hal::time::Instant>::elapsed`. It set
+  `inline_annotations_truncated=true`, proving the configured resource limit
+  was enforced. Level 1 was adjusted to `0x40378694`, was inside a loadable
+  segment, and remained structured `unresolved` with no external-debug request
+  or parser error. The report therefore recorded one resolved and one
+  unresolved frame, as permitted by the confirmed policy.
+- GDB never received the ELF path or loaded symbols. Annotation used only the
+  already hashed in-memory ELF after target restoration and managed-process
+  cleanup; it loaded no source content, GNU debug link, alternate/split debug
+  data, or network resource. `runtime_firmware_identity_verified=false` and
+  `physical_call_stack_completeness_proven=false` remained explicit. Historical
+  flash evidence for the same ELF hash does not prove the target was unchanged
+  at this run.
+- Detach left CPU0 observed halted. The single fixed resume fallback proved
+  final `esp32s3.cpu0=running` in 3 ms. GDB exited 0 gracefully in 5 ms and
+  OpenOCD exited 0 gracefully in 12 ms; neither process tree was force-killed.
+  No related process or listener remained. Seven unowned kernel `TIME_WAIT`
+  entries were visible, and independent bind-and-close checks proved both exact
+  dynamic ports immediately reusable.
+- OpenOCD attach handlers again emitted CPU0 debug-controller/core reset
+  messages, halted the target, initialized flash-mapping helpers, and exchanged
+  a memory map. The wrapper issued no explicit reset, flash, memory/register,
+  breakpoint, monitor, symbol-loading, or arbitrary command. CPU1 final state
+  was not observed.
+- The post-run zero-transmit UART monitor held DTR/RTS false and received 174
+  bytes. One boundary fragment preceded complete consecutive heartbeats
+  `374..377`, proving observable application recovery. Serial/PnP identity was
+  unchanged and probe-rs still reported the exact EspJtag probe accessible.
+- Plans, comparison, structured test output, complete stderr protocol log,
+  serial/PnP/probe inventories, raw UART JSONL, cleanup evidence, and
+  `annotated-stack-acceptance-summary.json` are retained under
+  `target/hardware-acceptance/2026-08-28-openocd-annotated-stack`. The test and
+  stderr SHA-256 values are respectively
+  `ac9f53478fae4a618a34b7011e3174e39ac15167ea20cf39f64c58b18fa81e05`
+  and `55267f73cee8dab3dd980b688b5d8b00f87941e0500c9b20a1178d2c449f1757`;
+  the acceptance-summary SHA-256 is
+  `a4b18cd711ba0a08ed49b1e10c600f9b52edd680dae526b9aa2dd04f93f59ab2`.
+
+This accepts one exact running-origin ESP32-S3 CPU0 bounded snapshot followed
+by partial in-process offline annotation, fixed restoration/cleanup, immediate
+port reuse, and observable UART recovery. It does not accept runtime ELF
+identity, resolution of every frame, a complete physical call stack, bounded
+implicit unwind reads, source/external debug loading, CPU1, another ELF/target/
+limit/tool plan, or any broader debugging capability.

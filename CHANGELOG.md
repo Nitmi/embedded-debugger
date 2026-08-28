@@ -115,8 +115,13 @@ All notable changes to this project will be documented in this file.
   and source contents are never read, and symbol-table fallback remains within
   the exact in-memory ELF. Reports explicitly keep
   runtime firmware identity and physical call-stack completeness unverified.
-  Controlled ELF, digest, CLI, and full two-process lifecycle regressions pass;
-  no physical annotated-stack acceptance is claimed.
+  Controlled ELF, digest, CLI, and full two-process lifecycle regressions pass.
+  One separately confirmed, non-retried ESP32-S3 CPU0 run resolved the top
+  frame into eight bounded DWARF annotations, retained the adjusted caller as
+  unresolved, restored running with the fixed fallback, cleaned both managed
+  processes, proved both dynamic ports reusable, and recovered UART
+  heartbeats. Runtime ELF identity, complete resolution, CPU1, implicit unwind
+  addresses, and physical call-stack completeness remain unqualified.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current
