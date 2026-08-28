@@ -998,3 +998,21 @@ port reuse, and observable UART recovery. It does not accept runtime ELF
 identity, resolution of every frame, a complete physical call stack, bounded
 implicit unwind reads, source/external debug loading, CPU1, another ELF/target/
 limit/tool plan, or any broader debugging capability.
+
+### Later host-only resolver refinement (not physically accepted)
+
+After this acceptance, read-only ELF inspection proved that `Reset` is a
+zero-sized `STT_FUNC` at `0x40378638` in executable section `.rwtext`; the next
+distinct same-section text symbol, `save_context`, starts at `0x40378698`.
+Project-internal host-only resolution now labels adjusted caller `0x40378694`
+as `inferred_symbol_table`, returns `Reset`, and reports the inferred half-open
+range `[0x40378638, 0x40378698)` with declared size zero and inferred size 96.
+The inline limit was also raised so the same top address returns all 12 DWARF
+annotations without truncation.
+
+The new policy permits only nonempty same-executable-section ranges ending at
+the next distinct text symbol or section end, caps inferred spans at 64 KiB,
+prefers explicit-sized symbols, and binds that policy into a new outer digest.
+These are host-only parser results. Digest `661893f5...23b6c` remains the exact
+historical acceptance above but is stale for the revised policy; no new target
+operation has run and no physical acceptance is inherited.

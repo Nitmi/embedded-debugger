@@ -331,11 +331,20 @@ does not run ELF auto-load scripts or an external `addr2line`, read source-file
 contents, use the network, or locate `.gnu_debuglink`, alternate, or split
 DWARF files. Compressed debug sections are rejected before target access.
 Level zero uses its exact address; later frames use return address minus one
-when nonzero. Per stack frame, the resolver examines and returns at most eight
-in-file DWARF frames. It resumes at most eight declined split-DWARF
-continuations; a ninth request ends that DWARF lookup without loading external
-data. A containing in-file text-symbol fallback and 4096-byte metadata limits
-still apply.
+when nonzero. Per stack frame, the resolver examines at most 17 in-file DWARF
+records and returns at most 16 annotations; the extra record is used only to
+prove truncation. It resumes at most eight declined split-DWARF continuations;
+a ninth request ends that DWARF lookup without loading external data. Fallback
+first selects the smallest containing defined nonzero-sized in-file text symbol
+whose declared range remains inside its executable section. If none exists, it
+may infer a half-open range for a defined zero-sized
+text symbol, but only inside the same executable section, only until the next
+distinct text-symbol address or section end, and only for a nonempty span no
+larger than 64 KiB. Such results use `resolution=inferred_symbol_table` and
+include `symbol_evidence` with the section index, exact range, declared size,
+inferred size, and inference flag; explicitly sized fallback results return the
+same evidence with inferred size zero. Text metadata remains capped at 4096
+bytes.
 
 This is identity-bound offline annotation, not trusted runtime symbolization.
 The digest proves which ELF bytes were used but does not prove that the
@@ -355,6 +364,14 @@ reusable, and zero-transmit UART heartbeats recovered. This qualifies partial
 offline annotation for only that exact plan. It still does not prove that the
 current target ran the bound ELF, resolve every frame, qualify CPU1, or prove a
 complete physical call stack.
+
+That physical run predates the current 16-annotation and bounded zero-sized
+symbol policy. Host-only validation against the same ELF now returns all 12
+top-frame annotations without truncation and resolves adjusted caller
+`0x40378694` as inferred symbol `Reset` over
+`[0x40378638, 0x40378698)`. This is parser evidence only: the prior digest is
+stale for the new policy, and no physical acceptance is claimed until a new
+plan is independently confirmed and run once.
 
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 

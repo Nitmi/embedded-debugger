@@ -157,10 +157,15 @@ parser policy, and unchanged inner stack digest for review.
 The annotated workflow never loads the ELF in GDB. It parses only the bound
 in-memory bytes after target restoration and process cleanup, rejects compressed
 debug sections, limits sections/symbols/build IDs and all text, examines at most
-eight DWARF frames per stack frame, and resumes at most eight declined
-split-DWARF continuations before ending that lookup. It never loads external
-debug data, reads source contents, or uses the network. Treat its
-function/source output as identity-bound offline annotation only. Always preserve
+17 DWARF records and returns at most 16 annotations per stack frame, and resumes
+at most eight declined split-DWARF continuations before ending that lookup. It
+never loads external debug data, reads source contents, or uses the network.
+After DWARF and explicit-size symbol fallback fail, a zero-sized text symbol may
+be inferred only to the next distinct text symbol or section end in the same
+executable section, with a 64 KiB maximum span. Surface
+`resolution=inferred_symbol_table` and `symbol_evidence`; do not present an
+inferred range as a declared symbol size. Treat all function/source output as
+identity-bound offline annotation only. Always preserve
 `runtime_firmware_identity_verified=false`: choosing an ELF does not prove the
 target runs it. Never claim physical call-stack completeness, and retain the
 same R2 effects, unbound unwind-read warning, disabled capabilities, and
@@ -174,6 +179,13 @@ ports were reusable, and UART recovered. Treat this as acceptance of partial
 offline annotation only for that exact ELF, target, limit, tools, profile, and
 configuration. Do not infer complete resolution, current target/ELF equality,
 CPU1 support, or broader symbol correctness.
+
+That physical acceptance used the earlier eight-annotation,
+nonzero-sized-only fallback policy. The current policy is host-validated against
+the same ELF to return 12 top-frame annotations and infer `Reset` for adjusted
+caller `0x40378694`, but the old outer digest is stale. Require a newly generated
+plan and independent exact digest confirmation before one physical run; never
+reuse the prior acceptance digest.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

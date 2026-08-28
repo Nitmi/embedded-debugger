@@ -1,6 +1,6 @@
 # ADR-0014: Bind an ELF for offline stack annotation without GDB symbol loading
 
-- Status: accepted
+- Status: accepted; fallback and inline limits amended by ADR-0015
 - Date: 2026-08-27
 
 ## Context
@@ -40,9 +40,11 @@ DWARF load requests, which can be declined without locating another file.
    because a frame cannot be resolved.
 7. Use the exact level-zero address. For later nonzero frames, subtract one from
    the return address. Resolve only addresses in loadable segments.
-8. Examine and return at most eight in-file DWARF frames per stack frame. Fall
-   back to the smallest containing defined, nonzero-sized in-file text symbol.
-   Bound text to 4096 bytes and reject control characters.
+8. The initial policy examined and returned at most eight in-file DWARF frames
+   per stack frame, then fell back to the smallest containing defined,
+   nonzero-sized in-file text symbol. ADR-0015 replaces these limits and extends
+   fallback with separately labeled, bounded zero-sized-symbol inference. Text
+   remains bounded to 4096 bytes and rejects control characters.
 9. Report unresolved frames and whether split DWARF was requested. Never turn
    missing external data or address-specific malformed metadata into an
    external search or a target retry.
@@ -70,3 +72,4 @@ DWARF load requests, which can be declined without locating another file.
 - [GDB debuginfod settings](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Debuginfod-Settings.html)
 - [`addr2line` caller-managed context](https://docs.rs/addr2line/0.25.1/addr2line/struct.Context.html)
 - [ADR-0013: Confirmed bounded stack snapshot](0013-confirmed-openocd-stack-snapshot.md)
+- [ADR-0015: Bound zero-sized text-symbol inference](0015-bounded-zero-size-symbol-inference.md)

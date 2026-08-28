@@ -2327,6 +2327,9 @@ fn openocd_annotated_stack_plan_binds_elf_identity_without_changing_gdb_protocol
     assert_eq!(first["data"]["elf"]["kind"], "executable");
     assert_eq!(first["data"]["elf"]["architecture"], "xtensa");
     assert_eq!(first["data"]["elf"]["address_size_bits"], 32);
+    assert_eq!(first["data"]["elf"]["text_symbol_count"], 1);
+    assert_eq!(first["data"]["elf"]["nonzero_sized_text_symbol_count"], 1);
+    assert_eq!(first["data"]["elf"]["zero_sized_text_symbol_count"], 0);
     assert_eq!(first["data"]["elf"]["external_files_loaded"], false);
     assert_eq!(
         first["data"]["annotation_policy"]["maximum_elf_bytes"],
@@ -2346,15 +2349,19 @@ fn openocd_annotated_stack_plan_binds_elf_identity_without_changing_gdb_protocol
     );
     assert_eq!(
         first["data"]["annotation_policy"]["maximum_dwarf_frames_examined_per_frame"],
-        8
+        17
     );
     assert_eq!(
         first["data"]["annotation_policy"]["maximum_inline_annotations_per_frame"],
-        8
+        16
     );
     assert_eq!(
         first["data"]["annotation_policy"]["maximum_split_dwarf_requests_per_frame"],
         8
+    );
+    assert_eq!(
+        first["data"]["annotation_policy"]["maximum_inferred_zero_size_symbol_bytes"],
+        65_536
     );
     assert_eq!(
         first["data"]["annotation_policy"]["gdb_symbol_or_executable_loading"],
@@ -2370,6 +2377,10 @@ fn openocd_annotated_stack_plan_binds_elf_identity_without_changing_gdb_protocol
     );
     assert_eq!(
         first["data"]["confirmation_boundary"]["parser_resource_limits_bound"],
+        true
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["zero_size_symbol_inference_policy_bound"],
         true
     );
     assert_eq!(

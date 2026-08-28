@@ -427,15 +427,28 @@ GNU debug links, alternate links, or split DWARF requests.
 Level-zero lookup uses the exact GDB address. A nonzero later-frame address is
 treated as a return address and decremented by one. Addresses outside a
 loadable segment remain unresolved. For each stack frame, the resolver examines
-and returns at most eight innermost-to-outermost in-file DWARF frames. It resumes
-at most eight split-DWARF continuations with no supplied data; a ninth request
-ends the DWARF lookup and permits only the in-file symbol fallback. When DWARF
-provides no usable function or source metadata, that fallback selects the
-smallest containing, defined, nonzero-sized in-file text symbol. Function,
-path, and parser-error text is capped at 4096 bytes and rejects control
-characters. Missing external debug data or malformed address-specific DWARF
-yields structured unresolved/fallback evidence rather than triggering a
-filesystem search or repeating the target operation.
+at most 17 innermost-to-outermost in-file DWARF records and returns at most 16
+annotations. The seventeenth record is observed only to prove truncation. It
+resumes at most eight split-DWARF continuations with no supplied data; a ninth
+request ends the DWARF lookup and permits only the in-file symbol fallback.
+
+When DWARF provides no usable function or source metadata, fallback first
+selects the smallest containing, defined, nonzero-sized in-file text symbol.
+Its address and declared end must both remain inside its referenced executable
+section. Only when that fails may the resolver consider a defined zero-sized
+text symbol. Its half-open range is inferred from the symbol address to the next
+distinct text symbol in the same executable section, or to that section's end
+when no later symbol exists. Empty, cross-section, overflowing,
+non-executable-section, and greater-than-64-KiB inferred ranges are unusable.
+Explicit-sized candidates retain priority. Every symbol fallback includes
+`symbol_evidence`; an inferred result is serialized as
+`resolution=inferred_symbol_table`; `symbol_evidence` reports its ELF section
+index, start, exclusive end, zero declared size, inferred size, and
+`size_inferred=true`, while an explicitly sized result reports inferred size
+zero. Function, path, and parser-error text is capped at 4096
+bytes and rejects control characters. Missing external debug data or malformed
+address-specific DWARF yields structured unresolved/fallback evidence rather
+than triggering a filesystem search or repeating the target operation.
 
 `elf.sha256` proves the bytes used for annotation. It does not identify the
 firmware running on the target. The plan does not read or compare target flash,
@@ -456,6 +469,14 @@ heartbeats recovered. This acceptance is exact to that ELF SHA-256, target,
 tools, profile, configuration, limit, and policy. It does not change the
 mandatory runtime-identity, unwind-address, physical-completeness, CPU1,
 external-data, source-read, or disabled-capability statements above.
+
+The accepted physical result above used the earlier eight-annotation,
+nonzero-sized-only fallback policy. The current policy has separate host-only
+evidence against the same ELF: the top address yields 12 annotations without
+truncation, and adjusted caller `0x40378694` selects `Reset` from inferred range
+`[0x40378638, 0x40378698)`. This does not retroactively extend the physical
+acceptance. The old outer digest is stale, and the revised policy requires a
+new independently confirmed plan before another single physical execution.
 
 ## Confirmed OpenOCD target state roundtrip
 

@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    collections::HashMap,
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
@@ -11,7 +12,7 @@ use addr2line::{
 };
 use object::{
     Architecture, BinaryFormat, CompressionFormat, Endianness, Object, ObjectKind, ObjectSection,
-    ObjectSegment, ObjectSymbol, SymbolKind, read::File as ObjectFile,
+    ObjectSegment, ObjectSymbol, SectionIndex, SectionKind, SymbolKind, read::File as ObjectFile,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -29,12 +30,15 @@ use crate::{
 };
 
 pub const MAX_OPENOCD_STACK_ELF_BYTES: u64 = 64 * 1024 * 1024;
-pub const MAX_OPENOCD_STACK_ELF_INLINE_ANNOTATIONS: u64 = 8;
+pub const MAX_OPENOCD_STACK_ELF_INLINE_ANNOTATIONS: u64 = 16;
 const MAX_OPENOCD_STACK_ELF_SECTIONS: u64 = 65_536;
 const MAX_OPENOCD_STACK_ELF_SYMBOLS: u64 = 262_144;
 const MAX_OPENOCD_STACK_ELF_TEXT_BYTES: usize = 4 * 1024;
 const MAX_OPENOCD_STACK_ELF_BUILD_ID_BYTES: usize = 64;
 const MAX_OPENOCD_STACK_ELF_SPLIT_DWARF_REQUESTS_PER_FRAME: u64 = 8;
+const MAX_OPENOCD_STACK_ELF_DWARF_FRAMES_EXAMINED: u64 =
+    MAX_OPENOCD_STACK_ELF_INLINE_ANNOTATIONS + 1;
+const MAX_OPENOCD_STACK_ELF_INFERRED_SYMBOL_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenOcdStackElfOptions {
@@ -72,6 +76,8 @@ pub struct OpenOcdStackElfInspection {
     pub section_count: u64,
     pub symbol_count: u64,
     pub text_symbol_count: u64,
+    pub nonzero_sized_text_symbol_count: u64,
+    pub zero_sized_text_symbol_count: u64,
     pub has_debug_symbols: bool,
     pub has_debug_info: bool,
     pub has_debug_line: bool,
@@ -98,6 +104,7 @@ pub struct OpenOcdStackElfPolicy {
     pub maximum_dwarf_frames_examined_per_frame: u64,
     pub maximum_inline_annotations_per_frame: u64,
     pub maximum_split_dwarf_requests_per_frame: u64,
+    pub maximum_inferred_zero_size_symbol_bytes: u64,
     pub text_field_maximum_bytes: u64,
     pub symbol_table_fallback: String,
     pub compressed_debug_sections: String,
@@ -133,6 +140,7 @@ pub struct OpenOcdStackElfConfirmationBoundary {
     pub parser_resource_limits_bound: bool,
     pub address_adjustment_policy_bound: bool,
     pub inline_annotation_limit_bound: bool,
+    pub zero_size_symbol_inference_policy_bound: bool,
     pub external_debug_loading_policy_bound: bool,
     pub runtime_firmware_identity_bound: bool,
     pub runtime_adapter_identity_bound: bool,
@@ -176,6 +184,7 @@ pub struct OpenOcdStackElfFrame {
     pub lookup_error: Option<String>,
     pub inline_annotations: Vec<OpenOcdStackElfAnnotation>,
     pub inline_annotations_truncated: bool,
+    pub symbol_evidence: Option<OpenOcdStackElfSymbolEvidence>,
     pub metadata_rejected: bool,
 }
 
@@ -188,11 +197,22 @@ pub struct OpenOcdStackElfAnnotation {
     pub column: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OpenOcdStackElfSymbolEvidence {
+    pub section_index: u64,
+    pub start: Address,
+    pub end_exclusive: Address,
+    pub declared_size: u64,
+    pub inferred_size: u64,
+    pub size_inferred: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenOcdStackElfResolution {
     Dwarf,
     SymbolTable,
+    InferredSymbolTable,
     Unresolved,
 }
 
@@ -202,6 +222,7 @@ pub struct OpenOcdStackElfCapabilities {
     pub offline_elf_annotation: bool,
     pub dwarf_inline_annotations: bool,
     pub in_file_symbol_table_fallback: bool,
+    pub inferred_zero_size_symbol_ranges: bool,
     pub gdb_symbol_loading: bool,
     pub external_debug_loading: bool,
     pub source_file_read: bool,
@@ -237,9 +258,20 @@ struct OfflineSymbols<'data> {
 }
 
 struct TextSymbol {
+    section_index: SectionIndex,
     address: u64,
-    size: u64,
+    end_exclusive: u64,
+    declared_size: u64,
+    size_inferred: bool,
     name: String,
+}
+
+struct RawTextSymbol {
+    section_index: SectionIndex,
+    section_end: u64,
+    address: u64,
+    declared_size: u64,
+    name: Option<String>,
 }
 
 pub fn plan_stack_elf(options: &OpenOcdStackElfOptions) -> Result<OpenOcdStackElfPlan> {
@@ -449,6 +481,8 @@ fn inspect_elf(resolved: &Path, bytes: &[u8]) -> Result<OpenOcdStackElfInspectio
 
     let mut symbol_count = 0_u64;
     let mut text_symbol_count = 0_u64;
+    let mut nonzero_sized_text_symbol_count = 0_u64;
+    let mut zero_sized_text_symbol_count = 0_u64;
     for symbol in object.symbols() {
         symbol_count += 1;
         if symbol_count > MAX_OPENOCD_STACK_ELF_SYMBOLS {
@@ -457,8 +491,13 @@ fn inspect_elf(resolved: &Path, bytes: &[u8]) -> Result<OpenOcdStackElfInspectio
                 json!({"maximum_symbols": MAX_OPENOCD_STACK_ELF_SYMBOLS}),
             ));
         }
-        if symbol.kind() == SymbolKind::Text && symbol.is_definition() && symbol.size() != 0 {
+        if symbol.kind() == SymbolKind::Text && symbol.is_definition() {
             text_symbol_count += 1;
+            if symbol.size() == 0 {
+                zero_sized_text_symbol_count += 1;
+            } else {
+                nonzero_sized_text_symbol_count += 1;
+            }
         }
     }
 
@@ -502,6 +541,8 @@ fn inspect_elf(resolved: &Path, bytes: &[u8]) -> Result<OpenOcdStackElfInspectio
         section_count,
         symbol_count,
         text_symbol_count,
+        nonzero_sized_text_symbol_count,
+        zero_sized_text_symbol_count,
         has_debug_symbols: object.has_debug_symbols(),
         has_debug_info,
         has_debug_line,
@@ -550,33 +591,96 @@ impl<'data> OfflineSymbols<'data> {
         let context = Context::from_dwarf(dwarf)
             .map_err(|error| dwarf_error("construct offline address resolver", error))?;
 
-        let mut text_symbols = Vec::new();
+        let executable_sections = object
+            .sections()
+            .filter(|section| section.kind() == SectionKind::Text)
+            .filter_map(|section| {
+                let start = section.address();
+                let end = start.checked_add(section.size())?;
+                (start < end).then_some((section.index(), (start, end)))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut raw_text_symbols = Vec::new();
         for symbol in object.symbols() {
-            if symbol.kind() != SymbolKind::Text || !symbol.is_definition() || symbol.size() == 0 {
+            if symbol.kind() != SymbolKind::Text || !symbol.is_definition() {
                 continue;
             }
-            let Ok(name) = symbol.name() else {
+            let Some(section_index) = symbol.section_index() else {
                 continue;
             };
-            let (Some(name), _) = sanitize_text(name) else {
+            let Some(&(section_start, section_end)) = executable_sections.get(&section_index)
+            else {
                 continue;
             };
-            let demangled = addr2line::demangle_auto(Cow::Owned(name), None);
-            let Some(name) = sanitize_text(&demangled).0 else {
+            let address = symbol.address();
+            if !(section_start <= address && address < section_end) {
                 continue;
-            };
-            text_symbols.push(TextSymbol {
-                address: symbol.address(),
-                size: symbol.size(),
-                name,
+            }
+            raw_text_symbols.push(RawTextSymbol {
+                section_index,
+                section_end,
+                address,
+                declared_size: symbol.size(),
+                name: symbol.name().ok().and_then(sanitize_symbol_name),
             });
         }
-        text_symbols.sort_by(|left, right| {
-            left.address
-                .cmp(&right.address)
-                .then(left.size.cmp(&right.size))
+        raw_text_symbols.sort_by(|left, right| {
+            left.section_index
+                .0
+                .cmp(&right.section_index.0)
+                .then(left.address.cmp(&right.address))
+                .then(left.declared_size.cmp(&right.declared_size))
                 .then(left.name.cmp(&right.name))
         });
+
+        let mut text_symbols = Vec::new();
+        let mut group_start = 0;
+        while group_start < raw_text_symbols.len() {
+            let section_index = raw_text_symbols[group_start].section_index;
+            let address = raw_text_symbols[group_start].address;
+            let mut group_end = group_start + 1;
+            while group_end < raw_text_symbols.len()
+                && raw_text_symbols[group_end].section_index == section_index
+                && raw_text_symbols[group_end].address == address
+            {
+                group_end += 1;
+            }
+            let next_address = raw_text_symbols
+                .get(group_end)
+                .and_then(|next| (next.section_index == section_index).then_some(next.address));
+
+            for raw in &raw_text_symbols[group_start..group_end] {
+                let Some(name) = raw.name.clone() else {
+                    continue;
+                };
+                let (end_exclusive, size_inferred) = if raw.declared_size == 0 {
+                    let Some(end) =
+                        inferred_zero_size_symbol_end(raw.address, next_address, raw.section_end)
+                    else {
+                        continue;
+                    };
+                    (end, true)
+                } else {
+                    let Some(end) = raw.address.checked_add(raw.declared_size) else {
+                        continue;
+                    };
+                    if end > raw.section_end {
+                        continue;
+                    }
+                    (end, false)
+                };
+                text_symbols.push(TextSymbol {
+                    section_index,
+                    address: raw.address,
+                    end_exclusive,
+                    declared_size: raw.declared_size,
+                    size_inferred,
+                    name,
+                });
+            }
+            group_start = group_end;
+        }
+        text_symbols.sort_by(text_symbol_order);
         Ok(Self {
             object,
             context,
@@ -608,6 +712,7 @@ impl<'data> OfflineSymbols<'data> {
             lookup_error: None,
             inline_annotations: Vec::new(),
             inline_annotations_truncated: false,
+            symbol_evidence: None,
             metadata_rejected: false,
         };
         if !within_loadable_segment {
@@ -692,22 +797,9 @@ impl<'data> OfflineSymbols<'data> {
             result.resolution = OpenOcdStackElfResolution::Dwarf;
             return result;
         }
-        if let Some(symbol) = self
-            .text_symbols
-            .iter()
-            .filter(|symbol| {
-                symbol
-                    .address
-                    .checked_add(symbol.size)
-                    .is_some_and(|end| symbol.address <= lookup_address && lookup_address < end)
-            })
-            .min_by(|left, right| {
-                left.size
-                    .cmp(&right.size)
-                    .then(right.address.cmp(&left.address))
-                    .then(left.name.cmp(&right.name))
-            })
-        {
+        let symbol = select_text_symbol(&self.text_symbols, lookup_address, false)
+            .or_else(|| select_text_symbol(&self.text_symbols, lookup_address, true));
+        if let Some(symbol) = symbol {
             result.inline_annotations.push(OpenOcdStackElfAnnotation {
                 depth: 0,
                 function: Some(symbol.name.clone()),
@@ -715,10 +807,75 @@ impl<'data> OfflineSymbols<'data> {
                 line: None,
                 column: None,
             });
-            result.resolution = OpenOcdStackElfResolution::SymbolTable;
+            result.symbol_evidence = Some(OpenOcdStackElfSymbolEvidence {
+                section_index: symbol.section_index.0 as u64,
+                start: Address(symbol.address),
+                end_exclusive: Address(symbol.end_exclusive),
+                declared_size: symbol.declared_size,
+                inferred_size: if symbol.size_inferred {
+                    symbol.end_exclusive - symbol.address
+                } else {
+                    0
+                },
+                size_inferred: symbol.size_inferred,
+            });
+            result.resolution = if symbol.size_inferred {
+                OpenOcdStackElfResolution::InferredSymbolTable
+            } else {
+                OpenOcdStackElfResolution::SymbolTable
+            };
         }
         result
     }
+}
+
+fn sanitize_symbol_name(name: &str) -> Option<String> {
+    let (Some(name), _) = sanitize_text(name) else {
+        return None;
+    };
+    let demangled = addr2line::demangle_auto(Cow::Owned(name), None);
+    sanitize_text(&demangled).0
+}
+
+fn inferred_zero_size_symbol_end(
+    address: u64,
+    next_address: Option<u64>,
+    section_end: u64,
+) -> Option<u64> {
+    let end = next_address.unwrap_or(section_end).min(section_end);
+    let span = end.checked_sub(address)?;
+    (span != 0 && span <= MAX_OPENOCD_STACK_ELF_INFERRED_SYMBOL_BYTES).then_some(end)
+}
+
+fn text_symbol_order(left: &TextSymbol, right: &TextSymbol) -> std::cmp::Ordering {
+    left.section_index
+        .0
+        .cmp(&right.section_index.0)
+        .then(left.address.cmp(&right.address))
+        .then(left.end_exclusive.cmp(&right.end_exclusive))
+        .then(left.size_inferred.cmp(&right.size_inferred))
+        .then(left.name.cmp(&right.name))
+}
+
+fn select_text_symbol(
+    symbols: &[TextSymbol],
+    lookup_address: u64,
+    size_inferred: bool,
+) -> Option<&TextSymbol> {
+    symbols
+        .iter()
+        .filter(|symbol| {
+            symbol.size_inferred == size_inferred
+                && symbol.address <= lookup_address
+                && lookup_address < symbol.end_exclusive
+        })
+        .min_by(|left, right| {
+            (left.end_exclusive - left.address)
+                .cmp(&(right.end_exclusive - right.address))
+                .then(right.address.cmp(&left.address))
+                .then(left.section_index.0.cmp(&right.section_index.0))
+                .then(left.name.cmp(&right.name))
+        })
 }
 
 fn annotate_frames(bytes: &[u8], frames: &[GdbMiStackFrame]) -> Result<OpenOcdStackElfAnnotations> {
@@ -754,12 +911,15 @@ fn stack_elf_policy() -> OpenOcdStackElfPolicy {
         load_bias: 0,
         top_frame_lookup: "exact GDB frame address".to_string(),
         non_top_frame_lookup: "GDB return address minus one when nonzero".to_string(),
-        maximum_dwarf_frames_examined_per_frame: MAX_OPENOCD_STACK_ELF_INLINE_ANNOTATIONS,
+        maximum_dwarf_frames_examined_per_frame:
+            MAX_OPENOCD_STACK_ELF_DWARF_FRAMES_EXAMINED,
         maximum_inline_annotations_per_frame: MAX_OPENOCD_STACK_ELF_INLINE_ANNOTATIONS,
         maximum_split_dwarf_requests_per_frame:
             MAX_OPENOCD_STACK_ELF_SPLIT_DWARF_REQUESTS_PER_FRAME,
+        maximum_inferred_zero_size_symbol_bytes:
+            MAX_OPENOCD_STACK_ELF_INFERRED_SYMBOL_BYTES,
         text_field_maximum_bytes: MAX_OPENOCD_STACK_ELF_TEXT_BYTES as u64,
-        symbol_table_fallback: "smallest containing defined nonzero-sized in-file text symbol"
+        symbol_table_fallback: "smallest containing defined nonzero-sized in-file text symbol whose declared range remains inside its executable section; otherwise a defined zero-sized text symbol inferred only within the same executable section up to the next distinct text-symbol address or section end"
             .to_string(),
         compressed_debug_sections: "rejected before hardware access".to_string(),
         split_or_external_debug_data: "never loaded; unresolved output is allowed".to_string(),
@@ -786,6 +946,8 @@ fn stack_elf_effects() -> OpenOcdStackElfEffects {
                 .to_string(),
             "Annotation parses only the exact SHA-256-bound ELF bytes retained in memory and does not invoke an external addr2line process."
                 .to_string(),
+            "A zero-sized text symbol is used only when its same-section inferred half-open range is nonempty and no larger than 65536 bytes; inferred results are labeled separately."
+                .to_string(),
             "ELF identity does not prove that the connected target is running those bytes."
                 .to_string(),
         ],
@@ -803,6 +965,7 @@ fn stack_elf_confirmation_boundary() -> OpenOcdStackElfConfirmationBoundary {
         parser_resource_limits_bound: true,
         address_adjustment_policy_bound: true,
         inline_annotation_limit_bound: true,
+        zero_size_symbol_inference_policy_bound: true,
         external_debug_loading_policy_bound: true,
         runtime_firmware_identity_bound: false,
         runtime_adapter_identity_bound: false,
@@ -816,6 +979,7 @@ fn stack_elf_capabilities() -> OpenOcdStackElfCapabilities {
         offline_elf_annotation: true,
         dwarf_inline_annotations: true,
         in_file_symbol_table_fallback: true,
+        inferred_zero_size_symbol_ranges: true,
         gdb_symbol_loading: false,
         external_debug_loading: false,
         source_file_read: false,
@@ -1016,6 +1180,27 @@ fn test_executable_elf_options(
     symbol.st_value = 0x4037_0000;
     symbol.st_size = 0x20;
 
+    let symbol = builder.symbols.add();
+    symbol.name = b"fixture_zero_sized_function"[..].into();
+    symbol.section = Some(text_id);
+    symbol.set_st_info(elf::STB_GLOBAL, elf::STT_FUNC);
+    symbol.st_value = 0x4037_0020;
+    symbol.st_size = 0;
+
+    let symbol = builder.symbols.add();
+    symbol.name = [0xff][..].into();
+    symbol.section = Some(text_id);
+    symbol.set_st_info(elf::STB_GLOBAL, elf::STT_FUNC);
+    symbol.st_value = 0x4037_0028;
+    symbol.st_size = 0;
+
+    let symbol = builder.symbols.add();
+    symbol.name = b"fixture_next_function"[..].into();
+    symbol.section = Some(text_id);
+    symbol.set_st_info(elf::STB_GLOBAL, elf::STT_FUNC);
+    symbol.st_value = 0x4037_0030;
+    symbol.st_size = 0x10;
+
     let encoding = Encoding {
         format: Format::Dwarf32,
         version: 5,
@@ -1103,7 +1288,9 @@ mod tests {
         assert_eq!(inspection.architecture, "xtensa");
         assert_eq!(inspection.address_size_bits, 32);
         assert_eq!(inspection.entry, Address(0x4037_0000));
-        assert_eq!(inspection.text_symbol_count, 1);
+        assert_eq!(inspection.text_symbol_count, 4);
+        assert_eq!(inspection.nonzero_sized_text_symbol_count, 2);
+        assert_eq!(inspection.zero_sized_text_symbol_count, 2);
         assert!(inspection.has_debug_info);
         assert!(!inspection.external_files_loaded);
 
@@ -1132,7 +1319,126 @@ mod tests {
                 .as_deref(),
             Some("fixture_symbol_app_main")
         );
+        assert_eq!(
+            annotations.frames[1].symbol_evidence,
+            Some(OpenOcdStackElfSymbolEvidence {
+                section_index: 2,
+                start: Address(0x4037_0000),
+                end_exclusive: Address(0x4037_0020),
+                declared_size: 0x20,
+                inferred_size: 0,
+                size_inferred: false,
+            })
+        );
         assert!(!annotations.runtime_firmware_identity_verified);
+    }
+
+    #[test]
+    fn zero_sized_text_symbol_uses_bounded_same_section_range() {
+        let bytes = test_executable_elf(false);
+        let annotations = annotate_frames(
+            &bytes,
+            &[
+                frame(0, 0x4037_0020),
+                frame(0, 0x4037_0027),
+                frame(0, 0x4037_0028),
+                frame(0, 0x4037_002f),
+                frame(0, 0x4037_0030),
+            ],
+        )
+        .unwrap();
+
+        for frame in &annotations.frames[..2] {
+            assert_eq!(
+                frame.resolution,
+                OpenOcdStackElfResolution::InferredSymbolTable
+            );
+            assert_eq!(
+                frame.inline_annotations[0].function.as_deref(),
+                Some("fixture_zero_sized_function")
+            );
+            assert_eq!(
+                frame.symbol_evidence,
+                Some(OpenOcdStackElfSymbolEvidence {
+                    section_index: 2,
+                    start: Address(0x4037_0020),
+                    end_exclusive: Address(0x4037_0028),
+                    declared_size: 0,
+                    inferred_size: 8,
+                    size_inferred: true,
+                })
+            );
+        }
+        assert_eq!(
+            annotations.frames[2].resolution,
+            OpenOcdStackElfResolution::Unresolved
+        );
+        assert_eq!(
+            annotations.frames[3].resolution,
+            OpenOcdStackElfResolution::Unresolved
+        );
+        assert_eq!(
+            annotations.frames[4].resolution,
+            OpenOcdStackElfResolution::SymbolTable
+        );
+        assert_eq!(
+            annotations.frames[4].inline_annotations[0]
+                .function
+                .as_deref(),
+            Some("fixture_next_function")
+        );
+        assert_eq!(
+            serde_json::to_value(annotations.frames[0].resolution).unwrap(),
+            "inferred_symbol_table"
+        );
+    }
+
+    #[test]
+    fn zero_sized_symbol_inference_is_nonempty_and_span_bounded() {
+        let maximum = MAX_OPENOCD_STACK_ELF_INFERRED_SYMBOL_BYTES;
+        assert_eq!(
+            inferred_zero_size_symbol_end(0x1000, Some(0x1060), 0x2000),
+            Some(0x1060)
+        );
+        assert_eq!(
+            inferred_zero_size_symbol_end(0x1000, None, 0x1000 + maximum),
+            Some(0x1000 + maximum)
+        );
+        assert_eq!(
+            inferred_zero_size_symbol_end(0x1000, None, 0x1001 + maximum),
+            None
+        );
+        assert_eq!(
+            inferred_zero_size_symbol_end(0x1000, Some(0x1000), 0x2000),
+            None
+        );
+    }
+
+    #[test]
+    fn explicitly_sized_symbol_has_priority_over_inferred_overlap() {
+        let symbols = [
+            TextSymbol {
+                section_index: SectionIndex(1),
+                address: 0x1000,
+                end_exclusive: 0x1100,
+                declared_size: 0x100,
+                size_inferred: false,
+                name: "declared".to_string(),
+            },
+            TextSymbol {
+                section_index: SectionIndex(1),
+                address: 0x1080,
+                end_exclusive: 0x1090,
+                declared_size: 0,
+                size_inferred: true,
+                name: "inferred".to_string(),
+            },
+        ];
+
+        let selected = select_text_symbol(&symbols, 0x1088, false)
+            .or_else(|| select_text_symbol(&symbols, 0x1088, true))
+            .unwrap();
+        assert_eq!(selected.name, "declared");
     }
 
     #[test]

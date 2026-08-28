@@ -107,8 +107,9 @@ All notable changes to this project will be documented in this file.
   through the separate `openocd.stack.annotated.*` contract. The outer digest
   binds the unchanged base stack digest, canonical executable ELF identity,
   fixed `object 0.39.1` / `addr2line 0.25.1` policy, return-address adjustment,
-  eight-frame lookup/output limit, 64-byte build-ID limit, bounded object-table
-  sizes, and external-data prohibition. GDB never receives the ELF; annotation
+  17-record lookup and 16-annotation output limits, 64-byte build-ID limit,
+  bounded object-table sizes, and external-data prohibition. GDB never receives
+  the ELF; annotation
   runs in process only after target restoration and both managed processes
   finish. Compressed debug sections are rejected, no more than eight declined
   split-DWARF continuations are resumed per frame, split or linked debug files
@@ -122,6 +123,14 @@ All notable changes to this project will be documented in this file.
   processes, proved both dynamic ports reusable, and recovered UART
   heartbeats. Runtime ELF identity, complete resolution, CPU1, implicit unwind
   addresses, and physical call-stack completeness remain unqualified.
+  Host-only follow-up found that the unresolved caller belongs to zero-sized
+  `STT_FUNC Reset`; fallback now permits an explicitly labeled, maximum-64-KiB
+  range only to the next distinct text symbol or executable-section end in the
+  same section, with structured range evidence and explicit-size symbols taking
+  priority. Against the same ELF, the current parser returns all 12 top-frame
+  annotations and inferred caller range `[0x40378638, 0x40378698)`. This revised
+  policy has not inherited the earlier physical acceptance and requires a new
+  confirmation digest.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current
