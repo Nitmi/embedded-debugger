@@ -700,6 +700,34 @@ mod tests {
     }
 
     #[test]
+    fn controlled_stack_snapshot_is_annotated_only_after_target_cleanup() {
+        let directory = tempdir().unwrap();
+        let elf = directory.path().join("fixture.elf");
+        fs::write(&elf, super::super::stack_elf::test_executable_elf(false)).unwrap();
+        let options = super::super::stack_elf::OpenOcdStackElfOptions {
+            stack: test_options(directory.path(), 4),
+            elf,
+        };
+        let plan = super::super::stack_elf::plan_stack_elf(&options).unwrap();
+        let report =
+            super::super::stack_elf::test_stack_elf(&options, &plan.confirm_digest).unwrap();
+
+        assert!(report.complete);
+        assert_eq!(report.annotations.resolved_frames, 2);
+        assert_eq!(
+            report.annotations.frames[0].inline_annotations[0]
+                .function
+                .as_deref(),
+            Some("fixture_dwarf_app_main")
+        );
+        assert!(report.stack.target_restoration.complete);
+        assert!(report.stack.exchange.shutdown.graceful);
+        assert!(report.stack.openocd_shutdown.graceful);
+        assert!(!report.annotations.runtime_firmware_identity_verified);
+        assert!(!report.capabilities.gdb_symbol_loading);
+    }
+
+    #[test]
     fn malformed_stack_still_detaches_exits_restores_and_closes_openocd() {
         let directory = tempdir().unwrap();
         let options = test_options(directory.path(), 4);

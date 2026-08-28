@@ -10,7 +10,8 @@ use crate::{
         openocd::{
             self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
             OpenOcdInspectOptions, OpenOcdMemorySnapshotOptions, OpenOcdRegisterSnapshotOptions,
-            OpenOcdServerOptions, OpenOcdStackSnapshotOptions, OpenOcdTargetOptions,
+            OpenOcdServerOptions, OpenOcdStackElfOptions, OpenOcdStackSnapshotOptions,
+            OpenOcdTargetOptions,
         },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
@@ -394,6 +395,13 @@ pub struct OpenOcdStackSelection {
         help = "exact maximum returned frame count, limited to 1..=32"
     )]
     pub max_frames: u64,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "exact executable ELF to annotate offline after the confirmed stack snapshot"
+    )]
+    pub elf: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -921,9 +929,21 @@ impl Cli {
             Command::Openocd {
                 command:
                     OpenOcdCommand::Stack {
+                        command: OpenOcdStackCommand::Plan(selection),
+                    },
+            } if selection.elf.is_some() => "openocd.stack.annotated.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Stack {
                         command: OpenOcdStackCommand::Plan(_),
                     },
             } => "openocd.stack.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Stack {
+                        command: OpenOcdStackCommand::Test(selection),
+                    },
+            } if selection.stack.elf.is_some() => "openocd.stack.annotated.test",
             Command::Openocd {
                 command:
                     OpenOcdCommand::Stack {
@@ -1341,6 +1361,21 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     command: OpenOcdStackCommand::Plan(selection),
                 },
         } => {
+            if selection.elf.is_some() {
+                let report = openocd::plan_stack_elf(&openocd_stack_elf_options(selection))?;
+                return Ok(CommandResult::serializable(
+                    "openocd.stack.annotated.plan",
+                    &report,
+                    format!(
+                        "OpenOCD ELF-annotated stack plan ready\nRisk: {}\nTarget: {}\nMaximum returned frames: {}\nELF SHA-256: {}\nRuntime firmware identity verified: false\nConfirm digest: {}",
+                        report.risk,
+                        report.stack.target_state_policy.expected_current_target,
+                        report.stack.stack_policy.maximum_frames_requested,
+                        report.elf.sha256,
+                        report.confirm_digest,
+                    ),
+                ));
+            }
             let report = openocd::plan_stack_snapshot(&openocd_stack_options(selection))?;
             Ok(CommandResult::serializable(
                 "openocd.stack.plan",
@@ -1360,6 +1395,38 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     command: OpenOcdStackCommand::Test(selection),
                 },
         } => {
+            if selection.stack.elf.is_some() {
+                let report = openocd::test_stack_elf(
+                    &openocd_stack_elf_options(&selection.stack),
+                    &selection.confirm,
+                )?;
+                let top = report
+                    .annotations
+                    .frames
+                    .first()
+                    .and_then(|frame| frame.inline_annotations.first())
+                    .and_then(|annotation| annotation.function.as_deref())
+                    .unwrap_or("<unresolved>");
+                return Ok(CommandResult::serializable(
+                    "openocd.stack.annotated.test",
+                    &report,
+                    format!(
+                        "OpenOCD ELF-annotated stack snapshot complete\nTarget: {}\nFrames: {}/{}\nResolved offline: {}\nTop annotation: {}\nRuntime firmware identity verified: false\nTarget state: {} -> {}\nShutdown: graceful",
+                        report.stack.target_restoration.initial.target_name,
+                        report.stack.exchange.snapshot.returned_frames,
+                        report.stack.exchange.snapshot.maximum_frames,
+                        report.annotations.resolved_frames,
+                        top,
+                        report.stack.target_restoration.initial.state,
+                        report
+                            .stack
+                            .target_restoration
+                            .final_observation
+                            .as_ref()
+                            .map_or("missing", |observation| observation.state.as_str()),
+                    ),
+                ));
+            }
             let report = openocd::test_stack_snapshot(
                 &openocd_stack_options(&selection.stack),
                 &selection.confirm,
@@ -2242,6 +2309,16 @@ fn openocd_stack_options(selection: &OpenOcdStackSelection) -> OpenOcdStackSnaps
     OpenOcdStackSnapshotOptions {
         session: openocd_session_options(&selection.session),
         maximum_frames: selection.max_frames,
+    }
+}
+
+fn openocd_stack_elf_options(selection: &OpenOcdStackSelection) -> OpenOcdStackElfOptions {
+    OpenOcdStackElfOptions {
+        stack: openocd_stack_options(selection),
+        elf: selection
+            .elf
+            .clone()
+            .expect("ELF options are constructed only when --elf is present"),
     }
 }
 

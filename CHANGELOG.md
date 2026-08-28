@@ -103,6 +103,20 @@ All notable changes to this project will be documented in this file.
   fallback, cleaned both process trees and dynamic ports, and recovered UART
   heartbeats. Implicit unwind addresses, physical call-stack completeness,
   symbols, CPU1, and any other plan remain unqualified.
+- Optional SHA-256-bound offline ELF annotation for `openocd stack plan/test`
+  through the separate `openocd.stack.annotated.*` contract. The outer digest
+  binds the unchanged base stack digest, canonical executable ELF identity,
+  fixed `object 0.39.1` / `addr2line 0.25.1` policy, return-address adjustment,
+  eight-frame lookup/output limit, 64-byte build-ID limit, bounded object-table
+  sizes, and external-data prohibition. GDB never receives the ELF; annotation
+  runs in process only after target restoration and both managed processes
+  finish. Compressed debug sections are rejected, no more than eight declined
+  split-DWARF continuations are resumed per frame, split or linked debug files
+  and source contents are never read, and symbol-table fallback remains within
+  the exact in-memory ELF. Reports explicitly keep
+  runtime firmware identity and physical call-stack completeness unverified.
+  Controlled ELF, digest, CLI, and full two-process lifecycle regressions pass;
+  no physical annotated-stack acceptance is claimed.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current

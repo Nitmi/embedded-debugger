@@ -263,6 +263,33 @@ cargo run -- openocd stack test \
   --json
 ```
 
+Add an exact executable ELF when offline function/source annotation is needed:
+
+```console
+cargo run -- openocd stack plan \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --max-frames 16 \
+  --elf path/to/firmware.elf \
+  --json
+
+cargo run -- openocd stack test \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --max-frames 16 \
+  --elf path/to/firmware.elf \
+  --confirm <annotated_confirm_digest> \
+  --json
+```
+
 The plan accepts an exact 1..=32 frame limit and binds the fixed command
 `3-stack-list-frames --no-frame-filters 0 <limit-1>`. It loads no ELF or symbol
 file, runs no Python frame filters, and requests no arguments, locals, or
@@ -289,6 +316,36 @@ both process trees and dynamic ports were released, and UART heartbeats
 recovered. This exact acceptance does not bind implicit unwind-read addresses,
 prove physical call-stack completeness or symbols, qualify CPU1, or extend to
 another frame limit, target, tool, profile, or configuration.
+
+With `--elf`, the CLI returns the separate
+`openocd.stack.annotated.plan/test` contract. Planning accepts only a regular,
+nonempty executable ELF of at most 64 MiB. It binds the canonical path, exact
+bytes and SHA-256, format, kind, architecture, address size, endianness, entry,
+optional build ID, parser versions, annotation policy, and the unchanged base
+stack digest. Inspection permits at most 65,536 sections, 262,144 symbols, and
+a 64-byte build ID. The existing no-ELF path remains the exact prior contract.
+
+Annotation happens in process, after the confirmed target restoration and both
+managed processes have completed. GDB never receives the ELF path. The tool
+does not run ELF auto-load scripts or an external `addr2line`, read source-file
+contents, use the network, or locate `.gnu_debuglink`, alternate, or split
+DWARF files. Compressed debug sections are rejected before target access.
+Level zero uses its exact address; later frames use return address minus one
+when nonzero. Per stack frame, the resolver examines and returns at most eight
+in-file DWARF frames. It resumes at most eight declined split-DWARF
+continuations; a ninth request ends that DWARF lookup without loading external
+data. A containing in-file text-symbol fallback and 4096-byte metadata limits
+still apply.
+
+This is identity-bound offline annotation, not trusted runtime symbolization.
+The digest proves which ELF bytes were used but does not prove that the
+connected target is running those bytes; reports therefore keep
+`runtime_firmware_identity_verified=false` and
+`physical_call_stack_completeness_proven=false`. The base OpenOCD/GDB protocol,
+unbound unwind-read risk, R2 classification, no-retry rule, and all disabled
+debug capabilities remain unchanged. The earlier ESP32-S3 physical stack
+acceptance did not include `--elf`, so it does not physically qualify the new
+annotated contract.
 
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 

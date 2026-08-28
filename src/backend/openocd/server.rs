@@ -300,7 +300,7 @@ pub fn test_server(
     execute_server_plan(plan)
 }
 
-fn validate_server_options(options: &OpenOcdServerOptions) -> Result<()> {
+pub(super) fn validate_server_options(options: &OpenOcdServerOptions) -> Result<()> {
     super::validate_options(&OpenOcdInspectOptions {
         executable: options.executable.clone(),
         config_files: options.config_files.clone(),

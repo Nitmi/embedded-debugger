@@ -23,6 +23,7 @@ mod reset;
 mod server;
 mod session;
 mod stack;
+mod stack_elf;
 mod target;
 
 pub use gdb::{
@@ -79,6 +80,13 @@ pub use stack::{
     OpenOcdStackSnapshotExchange, OpenOcdStackSnapshotOptions, OpenOcdStackSnapshotPlan,
     OpenOcdStackSnapshotPolicy, OpenOcdStackSnapshotTestReport, plan_stack_snapshot,
     test_stack_snapshot,
+};
+pub use stack_elf::{
+    MAX_OPENOCD_STACK_ELF_BYTES, MAX_OPENOCD_STACK_ELF_INLINE_ANNOTATIONS,
+    OpenOcdStackElfAnnotation, OpenOcdStackElfAnnotations, OpenOcdStackElfCapabilities,
+    OpenOcdStackElfConfirmationBoundary, OpenOcdStackElfEffects, OpenOcdStackElfFrame,
+    OpenOcdStackElfInspection, OpenOcdStackElfOptions, OpenOcdStackElfPlan, OpenOcdStackElfPolicy,
+    OpenOcdStackElfResolution, OpenOcdStackElfTestReport, plan_stack_elf, test_stack_elf,
 };
 pub use target::{
     OpenOcdTargetCapabilities, OpenOcdTargetConfirmationBoundary, OpenOcdTargetEffects,

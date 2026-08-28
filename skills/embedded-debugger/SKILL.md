@@ -148,6 +148,25 @@ qualification as exact to the confirmed target, limit, tools, profile, and
 configuration; it still does not bind implicit unwind-read addresses or prove
 physical call-stack completeness or symbol correctness.
 
+When the user supplies an exact executable ELF for offline annotation, add the
+same `--elf <FILE>` to both stack `plan` and `test`. This selects the separate
+`openocd.stack.annotated.*` contract and a new outer digest; never reuse the
+base stack digest as its confirmation. Surface the canonical ELF path, SHA-256,
+parser policy, and unchanged inner stack digest for review.
+
+The annotated workflow never loads the ELF in GDB. It parses only the bound
+in-memory bytes after target restoration and process cleanup, rejects compressed
+debug sections, limits sections/symbols/build IDs and all text, examines at most
+eight DWARF frames per stack frame, and resumes at most eight declined
+split-DWARF continuations before ending that lookup. It never loads external
+debug data, reads source contents, or uses the network. Treat its
+function/source output as identity-bound offline annotation only. Always preserve
+`runtime_firmware_identity_verified=false`: choosing an ELF does not prove the
+target runs it. Never claim physical call-stack completeness, and retain the
+same R2 effects, unbound unwind-read warning, disabled capabilities, and
+no-automatic-retry rule. The existing ESP32-S3 stack acceptance did not use
+`--elf` and does not qualify this new contract.
+
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state
 observation, and restoration. It does not authorize ELF or symbol loading,

@@ -394,6 +394,59 @@ loading, argument/local/value inspection, explicit memory/register commands,
 breakpoints/watchpoints, general execution control, flash, monitor input, and
 arbitrary MI/Tcl remain false.
 
+## Confirmed OpenOCD stack snapshot with offline ELF annotation
+
+Adding `--elf <FILE>` to `openocd stack plan/test` selects the independent
+`openocd.stack.annotated.plan/test` contract. Omitting it follows the unchanged
+bounded-stack contract above and produces the same base confirmation digest as
+before this feature.
+
+The frame limit is still validated first. The ELF preflight then canonicalizes
+and reads one regular, nonempty file of at most 64 MiB into memory. It requires
+ELF format and executable kind, caps sections at 65,536, symbols at 262,144,
+and the optional build ID at 64 bytes, rejects compressed
+`.debug_*`/`.zdebug_*` data, and validates the in-file DWARF context before any
+target access. The outer digest binds:
+
+- the complete base stack confirmation digest;
+- canonical ELF path, byte length, SHA-256, format, kind, architecture,
+  address width, endianness, entry, and optional build ID;
+- `object 0.39.1` and `addr2line 0.25.1` plus the exact lookup, fallback,
+  metadata, inline-frame, compression, and external-data policies; and
+- the added host effects and confirmation boundary.
+
+The target-facing exchange remains exactly the five commands documented in the
+base contract. GDB is never given the ELF path and never executes
+`-file-exec-and-symbols`, `-file-symbol-file`, or another symbol-loading
+command. Once the base test has restored the selected target, exited GDB, and
+shut down OpenOCD, annotation reconstructs a resolver from the already hashed
+in-memory bytes. It does not invoke an external process, execute embedded
+scripts, read source-file contents, access the network, or load files named by
+GNU debug links, alternate links, or split DWARF requests.
+
+Level-zero lookup uses the exact GDB address. A nonzero later-frame address is
+treated as a return address and decremented by one. Addresses outside a
+loadable segment remain unresolved. For each stack frame, the resolver examines
+and returns at most eight innermost-to-outermost in-file DWARF frames. It resumes
+at most eight split-DWARF continuations with no supplied data; a ninth request
+ends the DWARF lookup and permits only the in-file symbol fallback. When DWARF
+provides no usable function or source metadata, that fallback selects the
+smallest containing, defined, nonzero-sized in-file text symbol. Function,
+path, and parser-error text is capped at 4096 bytes and rejects control
+characters. Missing external debug data or malformed address-specific DWARF
+yields structured unresolved/fallback evidence rather than triggering a
+filesystem search or repeating the target operation.
+
+`elf.sha256` proves the bytes used for annotation. It does not identify the
+firmware running on the target. The plan does not read or compare target flash,
+and a matching build ID is not obtained from the target, so
+`runtime_firmware_identity_verified=false` and
+`runtime_firmware_identity_bound=false` are mandatory. Physical call-stack
+completeness and implicit unwind-read addresses also remain unproven. This
+feature adds no target command or capability and retains the base R2/no-retry
+policy. It requires its own physical qualification; the earlier no-ELF
+ESP32-S3 stack acceptance does not qualify it.
+
 ## Confirmed OpenOCD target state roundtrip
 
 `openocd target plan` accepts one exact OpenOCD executable, at least one

@@ -743,7 +743,7 @@ fn error_value(error: &DebugError) -> Value {
     })
 }
 
-fn validate_session_options(options: &OpenOcdGdbSessionOptions) -> Result<()> {
+pub(super) fn validate_session_options(options: &OpenOcdGdbSessionOptions) -> Result<()> {
     validate_expected_target_name(&options.expected_target)?;
     validate_timeout(
         "gdb_version",
@@ -774,7 +774,8 @@ fn validate_session_options(options: &OpenOcdGdbSessionOptions) -> Result<()> {
         options.target_state_timeout_ms,
         MIN_OPENOCD_TARGET_STATE_TIMEOUT_MS,
         MAX_OPENOCD_TARGET_STATE_TIMEOUT_MS,
-    )
+    )?;
+    super::server::validate_server_options(&options.openocd)
 }
 
 fn validate_expected_target_name(name: &str) -> Result<()> {

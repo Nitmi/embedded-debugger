@@ -11,10 +11,12 @@ keywords = ["embedded", "debugging", "probe-rs", "openocd", "agent"]
 categories = ["development-tools::debugging", "embedded"]
 
 [dependencies]
+addr2line = { version = "=0.25.1", default-features = false, features = ["std", "rustc-demangle", "cpp_demangle", "fallible-iterator", "smallvec"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
 espflash = { version = "=4.5.0", default-features = false }
+object = { version = "=0.39.1", default-features = false, features = ["read", "std"] }
 probe-rs = "0.32"
 probe-rs-espressif = "0.32"
 process-wrap = { version = "=9.1.0", default-features = false, features = ["std", "job-object", "process-group"] }
@@ -27,6 +29,8 @@ uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
 assert_cmd = "2"
+gimli = { version = "=0.32.3", features = ["write"] }
+object = { version = "=0.39.1", default-features = false, features = ["build", "read", "std", "write"] }
 tempfile = "3"
 
 [profile.release]

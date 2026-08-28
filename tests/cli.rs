@@ -85,6 +85,68 @@ fn write_fake_gdb_with_wrong_token(directory: &Path) -> PathBuf {
     executable
 }
 
+fn write_stack_annotation_elf(directory: &Path, name: &str, marker: u8) -> PathBuf {
+    use object::{Endianness, build, elf};
+
+    let mut builder = build::elf::Builder::new(Endianness::Little, false);
+    builder.header.e_type = elf::ET_EXEC;
+    builder.header.e_machine = elf::EM_XTENSA;
+    builder.header.e_entry = 0x4037_0000;
+    builder.header.e_phoff = 0x34;
+
+    let section = builder.sections.add();
+    section.name = b".shstrtab"[..].into();
+    section.sh_type = elf::SHT_STRTAB;
+    section.data = build::elf::SectionData::SectionString;
+
+    let section = builder.sections.add();
+    section.name = b".text"[..].into();
+    section.sh_type = elf::SHT_PROGBITS;
+    section.sh_flags = u64::from(elf::SHF_ALLOC | elf::SHF_EXECINSTR);
+    section.sh_addr = 0x4037_0000;
+    section.sh_offset = 0x1000;
+    section.sh_addralign = 4;
+    section.data = build::elf::SectionData::Data(vec![marker; 0x40].into());
+    let text_id = section.id();
+
+    let section = builder.sections.add();
+    section.name = b".symtab"[..].into();
+    section.sh_type = elf::SHT_SYMTAB;
+    section.sh_addralign = 4;
+    section.data = build::elf::SectionData::Symbol;
+
+    let section = builder.sections.add();
+    section.name = b".strtab"[..].into();
+    section.sh_type = elf::SHT_STRTAB;
+    section.sh_addralign = 1;
+    section.data = build::elf::SectionData::String;
+
+    let symbol = builder.symbols.add();
+    symbol.name = b"fixture_app_main"[..].into();
+    symbol.section = Some(text_id);
+    symbol.set_st_info(elf::STB_GLOBAL, elf::STT_FUNC);
+    symbol.st_value = 0x4037_0000;
+    symbol.st_size = 0x20;
+
+    builder.set_section_sizes();
+    let segment = builder.segments.add();
+    segment.p_type = elf::PT_LOAD;
+    segment.p_flags = elf::PF_R | elf::PF_X;
+    segment.p_offset = 0x1000;
+    segment.p_vaddr = 0x4037_0000;
+    segment.p_paddr = 0x4037_0000;
+    segment.p_filesz = 0x40;
+    segment.p_memsz = 0x40;
+    segment.p_align = 0x1000;
+    segment.sections.push(text_id);
+
+    let mut bytes = Vec::new();
+    builder.write(&mut bytes).unwrap();
+    let path = directory.join(name);
+    fs::write(&path, bytes).unwrap();
+    path
+}
+
 fn spawn_replay_supervisor(idle_timeout_ms: u64, max_restarts: u32) -> std::process::Child {
     ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
         .args([
@@ -2209,6 +2271,261 @@ fn openocd_stack_validates_limit_before_filesystem_inputs() {
         let result: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(result["operation"], "openocd.stack.plan");
         assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    }
+}
+
+#[test]
+fn openocd_annotated_stack_plan_binds_elf_identity_without_changing_gdb_protocol() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+    let elf = write_stack_annotation_elf(directory.path(), "firmware.elf", 0);
+
+    let make_plan = |elf: &Path| {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .arg("openocd")
+            .arg("stack")
+            .arg("plan")
+            .arg("--openocd-executable")
+            .arg(&openocd)
+            .arg("--gdb-executable")
+            .arg(&gdb)
+            .arg("--expected-target")
+            .arg("fake.cpu0")
+            .arg("--config")
+            .arg(&config)
+            .arg("--search")
+            .arg(directory.path())
+            .arg("--max-frames")
+            .arg("8")
+            .arg("--elf")
+            .arg(elf)
+            .arg("--json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Value>(&output).unwrap()
+    };
+
+    let first = make_plan(&elf);
+    let second = make_plan(&elf);
+    let alias = directory.path().join("same-bytes.elf");
+    fs::copy(&elf, &alias).unwrap();
+    let changed_path = make_plan(&alias);
+    write_stack_annotation_elf(directory.path(), "firmware.elf", 1);
+    let changed_bytes = make_plan(&elf);
+
+    assert_eq!(first["operation"], "openocd.stack.annotated.plan");
+    assert_eq!(first["data"]["operation"], "openocd.stack.annotated.test");
+    assert_eq!(first["data"]["stack"]["operation"], "openocd.stack.test");
+    assert_eq!(first["data"]["elf"]["format"], "elf");
+    assert_eq!(first["data"]["elf"]["kind"], "executable");
+    assert_eq!(first["data"]["elf"]["architecture"], "xtensa");
+    assert_eq!(first["data"]["elf"]["address_size_bits"], 32);
+    assert_eq!(first["data"]["elf"]["external_files_loaded"], false);
+    assert_eq!(
+        first["data"]["annotation_policy"]["maximum_elf_bytes"],
+        64 * 1024 * 1024
+    );
+    assert_eq!(
+        first["data"]["annotation_policy"]["maximum_sections"],
+        65_536
+    );
+    assert_eq!(
+        first["data"]["annotation_policy"]["maximum_symbols"],
+        262_144
+    );
+    assert_eq!(
+        first["data"]["annotation_policy"]["maximum_build_id_bytes"],
+        64
+    );
+    assert_eq!(
+        first["data"]["annotation_policy"]["maximum_dwarf_frames_examined_per_frame"],
+        8
+    );
+    assert_eq!(
+        first["data"]["annotation_policy"]["maximum_inline_annotations_per_frame"],
+        8
+    );
+    assert_eq!(
+        first["data"]["annotation_policy"]["maximum_split_dwarf_requests_per_frame"],
+        8
+    );
+    assert_eq!(
+        first["data"]["annotation_policy"]["gdb_symbol_or_executable_loading"],
+        false
+    );
+    assert_eq!(
+        first["data"]["effects"]["gdb_symbol_or_executable_loading_requested"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["runtime_firmware_identity_bound"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["parser_resource_limits_bound"],
+        true
+    );
+    assert_eq!(
+        first["data"]["stack"]["protocol"]["commands"][2]["command"],
+        "-stack-list-frames --no-frame-filters 0 7"
+    );
+    assert_eq!(
+        first["data"]["stack"]["effects"]["symbol_or_executable_loading_requested"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirm_digest"],
+        second["data"]["confirm_digest"]
+    );
+    assert_eq!(
+        first["data"]["elf"]["sha256"],
+        changed_path["data"]["elf"]["sha256"]
+    );
+    assert_ne!(
+        first["data"]["confirm_digest"],
+        changed_path["data"]["confirm_digest"]
+    );
+    assert_eq!(
+        first["data"]["elf"]["resolved"],
+        changed_bytes["data"]["elf"]["resolved"]
+    );
+    assert_ne!(
+        first["data"]["elf"]["sha256"],
+        changed_bytes["data"]["elf"]["sha256"]
+    );
+    assert_ne!(
+        first["data"]["confirm_digest"],
+        changed_bytes["data"]["confirm_digest"]
+    );
+}
+
+#[test]
+fn openocd_annotated_stack_test_rejects_stale_digest_before_tcl_execution() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+    let elf = write_stack_annotation_elf(directory.path(), "firmware.elf", 0);
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("stack")
+        .arg("test")
+        .arg("--openocd-executable")
+        .arg(&openocd)
+        .arg("--gdb-executable")
+        .arg(&gdb)
+        .arg("--expected-target")
+        .arg("fake.cpu0")
+        .arg("--config")
+        .arg(&config)
+        .arg("--max-frames")
+        .arg("8")
+        .arg("--elf")
+        .arg(&elf)
+        .arg("--confirm")
+        .arg("00".repeat(32))
+        .arg("--json")
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.stack.annotated.test");
+    assert_eq!(result["error"]["code"], "CONFIRMATION_MISMATCH");
+    assert_eq!(
+        result["error"]["suggested_actions"][0]["action"],
+        "review_openocd_annotated_stack_plan"
+    );
+    assert!(result["error"]["details"]["openocd_readiness"].is_null());
+}
+
+#[test]
+fn openocd_annotated_stack_validates_limit_before_elf_or_tool_inputs() {
+    for maximum_frames in ["0", "33"] {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .args([
+                "openocd",
+                "stack",
+                "plan",
+                "--openocd-executable",
+                "deliberately-missing-openocd",
+                "--gdb-executable",
+                "deliberately-missing-gdb",
+                "--expected-target",
+                "fake.cpu0",
+                "--config",
+                "deliberately-missing.cfg",
+                "--max-frames",
+                maximum_frames,
+                "--elf",
+                "deliberately-missing.elf",
+                "--json",
+            ])
+            .assert()
+            .code(7)
+            .get_output()
+            .stdout
+            .clone();
+        let result: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(result["operation"], "openocd.stack.annotated.plan");
+        assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+        assert_eq!(
+            result["error"]["details"]["maximum_frames"],
+            maximum_frames.parse::<u64>().unwrap()
+        );
+    }
+}
+
+#[test]
+fn openocd_annotated_stack_validates_session_and_server_before_elf_inputs() {
+    for (arguments, timeout_kind) in [
+        (vec!["--gdb-command-timeout-ms", "99"], "gdb_command"),
+        (vec!["--openocd-startup-timeout-ms", "99"], "startup"),
+    ] {
+        let mut command = Command::cargo_bin("embedded-debugger").unwrap();
+        command.args([
+            "openocd",
+            "stack",
+            "plan",
+            "--openocd-executable",
+            "deliberately-missing-openocd",
+            "--gdb-executable",
+            "deliberately-missing-gdb",
+            "--expected-target",
+            "fake.cpu0",
+            "--config",
+            "deliberately-missing.cfg",
+            "--max-frames",
+            "8",
+            "--elf",
+            "deliberately-missing.elf",
+            "--json",
+        ]);
+        let output = command
+            .args(arguments)
+            .assert()
+            .code(7)
+            .get_output()
+            .stdout
+            .clone();
+        let result: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(result["operation"], "openocd.stack.annotated.plan");
+        assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+        assert_eq!(result["error"]["details"]["timeout_kind"], timeout_kind);
+        assert_eq!(result["error"]["details"]["timeout_ms"], 99);
     }
 }
 
