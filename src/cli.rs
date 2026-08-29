@@ -9,7 +9,8 @@ use crate::{
         DebugBackend,
         openocd::{
             self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
-            OpenOcdHardwareBreakpointOptions, OpenOcdInspectOptions, OpenOcdMemorySnapshotOptions,
+            OpenOcdHardwareBreakpointOptions, OpenOcdHardwareWatchpointMode,
+            OpenOcdHardwareWatchpointOptions, OpenOcdInspectOptions, OpenOcdMemorySnapshotOptions,
             OpenOcdRegisterSnapshotOptions, OpenOcdServerOptions, OpenOcdStackElfOptions,
             OpenOcdStackSnapshotOptions, OpenOcdTargetOptions,
         },
@@ -107,6 +108,10 @@ pub enum OpenOcdCommand {
         #[command(subcommand)]
         command: OpenOcdBreakpointCommand,
     },
+    Watchpoint {
+        #[command(subcommand)]
+        command: OpenOcdWatchpointCommand,
+    },
     Gdb {
         #[command(subcommand)]
         command: OpenOcdGdbCommand,
@@ -171,6 +176,82 @@ pub struct OpenOcdBreakpointTestSelection {
         help = "exact confirm_digest returned by openocd breakpoint plan"
     )]
     pub confirm: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdWatchpointCommand {
+    Plan(OpenOcdWatchpointSelection),
+    Test(OpenOcdWatchpointTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdWatchpointSelection {
+    #[command(flatten)]
+    pub session: OpenOcdSessionSelection,
+
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        value_parser = parse_address,
+        help = "exact non-zero naturally aligned numeric RAM address"
+    )]
+    pub address: Address,
+
+    #[arg(
+        long,
+        value_name = "LENGTH",
+        value_parser = parse_length,
+        help = "exact hardware-watchpoint byte width: 1, 2, 4, or 8"
+    )]
+    pub length: u64,
+
+    #[arg(long, value_name = "ADDRESS", value_parser = parse_address)]
+    pub region_start: Address,
+
+    #[arg(
+        long,
+        value_name = "LENGTH",
+        value_parser = parse_length,
+        help = "declared containing RAM region length"
+    )]
+    pub region_length: u64,
+
+    #[arg(long, value_enum, help = "confirmed region type; only RAM is accepted")]
+    pub region_kind: OpenOcdMemoryRegionKindArg,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "hardware-only GDB watchpoint mode; write-only is intentionally unavailable"
+    )]
+    pub mode: OpenOcdWatchpointModeArg,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdWatchpointTestSelection {
+    #[command(flatten)]
+    pub watchpoint: OpenOcdWatchpointSelection,
+
+    #[arg(
+        long,
+        help = "exact confirm_digest returned by openocd watchpoint plan"
+    )]
+    pub confirm: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OpenOcdWatchpointModeArg {
+    Read,
+    Access,
+}
+
+impl From<OpenOcdWatchpointModeArg> for OpenOcdHardwareWatchpointMode {
+    fn from(value: OpenOcdWatchpointModeArg) -> Self {
+        match value {
+            OpenOcdWatchpointModeArg::Read => Self::Read,
+            OpenOcdWatchpointModeArg::Access => Self::Access,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -358,7 +439,7 @@ pub struct OpenOcdSessionSelection {
     #[arg(
         long,
         default_value_t = openocd::DEFAULT_GDB_MI_COMMAND_TIMEOUT_MS,
-        help = "bounded remote connect/detach command deadline in milliseconds (100..=60000)"
+        help = "bounded remote MI command deadline in milliseconds (100..=60000)"
     )]
     pub gdb_command_timeout_ms: u64,
 
@@ -952,6 +1033,18 @@ impl Cli {
             } => "openocd.breakpoint.test",
             Command::Openocd {
                 command:
+                    OpenOcdCommand::Watchpoint {
+                        command: OpenOcdWatchpointCommand::Plan(_),
+                    },
+            } => "openocd.watchpoint.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Watchpoint {
+                        command: OpenOcdWatchpointCommand::Test(_),
+                    },
+            } => "openocd.watchpoint.test",
+            Command::Openocd {
+                command:
                     OpenOcdCommand::Gdb {
                         command: OpenOcdGdbCommand::Inspect(_),
                     },
@@ -1393,6 +1486,62 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report.target_restoration.initial.target_name,
                     report.exchange.roundtrip.inserted.address,
                     report.exchange.roundtrip.inserted.breakpoint_type,
+                    report.exchange.roundtrip.table_after_delete.reported_rows,
+                    report.target_restoration.initial.state,
+                    report
+                        .target_restoration
+                        .final_observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Watchpoint {
+                    command: OpenOcdWatchpointCommand::Plan(selection),
+                },
+        } => {
+            let report = openocd::plan_hardware_watchpoint(&openocd_watchpoint_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.watchpoint.plan",
+                &report,
+                format!(
+                    "OpenOCD temporary hardware-watchpoint plan ready\nRisk: {}\nTarget: {}\nMode: {:?}\nRange: {} + {} bytes\nExpression evaluation may read declared RAM: true\nWatchpoint execution requested: false\nAdditional Tcl resume after failure: false\nGDB detach/exit may resume target: true\nConfirm digest: {}",
+                    report.risk,
+                    report.target_state_policy.expected_current_target,
+                    report.watchpoint_policy.mode,
+                    report.watchpoint_policy.requested_address,
+                    report.watchpoint_policy.requested_length_bytes,
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Watchpoint {
+                    command: OpenOcdWatchpointCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_hardware_watchpoint(
+                &openocd_watchpoint_options(&selection.watchpoint),
+                &selection.confirm,
+            )?;
+            Ok(CommandResult::serializable(
+                "openocd.watchpoint.test",
+                &report,
+                format!(
+                    "OpenOCD temporary hardware-watchpoint roundtrip complete\nTarget: {}\nMode: {:?}\nExpression: {}\nInserted field: {}\nListed kind: {}\nBreakpoint table rows after delete: {}\nTarget state: {} -> {}\nShutdown: graceful",
+                    report.target_restoration.initial.target_name,
+                    report.watchpoint_policy.mode,
+                    report.watchpoint_policy.expression,
+                    report.exchange.roundtrip.inserted.result_field,
+                    report
+                        .exchange
+                        .roundtrip
+                        .table_before_delete
+                        .watchpoint
+                        .breakpoint_type,
                     report.exchange.roundtrip.table_after_delete.reported_rows,
                     report.target_restoration.initial.state,
                     report
@@ -2406,6 +2555,20 @@ fn openocd_breakpoint_options(
     OpenOcdHardwareBreakpointOptions {
         session: openocd_session_options(&selection.session),
         address: selection.address,
+    }
+}
+
+fn openocd_watchpoint_options(
+    selection: &OpenOcdWatchpointSelection,
+) -> OpenOcdHardwareWatchpointOptions {
+    OpenOcdHardwareWatchpointOptions {
+        session: openocd_session_options(&selection.session),
+        address: selection.address,
+        length_bytes: selection.length,
+        region_start: selection.region_start,
+        region_length_bytes: selection.region_length,
+        region_kind: selection.region_kind.into(),
+        mode: selection.mode.into(),
     }
 }
 

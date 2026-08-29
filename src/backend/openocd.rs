@@ -26,6 +26,7 @@ mod session;
 mod stack;
 mod stack_elf;
 mod target;
+mod watchpoint;
 
 pub use breakpoint::{
     OpenOcdHardwareBreakpointCapabilities, OpenOcdHardwareBreakpointConfirmationBoundary,
@@ -39,12 +40,14 @@ pub use gdb::{
     DEFAULT_GDB_MI_STARTUP_TIMEOUT_MS, DEFAULT_GDB_VERSION_TIMEOUT_MS, GdbExecutableFileIdentity,
     GdbExecutableInspection, GdbInspectOptions, GdbInspection, GdbMiBreakpointTable,
     GdbMiCommandResult, GdbMiHandshake, GdbMiHardwareBreakpoint, GdbMiHardwareBreakpointRoundtrip,
-    GdbMiMemoryBlock, GdbMiMemorySnapshot, GdbMiOutput, GdbMiPlannedCommand, GdbMiProtocol,
-    GdbMiRecordCounts, GdbMiRegisterInventory, GdbMiRegisterValue, GdbMiShutdown, GdbMiStackFrame,
-    GdbMiStackSnapshot, GdbMiTestOptions, GdbMiTestReport, MAX_GDB_MI_COMMAND_TIMEOUT_MS,
-    MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS, MAX_GDB_MI_STARTUP_TIMEOUT_MS, MAX_GDB_VERSION_TIMEOUT_MS,
-    MIN_GDB_MI_COMMAND_TIMEOUT_MS, MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS,
-    MIN_GDB_VERSION_TIMEOUT_MS, inspect_gdb, test_gdb_mi,
+    GdbMiHardwareWatchpoint, GdbMiHardwareWatchpointInsertion, GdbMiHardwareWatchpointRoundtrip,
+    GdbMiHardwareWatchpointTable, GdbMiMemoryBlock, GdbMiMemorySnapshot, GdbMiOutput,
+    GdbMiPlannedCommand, GdbMiProtocol, GdbMiRecordCounts, GdbMiRegisterInventory,
+    GdbMiRegisterValue, GdbMiShutdown, GdbMiStackFrame, GdbMiStackSnapshot, GdbMiTestOptions,
+    GdbMiTestReport, MAX_GDB_MI_COMMAND_TIMEOUT_MS, MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS,
+    MAX_GDB_MI_STARTUP_TIMEOUT_MS, MAX_GDB_VERSION_TIMEOUT_MS, MIN_GDB_MI_COMMAND_TIMEOUT_MS,
+    MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS, MIN_GDB_VERSION_TIMEOUT_MS,
+    OpenOcdHardwareWatchpointMode, inspect_gdb, test_gdb_mi,
 };
 pub use memory::{
     OpenOcdDeclaredMemoryRegion, OpenOcdMemorySnapshotCapabilities,
@@ -102,6 +105,13 @@ pub use target::{
     OpenOcdTargetOptions, OpenOcdTargetPlan, OpenOcdTargetPolicy, OpenOcdTargetProtocol,
     OpenOcdTargetProtocolCommand, OpenOcdTargetTestReport, OpenOcdTargetTransition, plan_target,
     test_target,
+};
+pub use watchpoint::{
+    OPENOCD_HARDWARE_WATCHPOINT_LENGTHS, OpenOcdHardwareWatchpointCapabilities,
+    OpenOcdHardwareWatchpointConfirmationBoundary, OpenOcdHardwareWatchpointEffects,
+    OpenOcdHardwareWatchpointExchange, OpenOcdHardwareWatchpointOptions,
+    OpenOcdHardwareWatchpointPlan, OpenOcdHardwareWatchpointPolicy,
+    OpenOcdHardwareWatchpointTestReport, plan_hardware_watchpoint, test_hardware_watchpoint,
 };
 
 pub const DEFAULT_OPENOCD_VERSION_TIMEOUT_MS: u64 = 2_000;

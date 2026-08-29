@@ -416,8 +416,60 @@ Every GDB failure records a point-in-time target observation and sends no
 additional OpenOCD Tcl resume. GDB detach, GDB exit, or configuration-defined
 detach handlers may nevertheless resume the target, so failure can require
 manual recovery and must never be retried automatically. Controlled parser and
-two-process lifecycle tests pass; no physical target acceptance has been
-performed for this command yet.
+two-process lifecycle tests pass. One separately confirmed ESP32-S3 CPU0 run at
+`0x420129E4` has also passed; that exact acceptance does not generalize to a
+later plan or a different target/address.
+
+Temporary OpenOCD hardware-watchpoint qualification is another independent
+confirmed checkpoint:
+
+```console
+cargo run -- openocd watchpoint plan \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --address 0x3FCDB550 \
+  --length 4 \
+  --region-start 0x3FC88000 \
+  --region-length 425984 \
+  --region-kind ram \
+  --mode access \
+  --json
+
+cargo run -- openocd watchpoint test \
+  <the-identical-options> \
+  --confirm <confirm_digest> \
+  --json
+```
+
+Only `read` and `access` modes are exposed. They map to GDB `rwatch` and
+`awatch`, which GDB defines as hardware-only; ordinary write watchpoints are
+not exposed because GDB may implement them by software single-stepping. The
+request must be one exact nonzero, naturally aligned 1/2/4/8-byte range wholly
+inside a user-declared RAM region. NVM, MMIO, unknown regions, symbols, and
+user expressions are rejected before tool lookup.
+
+The fixed MI sequence selects C, creates
+`*((char*)0x<address>)@<length>`, lists and strictly classifies the single row,
+deletes number 1, proves the canonical table empty, then detaches and exits.
+Expression evaluation during creation may read the declared RAM range. A wrong
+RAM declaration can therefore make this access side effectful. The target is
+never intentionally continued while the watchpoint exists, and no hit is
+requested.
+
+Success proves GDB's `hw-rwpt`/`hw-awpt` insertion response, exact
+`read watchpoint`/`acc watchpoint` table classification, GDB bookkeeping
+cleanup, final running restoration, and process cleanup. It does not prove
+physical comparator allocation, target width/capacity support, or physical
+comparator cleanup; some resource failures are reported by GDB only when the
+inferior resumes. Runtime adapter identity and target RAM semantics also remain
+unbound. Failures after insertion attempt fixed delete/list/detach cleanup,
+record a point-in-time target state, issue no additional Tcl resume, and must
+not be retried automatically. This implementation has controlled and CLI
+coverage, but no physical watchpoint acceptance yet.
 
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
@@ -844,8 +896,9 @@ See [docs/contracts.md](docs/contracts.md),
 [ADR-0012](docs/decisions/0012-confirmed-openocd-memory-snapshot.md),
 [ADR-0013](docs/decisions/0013-confirmed-openocd-stack-snapshot.md),
 [ADR-0014](docs/decisions/0014-offline-elf-stack-annotations.md),
-[ADR-0015](docs/decisions/0015-bounded-zero-size-symbol-inference.md), and
-[ADR-0016](docs/decisions/0016-confirmed-openocd-hardware-breakpoint-roundtrip.md).
+[ADR-0015](docs/decisions/0015-bounded-zero-size-symbol-inference.md),
+[ADR-0016](docs/decisions/0016-confirmed-openocd-hardware-breakpoint-roundtrip.md), and
+[ADR-0017](docs/decisions/0017-confirmed-openocd-hardware-watchpoint-roundtrip.md).
 
 ## Current status
 
@@ -909,12 +962,16 @@ two-process success, and failure-cleanup regressions. One independently
 confirmed, non-retried ESP32-S3 CPU0 run at `0x420129E4` also proved the exact
 hardware insertion, deletion, empty GDB table, final running state, graceful
 cleanup, reusable ports, and UART recovery. Physical comparator state and
-capacity remain independently unverified. GDB-loaded symbols,
+capacity remain independently unverified. A separate temporary OpenOCD
+hardware-watchpoint workflow now has strict `read`/`access` planning,
+classification, cleanup, digest, controlled-process, and CLI coverage. It has
+not yet run on a physical target, and does not claim comparator allocation,
+width/capacity support, hit behavior, or physical cleanup. GDB-loaded symbols,
 trusted runtime symbolization, argument/local/value
 inspection, general ELF/HEX loading, RTT, memory writes, Generic/MMIO or
 undeclared-region reads, register writes, software/symbolic/conditional
 breakpoints, persistent OpenOCD breakpoints, breakpoint-hit execution,
-watchpoints,
+write-only or persistent watchpoints, watchpoint-hit execution,
 asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,
 and non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD

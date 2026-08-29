@@ -83,6 +83,17 @@ const BREAKPOINT_CLEANUP_DETACH_TOKEN: u64 = 10;
 const BREAKPOINT_NUMBER: u64 = 1;
 const BREAKPOINT_DELETE_COMMAND: &str = "-break-delete 1";
 const BREAKPOINT_LIST_COMMAND: &str = "-break-list";
+const WATCHPOINT_LANGUAGE_TOKEN: u64 = 3;
+const WATCHPOINT_INSERT_TOKEN: u64 = 4;
+const WATCHPOINT_LIST_TOKEN: u64 = 5;
+const WATCHPOINT_DELETE_TOKEN: u64 = 6;
+const WATCHPOINT_LIST_AFTER_DELETE_TOKEN: u64 = 7;
+const WATCHPOINT_DETACH_TOKEN: u64 = 8;
+const WATCHPOINT_EXIT_TOKEN: u64 = 9;
+const WATCHPOINT_CLEANUP_DELETE_TOKEN: u64 = 10;
+const WATCHPOINT_CLEANUP_LIST_TOKEN: u64 = 11;
+const WATCHPOINT_CLEANUP_DETACH_TOKEN: u64 = 12;
+const WATCHPOINT_LANGUAGE_COMMAND: &str = "-gdb-set language c";
 const MI_LAUNCH_ARGUMENTS: [&str; 4] = ["--nx", "--nh", "--quiet", "--interpreter=mi2"];
 pub(super) const XTENSA_GNU_CONFIG_ENV: &str = "XTENSA_GNU_CONFIG";
 
@@ -369,6 +380,76 @@ pub struct GdbMiHardwareBreakpointRoundtrip {
     pub physical_comparator_state_independently_verified: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenOcdHardwareWatchpointMode {
+    Read,
+    Access,
+}
+
+impl OpenOcdHardwareWatchpointMode {
+    fn command_flag(self) -> &'static str {
+        match self {
+            Self::Read => "-r",
+            Self::Access => "-a",
+        }
+    }
+
+    fn insertion_result_field(self) -> &'static str {
+        match self {
+            Self::Read => "hw-rwpt",
+            Self::Access => "hw-awpt",
+        }
+    }
+
+    fn breakpoint_type(self) -> &'static str {
+        match self {
+            Self::Read => "read watchpoint",
+            Self::Access => "acc watchpoint",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiHardwareWatchpointInsertion {
+    pub result_field: String,
+    pub number: u64,
+    pub expression: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiHardwareWatchpoint {
+    pub number: u64,
+    pub mode: OpenOcdHardwareWatchpointMode,
+    pub breakpoint_type: String,
+    pub disposition: String,
+    pub enabled: bool,
+    pub expression: String,
+    pub hit_count: u64,
+    pub thread_groups: Vec<String>,
+    pub original_location: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiHardwareWatchpointTable {
+    pub reported_rows: u64,
+    pub reported_columns: u64,
+    pub header_columns: Vec<String>,
+    pub body_entries: u64,
+    pub watchpoint: GdbMiHardwareWatchpoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiHardwareWatchpointRoundtrip {
+    pub inserted: GdbMiHardwareWatchpointInsertion,
+    pub table_before_delete: GdbMiHardwareWatchpointTable,
+    pub table_after_delete: GdbMiBreakpointTable,
+    pub gdb_hardware_classification_verified: bool,
+    pub gdb_breakpoint_table_empty: bool,
+    pub physical_comparator_allocation_independently_verified: bool,
+    pub physical_comparator_state_independently_verified: bool,
+}
+
 pub(super) struct RemoteGdbExecution {
     pub endpoint: String,
     pub startup_elapsed: Duration,
@@ -467,10 +548,44 @@ pub(super) struct RemoteBreakpointExecution {
     pub output: GdbMiOutput,
 }
 
+pub(super) struct RemoteWatchpointExecution {
+    pub endpoint: String,
+    pub startup_elapsed: Duration,
+    pub version_elapsed: Duration,
+    pub version_result_class: String,
+    pub version_stream_records: u64,
+    pub connect_elapsed: Duration,
+    pub connect_result_class: String,
+    pub language_elapsed: Duration,
+    pub language_result_class: String,
+    pub insert_elapsed: Duration,
+    pub insert_result_class: String,
+    pub insert_command: String,
+    pub list_before_delete_elapsed: Duration,
+    pub list_before_delete_result_class: String,
+    pub delete_elapsed: Duration,
+    pub delete_result_class: String,
+    pub list_after_delete_elapsed: Duration,
+    pub list_after_delete_result_class: String,
+    pub roundtrip: GdbMiHardwareWatchpointRoundtrip,
+    pub detach_elapsed: Duration,
+    pub detach_result_class: String,
+    pub record_counts: GdbMiRecordCounts,
+    pub shutdown: GdbMiShutdown,
+    pub output: GdbMiOutput,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RemoteMemoryRequest {
     pub address: Address,
     pub length_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RemoteWatchpointRequest {
+    pub address: Address,
+    pub length_bytes: u64,
+    pub mode: OpenOcdHardwareWatchpointMode,
 }
 
 pub fn inspect_gdb(options: &GdbInspectOptions) -> Result<GdbInspection> {
@@ -942,6 +1057,86 @@ pub(super) fn execute_remote_breakpoint_roundtrip(
     })
 }
 
+pub(super) fn execute_remote_watchpoint_roundtrip(
+    executable: &str,
+    xtensa_config: Option<&str>,
+    gdb_port: u16,
+    request: RemoteWatchpointRequest,
+    startup_timeout_ms: u64,
+    command_timeout_ms: u64,
+    shutdown_timeout_ms: u64,
+) -> Result<RemoteWatchpointExecution> {
+    let endpoint = format!("127.0.0.1:{gdb_port}");
+    let mut command = Command::new(executable);
+    command
+        .args(MI_LAUNCH_ARGUMENTS)
+        .env_remove(XTENSA_GNU_CONFIG_ENV);
+    if let Some(config) = xtensa_config {
+        command.env(XTENSA_GNU_CONFIG_ENV, config);
+    }
+    let mut gdb = ManagedGdb::spawn(command, executable, WATCHPOINT_EXIT_TOKEN)?;
+    let lifecycle = match gdb.run_watchpoint_lifecycle(
+        &endpoint,
+        request,
+        Duration::from_millis(startup_timeout_ms),
+        Duration::from_millis(command_timeout_ms),
+        Duration::from_millis(shutdown_timeout_ms),
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(failure) => {
+            return Err(finalize_failure(gdb, failure, shutdown_timeout_ms));
+        }
+    };
+
+    let mut shutdown = gdb.cleanup(Duration::from_millis(shutdown_timeout_ms));
+    let record_counts = gdb.record_counts.clone();
+    let output = gdb.finish_output();
+    shutdown.process_tree_cleanup_complete &= output_streams_closed(&output);
+    if !shutdown.command_sent
+        || !shutdown.result_observed
+        || !shutdown.graceful
+        || !shutdown.exit_success
+        || !shutdown.process_tree_cleanup_complete
+    {
+        return Err(protocol_error_with_lifecycle(
+            "hardware-watchpoint GDB/MI process did not complete a graceful shutdown",
+            json!({"endpoint": endpoint}),
+            &shutdown,
+            &output,
+        ));
+    }
+    validate_complete_output(&output).map_err(|message| {
+        protocol_error_with_lifecycle(message, json!({"endpoint": endpoint}), &shutdown, &output)
+    })?;
+
+    Ok(RemoteWatchpointExecution {
+        endpoint,
+        startup_elapsed: lifecycle.startup_elapsed,
+        version_elapsed: lifecycle.version_elapsed,
+        version_result_class: lifecycle.version_result_class,
+        version_stream_records: lifecycle.version_stream_records,
+        connect_elapsed: lifecycle.connect_elapsed,
+        connect_result_class: lifecycle.connect_result_class,
+        language_elapsed: lifecycle.language_elapsed,
+        language_result_class: lifecycle.language_result_class,
+        insert_elapsed: lifecycle.insert_elapsed,
+        insert_result_class: lifecycle.insert_result_class,
+        insert_command: lifecycle.insert_command,
+        list_before_delete_elapsed: lifecycle.list_before_delete_elapsed,
+        list_before_delete_result_class: lifecycle.list_before_delete_result_class,
+        delete_elapsed: lifecycle.delete_elapsed,
+        delete_result_class: lifecycle.delete_result_class,
+        list_after_delete_elapsed: lifecycle.list_after_delete_elapsed,
+        list_after_delete_result_class: lifecycle.list_after_delete_result_class,
+        roundtrip: lifecycle.roundtrip,
+        detach_elapsed: lifecycle.detach_elapsed,
+        detach_result_class: lifecycle.detach_result_class,
+        record_counts,
+        shutdown,
+        output,
+    })
+}
+
 fn protocol_contract() -> GdbMiProtocol {
     GdbMiProtocol {
         interpreter: "mi2".to_string(),
@@ -1203,6 +1398,92 @@ pub(super) fn breakpoint_failure_cleanup_contract() -> Vec<GdbMiPlannedCommand> 
         },
         GdbMiPlannedCommand {
             token: BREAKPOINT_CLEANUP_DETACH_TOKEN,
+            command: REMOTE_DETACH_COMMAND.to_string(),
+            expected_result_class: "done".to_string(),
+        },
+    ]
+}
+
+pub(super) fn watchpoint_protocol_contract(
+    address: Address,
+    length_bytes: u64,
+    mode: OpenOcdHardwareWatchpointMode,
+) -> GdbMiProtocol {
+    GdbMiProtocol {
+        interpreter: "mi2".to_string(),
+        launch_arguments: MI_LAUNCH_ARGUMENTS
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        initialization_files_enabled: false,
+        input_encoding: "ascii".to_string(),
+        line_terminator: "lf".to_string(),
+        token_correlation_required: true,
+        process_isolation: process_isolation().to_string(),
+        commands: vec![
+            GdbMiPlannedCommand {
+                token: VERSION_TOKEN,
+                command: VERSION_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REMOTE_SELECT_TOKEN,
+                command: REMOTE_SELECT_COMMAND_PLACEHOLDER.to_string(),
+                expected_result_class: "connected".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: WATCHPOINT_LANGUAGE_TOKEN,
+                command: WATCHPOINT_LANGUAGE_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: WATCHPOINT_INSERT_TOKEN,
+                command: watchpoint_insert_command(address, length_bytes, mode),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: WATCHPOINT_LIST_TOKEN,
+                command: BREAKPOINT_LIST_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: WATCHPOINT_DELETE_TOKEN,
+                command: BREAKPOINT_DELETE_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: WATCHPOINT_LIST_AFTER_DELETE_TOKEN,
+                command: BREAKPOINT_LIST_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: WATCHPOINT_DETACH_TOKEN,
+                command: REMOTE_DETACH_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: WATCHPOINT_EXIT_TOKEN,
+                command: EXIT_COMMAND.to_string(),
+                expected_result_class: "exit".to_string(),
+            },
+        ],
+    }
+}
+
+pub(super) fn watchpoint_failure_cleanup_contract() -> Vec<GdbMiPlannedCommand> {
+    vec![
+        GdbMiPlannedCommand {
+            token: WATCHPOINT_CLEANUP_DELETE_TOKEN,
+            command: BREAKPOINT_DELETE_COMMAND.to_string(),
+            expected_result_class: "done_or_error_then_verify_table".to_string(),
+        },
+        GdbMiPlannedCommand {
+            token: WATCHPOINT_CLEANUP_LIST_TOKEN,
+            command: BREAKPOINT_LIST_COMMAND.to_string(),
+            expected_result_class: "done".to_string(),
+        },
+        GdbMiPlannedCommand {
+            token: WATCHPOINT_CLEANUP_DETACH_TOKEN,
             command: REMOTE_DETACH_COMMAND.to_string(),
             expected_result_class: "done".to_string(),
         },
@@ -2462,6 +2743,355 @@ impl ManagedGdb {
         failure
     }
 
+    fn run_watchpoint_lifecycle(
+        &mut self,
+        endpoint: &str,
+        request: RemoteWatchpointRequest,
+        startup_timeout: Duration,
+        command_timeout: Duration,
+        shutdown_timeout: Duration,
+    ) -> std::result::Result<WatchpointLifecycleSuccess, LifecycleFailure> {
+        let startup_deadline = self.started + startup_timeout;
+        self.wait_for_prompt(startup_deadline)?;
+        let startup_elapsed = self.started.elapsed();
+
+        let streams_before_version = stream_record_count(&self.record_counts);
+        let version_started = Instant::now();
+        self.send_command(VERSION_TOKEN, VERSION_COMMAND)?;
+        let version_result_class = self.wait_for_result(VERSION_TOKEN, "done", startup_deadline)?;
+        let version_elapsed = version_started.elapsed();
+        let version_stream_records =
+            stream_record_count(&self.record_counts).saturating_sub(streams_before_version);
+
+        let connect_command = format!("-target-select remote {endpoint}");
+        let connect_started = Instant::now();
+        self.send_command(REMOTE_SELECT_TOKEN, &connect_command)?;
+        let connect_result_class = match self.wait_for_result(
+            REMOTE_SELECT_TOKEN,
+            "connected",
+            connect_started + command_timeout,
+        ) {
+            Ok(class) => class,
+            Err(failure) => {
+                return Err(self.with_watchpoint_detach_attempt(failure, command_timeout));
+            }
+        };
+        let connect_elapsed = connect_started.elapsed();
+
+        let language_started = Instant::now();
+        if let Err(failure) =
+            self.send_command(WATCHPOINT_LANGUAGE_TOKEN, WATCHPOINT_LANGUAGE_COMMAND)
+        {
+            return Err(self.with_watchpoint_detach_attempt(failure, command_timeout));
+        }
+        let language_result_class = match self.wait_for_result(
+            WATCHPOINT_LANGUAGE_TOKEN,
+            "done",
+            language_started + command_timeout,
+        ) {
+            Ok(class) => class,
+            Err(failure) => {
+                return Err(self.with_watchpoint_detach_attempt(failure, command_timeout));
+            }
+        };
+        let language_elapsed = language_started.elapsed();
+
+        let roundtrip = match self.run_watchpoint_roundtrip(
+            request.address,
+            request.length_bytes,
+            request.mode,
+            command_timeout,
+        ) {
+            Ok(roundtrip) => roundtrip,
+            Err(failure) => {
+                return Err(
+                    self.with_watchpoint_cleanup_and_detach_attempt(failure, command_timeout)
+                );
+            }
+        };
+
+        let detach_started = Instant::now();
+        self.send_command(WATCHPOINT_DETACH_TOKEN, REMOTE_DETACH_COMMAND)?;
+        let detach_result_class = self.wait_for_result(
+            WATCHPOINT_DETACH_TOKEN,
+            "done",
+            detach_started + command_timeout,
+        )?;
+        let detach_elapsed = detach_started.elapsed();
+
+        self.send_command(WATCHPOINT_EXIT_TOKEN, EXIT_COMMAND)?;
+        let shutdown_deadline = Instant::now() + shutdown_timeout;
+        self.wait_for_result(WATCHPOINT_EXIT_TOKEN, "exit", shutdown_deadline)?;
+        self.wait_for_exit(shutdown_deadline)?;
+
+        Ok(WatchpointLifecycleSuccess {
+            startup_elapsed,
+            version_elapsed,
+            version_result_class,
+            version_stream_records,
+            connect_elapsed,
+            connect_result_class,
+            language_elapsed,
+            language_result_class,
+            insert_elapsed: roundtrip.insert_elapsed,
+            insert_result_class: roundtrip.insert_result_class,
+            insert_command: roundtrip.insert_command,
+            list_before_delete_elapsed: roundtrip.list_before_delete_elapsed,
+            list_before_delete_result_class: roundtrip.list_before_delete_result_class,
+            delete_elapsed: roundtrip.delete_elapsed,
+            delete_result_class: roundtrip.delete_result_class,
+            list_after_delete_elapsed: roundtrip.list_after_delete_elapsed,
+            list_after_delete_result_class: roundtrip.list_after_delete_result_class,
+            roundtrip: roundtrip.roundtrip,
+            detach_elapsed,
+            detach_result_class,
+        })
+    }
+
+    fn run_watchpoint_roundtrip(
+        &mut self,
+        address: Address,
+        length_bytes: u64,
+        mode: OpenOcdHardwareWatchpointMode,
+        command_timeout: Duration,
+    ) -> std::result::Result<WatchpointRoundtripSuccess, LifecycleFailure> {
+        let expression = watchpoint_expression(address, length_bytes);
+        let insert_command = watchpoint_insert_command(address, length_bytes, mode);
+        let insert_started = Instant::now();
+        self.send_command(WATCHPOINT_INSERT_TOKEN, &insert_command)?;
+        let insert_result = self.wait_for_result_record(
+            WATCHPOINT_INSERT_TOKEN,
+            "done",
+            insert_started + command_timeout,
+        )?;
+        let insert_elapsed = insert_started.elapsed();
+        let inserted =
+            parse_hardware_watchpoint_insertion(&insert_result.variables, &expression, mode)?;
+
+        let list_before_delete_started = Instant::now();
+        self.send_command(WATCHPOINT_LIST_TOKEN, BREAKPOINT_LIST_COMMAND)?;
+        let list_before_delete_result = self.wait_for_result_record(
+            WATCHPOINT_LIST_TOKEN,
+            "done",
+            list_before_delete_started + command_timeout,
+        )?;
+        let list_before_delete_elapsed = list_before_delete_started.elapsed();
+        let table_before_delete = parse_hardware_watchpoint_table(
+            &list_before_delete_result.variables,
+            &expression,
+            mode,
+        )?;
+
+        let delete_started = Instant::now();
+        self.send_command(WATCHPOINT_DELETE_TOKEN, BREAKPOINT_DELETE_COMMAND)?;
+        let delete_result_class = self.wait_for_result(
+            WATCHPOINT_DELETE_TOKEN,
+            "done",
+            delete_started + command_timeout,
+        )?;
+        let delete_elapsed = delete_started.elapsed();
+
+        let list_after_delete_started = Instant::now();
+        self.send_command(WATCHPOINT_LIST_AFTER_DELETE_TOKEN, BREAKPOINT_LIST_COMMAND)?;
+        let list_after_delete_result = self.wait_for_result_record(
+            WATCHPOINT_LIST_AFTER_DELETE_TOKEN,
+            "done",
+            list_after_delete_started + command_timeout,
+        )?;
+        let list_after_delete_elapsed = list_after_delete_started.elapsed();
+        let table_after_delete = parse_empty_breakpoint_table(&list_after_delete_result.variables)?;
+
+        Ok(WatchpointRoundtripSuccess {
+            insert_elapsed,
+            insert_result_class: insert_result.class,
+            insert_command,
+            list_before_delete_elapsed,
+            list_before_delete_result_class: list_before_delete_result.class,
+            delete_elapsed,
+            delete_result_class,
+            list_after_delete_elapsed,
+            list_after_delete_result_class: list_after_delete_result.class,
+            roundtrip: GdbMiHardwareWatchpointRoundtrip {
+                inserted,
+                table_before_delete,
+                table_after_delete,
+                gdb_hardware_classification_verified: true,
+                gdb_breakpoint_table_empty: true,
+                physical_comparator_allocation_independently_verified: false,
+                physical_comparator_state_independently_verified: false,
+            },
+        })
+    }
+
+    fn with_watchpoint_cleanup_and_detach_attempt(
+        &mut self,
+        mut failure: LifecycleFailure,
+        command_timeout: Duration,
+    ) -> LifecycleFailure {
+        let cleanup_started = Instant::now();
+        let delete_started = Instant::now();
+        let delete = self
+            .send_command(WATCHPOINT_CLEANUP_DELETE_TOKEN, BREAKPOINT_DELETE_COMMAND)
+            .and_then(|()| {
+                self.wait_for_any_result_record(
+                    WATCHPOINT_CLEANUP_DELETE_TOKEN,
+                    delete_started + command_timeout,
+                )
+            });
+        let delete_evidence = match delete {
+            Ok(result) => json!({
+                "attempted": true,
+                "token": WATCHPOINT_CLEANUP_DELETE_TOKEN,
+                "command": BREAKPOINT_DELETE_COMMAND,
+                "result_class": result.class,
+                "elapsed_ms": duration_ms(delete_started.elapsed()),
+            }),
+            Err(delete_failure) => json!({
+                "attempted": true,
+                "token": WATCHPOINT_CLEANUP_DELETE_TOKEN,
+                "command": BREAKPOINT_DELETE_COMMAND,
+                "elapsed_ms": duration_ms(delete_started.elapsed()),
+                "failure": lifecycle_failure_value(&delete_failure),
+            }),
+        };
+
+        let list_started = Instant::now();
+        let list = self
+            .send_command(WATCHPOINT_CLEANUP_LIST_TOKEN, BREAKPOINT_LIST_COMMAND)
+            .and_then(|()| {
+                self.wait_for_result_record(
+                    WATCHPOINT_CLEANUP_LIST_TOKEN,
+                    "done",
+                    list_started + command_timeout,
+                )
+            })
+            .and_then(|result| {
+                parse_empty_breakpoint_table(&result.variables).map(|table| (result.class, table))
+            });
+        let (table_empty, list_evidence) = match list {
+            Ok((result_class, table)) => (
+                table.empty,
+                json!({
+                    "attempted": true,
+                    "token": WATCHPOINT_CLEANUP_LIST_TOKEN,
+                    "command": BREAKPOINT_LIST_COMMAND,
+                    "result_class": result_class,
+                    "table": table,
+                    "elapsed_ms": duration_ms(list_started.elapsed()),
+                }),
+            ),
+            Err(list_failure) => (
+                false,
+                json!({
+                    "attempted": true,
+                    "token": WATCHPOINT_CLEANUP_LIST_TOKEN,
+                    "command": BREAKPOINT_LIST_COMMAND,
+                    "elapsed_ms": duration_ms(list_started.elapsed()),
+                    "failure": lifecycle_failure_value(&list_failure),
+                }),
+            ),
+        };
+
+        let detach_started = Instant::now();
+        let detach = self
+            .send_command(WATCHPOINT_CLEANUP_DETACH_TOKEN, REMOTE_DETACH_COMMAND)
+            .and_then(|()| {
+                self.wait_for_result(
+                    WATCHPOINT_CLEANUP_DETACH_TOKEN,
+                    "done",
+                    detach_started + command_timeout,
+                )
+            });
+        let (detach_complete, detach_evidence) = match detach {
+            Ok(result_class) => (
+                true,
+                json!({
+                    "attempted": true,
+                    "complete": true,
+                    "token": WATCHPOINT_CLEANUP_DETACH_TOKEN,
+                    "command": REMOTE_DETACH_COMMAND,
+                    "result_class": result_class,
+                    "elapsed_ms": duration_ms(detach_started.elapsed()),
+                }),
+            ),
+            Err(detach_failure) => (
+                false,
+                json!({
+                    "attempted": true,
+                    "complete": false,
+                    "token": WATCHPOINT_CLEANUP_DETACH_TOKEN,
+                    "command": REMOTE_DETACH_COMMAND,
+                    "elapsed_ms": duration_ms(detach_started.elapsed()),
+                    "failure": lifecycle_failure_value(&detach_failure),
+                }),
+            ),
+        };
+
+        let mut details = failure.details.as_object().cloned().unwrap_or_default();
+        details.insert(
+            "watchpoint_cleanup".to_string(),
+            json!({
+                "attempted": true,
+                "delete": delete_evidence,
+                "list": list_evidence,
+                "gdb_breakpoint_table_empty": table_empty,
+                "physical_comparator_state_independently_verified": false,
+                "complete": table_empty && detach_complete,
+                "elapsed_ms": duration_ms(cleanup_started.elapsed()),
+            }),
+        );
+        details.insert("cleanup_detach".to_string(), detach_evidence);
+        failure.details = Value::Object(details);
+        failure
+    }
+
+    fn with_watchpoint_detach_attempt(
+        &mut self,
+        mut failure: LifecycleFailure,
+        command_timeout: Duration,
+    ) -> LifecycleFailure {
+        let started = Instant::now();
+        let attempt = self
+            .send_command(WATCHPOINT_CLEANUP_DETACH_TOKEN, REMOTE_DETACH_COMMAND)
+            .and_then(|()| {
+                self.wait_for_result(
+                    WATCHPOINT_CLEANUP_DETACH_TOKEN,
+                    "done",
+                    started + command_timeout,
+                )
+            });
+        let evidence = match attempt {
+            Ok(result_class) => json!({
+                "attempted": true,
+                "complete": true,
+                "token": WATCHPOINT_CLEANUP_DETACH_TOKEN,
+                "command": REMOTE_DETACH_COMMAND,
+                "result_class": result_class,
+                "elapsed_ms": duration_ms(started.elapsed()),
+            }),
+            Err(detach_failure) => json!({
+                "attempted": true,
+                "complete": false,
+                "token": WATCHPOINT_CLEANUP_DETACH_TOKEN,
+                "command": REMOTE_DETACH_COMMAND,
+                "elapsed_ms": duration_ms(started.elapsed()),
+                "failure": lifecycle_failure_value(&detach_failure),
+            }),
+        };
+        let mut details = failure.details.as_object().cloned().unwrap_or_default();
+        details.insert("cleanup_detach".to_string(), evidence);
+        details.insert(
+            "watchpoint_cleanup".to_string(),
+            json!({
+                "attempted": false,
+                "required": false,
+                "complete": true,
+            }),
+        );
+        failure.details = Value::Object(details);
+        failure
+    }
+
     fn wait_for_prompt(&mut self, deadline: Instant) -> std::result::Result<(), LifecycleFailure> {
         loop {
             match self.next_record(deadline, "startup prompt")? {
@@ -2973,6 +3603,44 @@ struct BreakpointRoundtripSuccess {
 }
 
 #[derive(Debug)]
+struct WatchpointLifecycleSuccess {
+    startup_elapsed: Duration,
+    version_elapsed: Duration,
+    version_result_class: String,
+    version_stream_records: u64,
+    connect_elapsed: Duration,
+    connect_result_class: String,
+    language_elapsed: Duration,
+    language_result_class: String,
+    insert_elapsed: Duration,
+    insert_result_class: String,
+    insert_command: String,
+    list_before_delete_elapsed: Duration,
+    list_before_delete_result_class: String,
+    delete_elapsed: Duration,
+    delete_result_class: String,
+    list_after_delete_elapsed: Duration,
+    list_after_delete_result_class: String,
+    roundtrip: GdbMiHardwareWatchpointRoundtrip,
+    detach_elapsed: Duration,
+    detach_result_class: String,
+}
+
+#[derive(Debug)]
+struct WatchpointRoundtripSuccess {
+    insert_elapsed: Duration,
+    insert_result_class: String,
+    insert_command: String,
+    list_before_delete_elapsed: Duration,
+    list_before_delete_result_class: String,
+    delete_elapsed: Duration,
+    delete_result_class: String,
+    list_after_delete_elapsed: Duration,
+    list_after_delete_result_class: String,
+    roundtrip: GdbMiHardwareWatchpointRoundtrip,
+}
+
+#[derive(Debug)]
 struct MiResultRecord {
     class: String,
     variables: HashMap<String, MiValue>,
@@ -3368,6 +4036,22 @@ fn breakpoint_insert_command(address: Address) -> String {
     format!("-break-insert -h *0x{:x}", address.0)
 }
 
+pub(super) fn watchpoint_expression(address: Address, length_bytes: u64) -> String {
+    format!("*((char*)0x{:x})@{length_bytes}", address.0)
+}
+
+fn watchpoint_insert_command(
+    address: Address,
+    length_bytes: u64,
+    mode: OpenOcdHardwareWatchpointMode,
+) -> String {
+    format!(
+        "-break-watch {} {}",
+        mode.command_flag(),
+        watchpoint_expression(address, length_bytes)
+    )
+}
+
 fn parse_stack_snapshot(
     variables: &HashMap<String, MiValue>,
     maximum_frames: u64,
@@ -3499,6 +4183,362 @@ fn parse_stack_snapshot(
         physical_call_stack_completeness_proven: false,
         frames,
     })
+}
+
+fn parse_hardware_watchpoint_insertion(
+    variables: &HashMap<String, MiValue>,
+    expected_expression: &str,
+    mode: OpenOcdHardwareWatchpointMode,
+) -> std::result::Result<GdbMiHardwareWatchpointInsertion, LifecycleFailure> {
+    let expected_field = mode.insertion_result_field();
+    if variables.len() != 1 {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint insertion contained unexpected result fields",
+            json!({"expected_field": expected_field, "field_count": variables.len()}),
+        ));
+    }
+    let Some(MiValue::Dict(fields)) = variables.get(expected_field) else {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint insertion did not return the required hardware tuple",
+            json!({"expected_field": expected_field}),
+        ));
+    };
+    const EXPECTED_FIELDS: [&str; 2] = ["number", "exp"];
+    if fields.len() != EXPECTED_FIELDS.len()
+        || fields
+            .keys()
+            .any(|field| !EXPECTED_FIELDS.contains(&field.as_str()))
+    {
+        let mut reported_fields = fields.keys().cloned().collect::<Vec<_>>();
+        reported_fields.sort();
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint insertion tuple contained unexpected fields",
+            json!({"expected_fields": EXPECTED_FIELDS, "reported_fields": reported_fields}),
+        ));
+    }
+    let number = parse_decimal_text(
+        exact_string_field(fields, "number", "hardware watchpoint insertion")?,
+        "hardware watchpoint number",
+    )?;
+    if number != BREAKPOINT_NUMBER {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint number did not match the fixed cleanup identifier",
+            json!({"expected": BREAKPOINT_NUMBER, "observed": number}),
+        ));
+    }
+    let expression = exact_string_field(fields, "exp", "hardware watchpoint insertion")?;
+    if expression != expected_expression {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint insertion expression did not match the fixed request",
+            json!({"expected": expected_expression, "observed": bounded_line(expression)}),
+        ));
+    }
+
+    Ok(GdbMiHardwareWatchpointInsertion {
+        result_field: expected_field.to_string(),
+        number,
+        expression: expression.to_string(),
+    })
+}
+
+fn parse_hardware_watchpoint_table(
+    variables: &HashMap<String, MiValue>,
+    expected_expression: &str,
+    mode: OpenOcdHardwareWatchpointMode,
+) -> std::result::Result<GdbMiHardwareWatchpointTable, LifecycleFailure> {
+    const EXPECTED_COLUMNS: [&str; 6] = ["number", "type", "disp", "enabled", "addr", "what"];
+    if variables.len() != 1 {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint list contained unexpected result fields",
+            json!({"expected_field": "BreakpointTable", "field_count": variables.len()}),
+        ));
+    }
+    let Some(MiValue::Dict(table)) = variables.get("BreakpointTable") else {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint list did not contain a table",
+            json!({"expected_field": "BreakpointTable"}),
+        ));
+    };
+    let expected_table_fields = ["nr_rows", "nr_cols", "hdr", "body"];
+    if table.len() != expected_table_fields.len()
+        || table
+            .keys()
+            .any(|field| !expected_table_fields.contains(&field.as_str()))
+    {
+        let mut reported_fields = table.keys().cloned().collect::<Vec<_>>();
+        reported_fields.sort();
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint table contained unexpected fields",
+            json!({
+                "expected_fields": expected_table_fields,
+                "reported_fields": reported_fields,
+            }),
+        ));
+    }
+
+    let reported_rows = parse_decimal_text(
+        exact_string_field(table, "nr_rows", "hardware watchpoint table")?,
+        "hardware watchpoint table row count",
+    )?;
+    let reported_columns = parse_decimal_text(
+        exact_string_field(table, "nr_cols", "hardware watchpoint table")?,
+        "hardware watchpoint table column count",
+    )?;
+    if reported_rows != 1 || reported_columns != EXPECTED_COLUMNS.len() as u64 {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint table was not the expected one-row six-column table",
+            json!({
+                "reported_rows": reported_rows,
+                "reported_columns": reported_columns,
+                "expected_rows": 1,
+                "expected_columns": EXPECTED_COLUMNS.len(),
+            }),
+        ));
+    }
+
+    let header_columns = parse_breakpoint_table_headers(table, &EXPECTED_COLUMNS)?;
+    let Some(MiValue::List(body)) = table.get("body") else {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint table body was not a list",
+            json!({"field": "body"}),
+        ));
+    };
+    if body.len() != 1 {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint table did not contain exactly one body entry",
+            json!({"body_entries": body.len(), "expected": 1}),
+        ));
+    }
+    let MiValue::Dict(fields) = &body[0] else {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint table body entry was not a tuple",
+            json!({"index": 0}),
+        ));
+    };
+    const REQUIRED_FIELDS: [&str; 7] = [
+        "number",
+        "type",
+        "disp",
+        "enabled",
+        "what",
+        "times",
+        "original-location",
+    ];
+    const ALLOWED_FIELDS: [&str; 8] = [
+        "number",
+        "type",
+        "disp",
+        "enabled",
+        "what",
+        "times",
+        "original-location",
+        "thread-groups",
+    ];
+    if REQUIRED_FIELDS
+        .iter()
+        .any(|field| !fields.contains_key(*field))
+        || fields
+            .keys()
+            .any(|field| !ALLOWED_FIELDS.contains(&field.as_str()))
+    {
+        let mut reported_fields = fields.keys().cloned().collect::<Vec<_>>();
+        reported_fields.sort();
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint table entry contained missing or unsupported fields",
+            json!({
+                "required_fields": REQUIRED_FIELDS,
+                "allowed_fields": ALLOWED_FIELDS,
+                "reported_fields": reported_fields,
+            }),
+        ));
+    }
+
+    let number = parse_decimal_text(
+        exact_string_field(fields, "number", "hardware watchpoint table entry")?,
+        "hardware watchpoint table number",
+    )?;
+    if number != BREAKPOINT_NUMBER {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint table number did not match the fixed cleanup identifier",
+            json!({"expected": BREAKPOINT_NUMBER, "observed": number}),
+        ));
+    }
+    let breakpoint_type = exact_string_field(fields, "type", "hardware watchpoint table entry")?;
+    if breakpoint_type != mode.breakpoint_type() {
+        return Err(protocol_failure(
+            "GDB/MI did not classify the listed watchpoint as the requested hardware-only kind",
+            json!({
+                "expected": mode.breakpoint_type(),
+                "observed": bounded_line(breakpoint_type),
+            }),
+        ));
+    }
+    let disposition = exact_string_field(fields, "disp", "hardware watchpoint table entry")?;
+    if disposition != "keep" {
+        return Err(protocol_failure(
+            "GDB/MI hardware watchpoint had an unexpected disposition",
+            json!({"expected": "keep", "observed": bounded_line(disposition)}),
+        ));
+    }
+    let enabled = exact_string_field(fields, "enabled", "hardware watchpoint table entry")?;
+    if enabled != "y" {
+        return Err(protocol_failure(
+            "GDB/MI hardware watchpoint was not enabled",
+            json!({"expected": "y", "observed": bounded_line(enabled)}),
+        ));
+    }
+    let expression = exact_string_field(fields, "what", "hardware watchpoint table entry")?;
+    if expression != expected_expression {
+        return Err(protocol_failure(
+            "GDB/MI listed hardware-watchpoint expression did not match the fixed request",
+            json!({"expected": expected_expression, "observed": bounded_line(expression)}),
+        ));
+    }
+    let hit_count = parse_decimal_text(
+        exact_string_field(fields, "times", "hardware watchpoint table entry")?,
+        "hardware watchpoint hit count",
+    )?;
+    if hit_count != 0 {
+        return Err(protocol_failure(
+            "GDB/MI hardware watchpoint reported an unexpected hit count",
+            json!({"expected": 0, "observed": hit_count}),
+        ));
+    }
+    let original_location = exact_string_field(
+        fields,
+        "original-location",
+        "hardware watchpoint table entry",
+    )?;
+    if original_location != expected_expression {
+        return Err(protocol_failure(
+            "GDB/MI hardware-watchpoint original location did not match the fixed request",
+            json!({
+                "expected": expected_expression,
+                "observed": bounded_line(original_location),
+            }),
+        ));
+    }
+    let thread_groups = parse_optional_breakpoint_thread_groups(fields, "hardware watchpoint")?;
+
+    Ok(GdbMiHardwareWatchpointTable {
+        reported_rows,
+        reported_columns,
+        header_columns,
+        body_entries: 1,
+        watchpoint: GdbMiHardwareWatchpoint {
+            number,
+            mode,
+            breakpoint_type: breakpoint_type.to_string(),
+            disposition: disposition.to_string(),
+            enabled: true,
+            expression: expression.to_string(),
+            hit_count,
+            thread_groups,
+            original_location: original_location.to_string(),
+        },
+    })
+}
+
+fn parse_breakpoint_table_headers(
+    table: &HashMap<String, MiValue>,
+    expected_columns: &[&str],
+) -> std::result::Result<Vec<String>, LifecycleFailure> {
+    let Some(MiValue::List(headers)) = table.get("hdr") else {
+        return Err(protocol_failure(
+            "GDB/MI breakpoint table header was not a list",
+            json!({"field": "hdr"}),
+        ));
+    };
+    if headers.len() != expected_columns.len() {
+        return Err(protocol_failure(
+            "GDB/MI breakpoint table header count did not match the declared columns",
+            json!({
+                "header_count": headers.len(),
+                "expected_columns": expected_columns.len(),
+            }),
+        ));
+    }
+    let mut header_columns = Vec::with_capacity(headers.len());
+    for (index, header) in headers.iter().enumerate() {
+        let MiValue::Dict(fields) = header else {
+            return Err(protocol_failure(
+                "GDB/MI breakpoint table header entry was not a tuple",
+                json!({"index": index}),
+            ));
+        };
+        let expected_header_fields = ["width", "alignment", "col_name", "colhdr"];
+        if fields.len() != expected_header_fields.len()
+            || fields
+                .keys()
+                .any(|field| !expected_header_fields.contains(&field.as_str()))
+        {
+            return Err(protocol_failure(
+                "GDB/MI breakpoint table header contained unexpected fields",
+                json!({"index": index}),
+            ));
+        }
+        parse_decimal_text(
+            exact_string_field(fields, "width", "breakpoint table header")?,
+            "breakpoint table header width",
+        )?;
+        let alignment = exact_string_field(fields, "alignment", "breakpoint table header")?;
+        alignment.parse::<i64>().map_err(|_| {
+            protocol_failure(
+                "GDB/MI breakpoint table header alignment was not a signed integer",
+                json!({"index": index, "alignment": bounded_line(alignment)}),
+            )
+        })?;
+        let column = exact_string_field(fields, "col_name", "breakpoint table header")?;
+        if column != expected_columns[index] {
+            return Err(protocol_failure(
+                "GDB/MI breakpoint table columns did not match the fixed schema",
+                json!({
+                    "index": index,
+                    "expected": expected_columns[index],
+                    "observed": bounded_line(column),
+                }),
+            ));
+        }
+        let label = exact_string_field(fields, "colhdr", "breakpoint table header")?;
+        if label.is_empty() || label.len() > 128 || label.chars().any(char::is_control) {
+            return Err(protocol_failure(
+                "GDB/MI breakpoint table column label exceeded the safe boundary",
+                json!({"index": index}),
+            ));
+        }
+        header_columns.push(column.to_string());
+    }
+    Ok(header_columns)
+}
+
+fn parse_optional_breakpoint_thread_groups(
+    fields: &HashMap<String, MiValue>,
+    context: &str,
+) -> std::result::Result<Vec<String>, LifecycleFailure> {
+    match fields.get("thread-groups") {
+        None => Ok(Vec::new()),
+        Some(MiValue::List(groups)) if groups.len() <= 64 => groups
+            .iter()
+            .enumerate()
+            .map(|(index, value)| match value {
+                MiValue::String(group)
+                    if !group.is_empty()
+                        && group.len() <= 128
+                        && !group.chars().any(char::is_control) =>
+                {
+                    Ok(group.clone())
+                }
+                _ => Err(protocol_failure(
+                    format!("GDB/MI {context} thread group was not a bounded string"),
+                    json!({"index": index}),
+                )),
+            })
+            .collect(),
+        Some(_) => Err(protocol_failure(
+            format!("GDB/MI {context} thread groups exceeded the safe boundary"),
+            json!({"maximum_entries": 64}),
+        )),
+    }
 }
 
 fn parse_hardware_breakpoint(
@@ -4600,7 +5640,9 @@ fn parse_breakpoint_body_list(
             _ => return Err("breakpoint-table body assignment was missing".to_string()),
         }
         match tokens.next() {
-            Some(MiToken::Braced(_)) => parsed.push(MiValue::Dict(HashMap::new())),
+            Some(MiToken::Braced(fields)) => {
+                parsed.push(MiValue::Dict(parse_breakpoint_body_fields(fields)?))
+            }
             _ => return Err("breakpoint-table body entry was not a tuple".to_string()),
         }
         if tokens.peek().is_none() {
@@ -4609,6 +5651,62 @@ fn parse_breakpoint_body_list(
         match tokens.next() {
             Some(MiToken::Punct(',')) if tokens.peek().is_some() => {}
             _ => return Err("breakpoint-table body separator was malformed".to_string()),
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_breakpoint_body_fields(
+    fields: lexer::TokenStream,
+) -> std::result::Result<HashMap<String, MiValue>, String> {
+    let mut tokens = fields.into_iter().peekable();
+    let mut parsed = HashMap::new();
+    while tokens.peek().is_some() {
+        let key = match tokens.next() {
+            Some(MiToken::Text(key)) => key,
+            _ => return Err("breakpoint-table body field name was malformed".to_string()),
+        };
+        match tokens.next() {
+            Some(MiToken::Punct('=')) => {}
+            _ => return Err("breakpoint-table body field assignment was missing".to_string()),
+        }
+        let value = match tokens.next() {
+            Some(MiToken::Text(value)) => MiValue::String(value),
+            Some(MiToken::Bracketed(values)) => {
+                MiValue::List(parse_breakpoint_body_string_list(values)?)
+            }
+            _ => return Err("breakpoint-table body field had an unsupported shape".to_string()),
+        };
+        if parsed.insert(key, value).is_some() {
+            return Err("breakpoint-table body contained a duplicate field".to_string());
+        }
+        if tokens.peek().is_none() {
+            break;
+        }
+        match tokens.next() {
+            Some(MiToken::Punct(',')) if tokens.peek().is_some() => {}
+            _ => return Err("breakpoint-table body field separator was malformed".to_string()),
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_breakpoint_body_string_list(
+    values: lexer::TokenStream,
+) -> std::result::Result<Vec<MiValue>, String> {
+    let mut tokens = values.into_iter().peekable();
+    let mut parsed = Vec::new();
+    while tokens.peek().is_some() {
+        match tokens.next() {
+            Some(MiToken::Text(value)) => parsed.push(MiValue::String(value)),
+            _ => return Err("breakpoint-table body list entry was not scalar".to_string()),
+        }
+        if tokens.peek().is_none() {
+            break;
+        }
+        match tokens.next() {
+            Some(MiToken::Punct(',')) if tokens.peek().is_some() => {}
+            _ => return Err("breakpoint-table body list separator was malformed".to_string()),
         }
     }
     Ok(parsed)
@@ -5014,6 +6112,116 @@ mod tests {
     }
 
     #[test]
+    fn hardware_watchpoint_results_accept_read_and_access_hardware_shapes() {
+        const HEADER: &str = concat!(
+            "hdr=[",
+            "{width=\"3\",alignment=\"-1\",col_name=\"number\",colhdr=\"Num\"},",
+            "{width=\"14\",alignment=\"-1\",col_name=\"type\",colhdr=\"Type\"},",
+            "{width=\"4\",alignment=\"-1\",col_name=\"disp\",colhdr=\"Disp\"},",
+            "{width=\"3\",alignment=\"-1\",col_name=\"enabled\",colhdr=\"Enb\"},",
+            "{width=\"18\",alignment=\"-1\",col_name=\"addr\",colhdr=\"Address\"},",
+            "{width=\"40\",alignment=\"2\",col_name=\"what\",colhdr=\"What\"}]",
+        );
+        let expression = "*((char*)0x3fcdb550)@4";
+        for (mode, result_field, breakpoint_type) in [
+            (
+                OpenOcdHardwareWatchpointMode::Read,
+                "hw-rwpt",
+                "read watchpoint",
+            ),
+            (
+                OpenOcdHardwareWatchpointMode::Access,
+                "hw-awpt",
+                "acc watchpoint",
+            ),
+        ] {
+            let insert_line =
+                format!("4^done,{result_field}={{number=\"1\",exp=\"{expression}\"}}");
+            let record = parse_record(&insert_line).unwrap();
+            let ParsedRecord::Result { variables, .. } = record else {
+                panic!("expected result record");
+            };
+            let inserted =
+                parse_hardware_watchpoint_insertion(&variables, expression, mode).unwrap();
+            assert_eq!(inserted.result_field, result_field);
+            assert_eq!(inserted.number, 1);
+            assert_eq!(inserted.expression, expression);
+
+            let table_line = format!(
+                "5^done,BreakpointTable={{nr_rows=\"1\",nr_cols=\"6\",{HEADER},body=[bkpt={{number=\"1\",type=\"{breakpoint_type}\",disp=\"keep\",enabled=\"y\",what=\"{expression}\",thread-groups=[\"i1\"],times=\"0\",original-location=\"{expression}\"}}]}}"
+            );
+            let record = parse_record(&table_line).unwrap();
+            let ParsedRecord::Result { variables, .. } = record else {
+                panic!("expected result record");
+            };
+            let table = parse_hardware_watchpoint_table(&variables, expression, mode).unwrap();
+            assert_eq!(table.reported_rows, 1);
+            assert_eq!(table.body_entries, 1);
+            assert_eq!(table.watchpoint.mode, mode);
+            assert_eq!(table.watchpoint.breakpoint_type, breakpoint_type);
+            assert_eq!(table.watchpoint.expression, expression);
+            assert_eq!(table.watchpoint.thread_groups, ["i1"]);
+            assert_eq!(table.watchpoint.hit_count, 0);
+        }
+    }
+
+    #[test]
+    fn hardware_watchpoint_results_reject_write_fallback_and_unsafe_shapes() {
+        let expression = "*((char*)0x3fcdb550)@4";
+        let wrong_insert =
+            parse_record(&format!("4^done,wpt={{number=\"1\",exp=\"{expression}\"}}")).unwrap();
+        let ParsedRecord::Result { variables, .. } = wrong_insert else {
+            panic!("expected result record");
+        };
+        assert!(
+            parse_hardware_watchpoint_insertion(
+                &variables,
+                expression,
+                OpenOcdHardwareWatchpointMode::Read,
+            )
+            .is_err()
+        );
+
+        const HEADER: &str = concat!(
+            "hdr=[",
+            "{width=\"3\",alignment=\"-1\",col_name=\"number\",colhdr=\"Num\"},",
+            "{width=\"14\",alignment=\"-1\",col_name=\"type\",colhdr=\"Type\"},",
+            "{width=\"4\",alignment=\"-1\",col_name=\"disp\",colhdr=\"Disp\"},",
+            "{width=\"3\",alignment=\"-1\",col_name=\"enabled\",colhdr=\"Enb\"},",
+            "{width=\"18\",alignment=\"-1\",col_name=\"addr\",colhdr=\"Address\"},",
+            "{width=\"40\",alignment=\"2\",col_name=\"what\",colhdr=\"What\"}]",
+        );
+        for entry in [
+            format!(
+                "number=\"1\",type=\"watchpoint\",disp=\"keep\",enabled=\"y\",what=\"{expression}\",times=\"0\",original-location=\"{expression}\""
+            ),
+            format!(
+                "number=\"1\",type=\"read watchpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x3fcdb550\",what=\"{expression}\",times=\"0\",original-location=\"{expression}\""
+            ),
+            format!(
+                "number=\"1\",type=\"read watchpoint\",disp=\"keep\",enabled=\"y\",what=\"*((char*)0x3fcdb554)@4\",times=\"0\",original-location=\"{expression}\""
+            ),
+        ] {
+            let line = format!(
+                "5^done,BreakpointTable={{nr_rows=\"1\",nr_cols=\"6\",{HEADER},body=[bkpt={{{entry}}}]}}"
+            );
+            let record = parse_record(&line).unwrap();
+            let ParsedRecord::Result { variables, .. } = record else {
+                panic!("expected result record");
+            };
+            assert!(
+                parse_hardware_watchpoint_table(
+                    &variables,
+                    expression,
+                    OpenOcdHardwareWatchpointMode::Read,
+                )
+                .is_err(),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
     fn breakpoint_delete_requires_the_exact_empty_table_shape() {
         let record = parse_record(
             "5^done,BreakpointTable={nr_rows=\"0\",nr_cols=\"6\",hdr=[{width=\"3\",alignment=\"-1\",col_name=\"number\",colhdr=\"Num\"},{width=\"14\",alignment=\"-1\",col_name=\"type\",colhdr=\"Type\"},{width=\"4\",alignment=\"-1\",col_name=\"disp\",colhdr=\"Disp\"},{width=\"3\",alignment=\"-1\",col_name=\"enabled\",colhdr=\"Enb\"},{width=\"18\",alignment=\"-1\",col_name=\"addr\",colhdr=\"Address\"},{width=\"40\",alignment=\"2\",col_name=\"what\",colhdr=\"What\"}],body=[]}",
@@ -5130,5 +6338,36 @@ mod tests {
         assert_eq!(cleanup[0].token, BREAKPOINT_CLEANUP_DELETE_TOKEN);
         assert_eq!(cleanup[1].token, BREAKPOINT_CLEANUP_LIST_TOKEN);
         assert_eq!(cleanup[2].token, BREAKPOINT_CLEANUP_DETACH_TOKEN);
+    }
+
+    #[test]
+    fn watchpoint_protocol_contract_binds_one_classified_hardware_roundtrip() {
+        let contract = watchpoint_protocol_contract(
+            Address(0x3fcd_b550),
+            4,
+            OpenOcdHardwareWatchpointMode::Access,
+        );
+        assert_eq!(contract.commands.len(), 9);
+        assert_eq!(contract.commands[0].command, VERSION_COMMAND);
+        assert_eq!(
+            contract.commands[1].command,
+            REMOTE_SELECT_COMMAND_PLACEHOLDER
+        );
+        assert_eq!(contract.commands[2].command, WATCHPOINT_LANGUAGE_COMMAND);
+        assert_eq!(
+            contract.commands[3].command,
+            "-break-watch -a *((char*)0x3fcdb550)@4"
+        );
+        assert_eq!(contract.commands[4].command, BREAKPOINT_LIST_COMMAND);
+        assert_eq!(contract.commands[5].command, BREAKPOINT_DELETE_COMMAND);
+        assert_eq!(contract.commands[6].command, BREAKPOINT_LIST_COMMAND);
+        assert_eq!(contract.commands[7].command, REMOTE_DETACH_COMMAND);
+        assert_eq!(contract.commands[8].command, EXIT_COMMAND);
+
+        let cleanup = watchpoint_failure_cleanup_contract();
+        assert_eq!(cleanup.len(), 3);
+        assert_eq!(cleanup[0].token, WATCHPOINT_CLEANUP_DELETE_TOKEN);
+        assert_eq!(cleanup[1].token, WATCHPOINT_CLEANUP_LIST_TOKEN);
+        assert_eq!(cleanup[2].token, WATCHPOINT_CLEANUP_DETACH_TOKEN);
     }
 }

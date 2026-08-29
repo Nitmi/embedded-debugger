@@ -2287,6 +2287,211 @@ fn openocd_breakpoint_rejects_zero_before_filesystem_inputs() {
 }
 
 #[test]
+fn openocd_watchpoint_plan_binds_range_mode_classification_and_read_effect() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let make_plan = |mode: &str| {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .args(["openocd", "watchpoint", "plan"])
+            .arg("--openocd-executable")
+            .arg(&openocd)
+            .arg("--gdb-executable")
+            .arg(&gdb)
+            .arg("--expected-target")
+            .arg("fake.cpu0")
+            .arg("--config")
+            .arg(&config)
+            .arg("--search")
+            .arg(directory.path())
+            .args([
+                "--address",
+                "0x3fcdb550",
+                "--length",
+                "4",
+                "--region-start",
+                "0x3fcd0000",
+                "--region-length",
+                "65536",
+                "--region-kind",
+                "ram",
+                "--mode",
+                mode,
+                "--json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Value>(&output).unwrap()
+    };
+    let first = make_plan("access");
+    let second = make_plan("access");
+    let changed = make_plan("read");
+
+    assert_eq!(first["operation"], "openocd.watchpoint.plan");
+    assert_eq!(first["data"]["operation"], "openocd.watchpoint.test");
+    assert_eq!(first["data"]["risk"], "R2_DEVICE_WRITE");
+    assert_eq!(
+        first["data"]["watchpoint_policy"]["requested_address"],
+        "0x3FCDB550"
+    );
+    assert_eq!(
+        first["data"]["watchpoint_policy"]["requested_length_bytes"],
+        4
+    );
+    assert_eq!(first["data"]["watchpoint_policy"]["mode"], "access");
+    assert_eq!(
+        first["data"]["watchpoint_policy"]["expression"],
+        "*((char*)0x3fcdb550)@4"
+    );
+    assert_eq!(
+        first["data"]["protocol"]["commands"][2]["command"],
+        "-gdb-set language c"
+    );
+    assert_eq!(
+        first["data"]["protocol"]["commands"][3]["command"],
+        "-break-watch -a *((char*)0x3fcdb550)@4"
+    );
+    assert_eq!(
+        first["data"]["target_state_policy"]["normal_restoration_command"],
+        "8-target-detach"
+    );
+    assert_eq!(
+        first["data"]["effects"]["expression_evaluation_memory_read_possible"],
+        true
+    );
+    assert_eq!(
+        first["data"]["watchpoint_policy"]["write_only_mode_supported"],
+        false
+    );
+    assert_eq!(
+        first["data"]["watchpoint_policy"]["watchpoint_hit_requested"],
+        false
+    );
+    assert_eq!(
+        first["data"]["watchpoint_policy"]["failure_cleanup_commands"][0]["token"],
+        10
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["target_ram_semantics_bound"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["physical_comparator_allocation_bound"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirm_digest"],
+        second["data"]["confirm_digest"]
+    );
+    assert_ne!(
+        first["data"]["confirm_digest"],
+        changed["data"]["confirm_digest"]
+    );
+}
+
+#[test]
+fn openocd_watchpoint_test_rejects_stale_digest_before_tcl_execution() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args(["openocd", "watchpoint", "test"])
+        .arg("--openocd-executable")
+        .arg(&openocd)
+        .arg("--gdb-executable")
+        .arg(&gdb)
+        .arg("--expected-target")
+        .arg("fake.cpu0")
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "--address",
+            "0x3fcdb550",
+            "--length",
+            "4",
+            "--region-start",
+            "0x3fcd0000",
+            "--region-length",
+            "65536",
+            "--region-kind",
+            "ram",
+            "--mode",
+            "access",
+            "--confirm",
+        ])
+        .arg("00".repeat(32))
+        .arg("--json")
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.watchpoint.test");
+    assert_eq!(result["error"]["code"], "CONFIRMATION_MISMATCH");
+    assert_eq!(
+        result["error"]["suggested_actions"][0]["action"],
+        "review_openocd_hardware_watchpoint_plan"
+    );
+    assert_eq!(result["error"]["details"]["hardware_access_started"], false);
+    assert!(result["error"]["details"]["openocd_readiness"].is_null());
+}
+
+#[test]
+fn openocd_watchpoint_rejects_unsafe_range_before_filesystem_inputs() {
+    for (length, region_kind) in [("3", "ram"), ("4", "nvm")] {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .args([
+                "openocd",
+                "watchpoint",
+                "plan",
+                "--openocd-executable",
+                "deliberately-missing-openocd",
+                "--gdb-executable",
+                "deliberately-missing-gdb",
+                "--expected-target",
+                "fake.cpu0",
+                "--config",
+                "deliberately-missing.cfg",
+                "--address",
+                "0x3fcdb550",
+                "--length",
+                length,
+                "--region-start",
+                "0x3fcd0000",
+                "--region-length",
+                "65536",
+                "--region-kind",
+                region_kind,
+                "--mode",
+                "access",
+                "--json",
+            ])
+            .assert()
+            .code(7)
+            .get_output()
+            .stdout
+            .clone();
+        let result: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(result["operation"], "openocd.watchpoint.plan");
+        assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    }
+}
+
+#[test]
 fn openocd_stack_plan_binds_limit_protocol_unwind_risk_and_restoration() {
     let directory = tempdir().unwrap();
     let openocd = write_fake_openocd(directory.path());

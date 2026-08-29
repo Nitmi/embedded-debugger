@@ -558,6 +558,91 @@ the empty GDB table into physical comparator readback, qualify CPU1 or
 comparator capacity, authorize hit execution or persistent breakpoints, or
 provide standing authority for a later physical run.
 
+## Confirmed OpenOCD temporary hardware-watchpoint roundtrip
+
+`openocd watchpoint plan` reuses the exact combined OpenOCD/GDB session inputs
+and requires `--address`, `--length`, `--region-start`, `--region-length`,
+`--region-kind ram`, and `--mode read|access`. The address must be nonzero, the
+length must be exactly 1, 2, 4, or 8 bytes, the address must be naturally
+aligned to that length, and the whole non-overflowing request must fit inside
+the nonempty declared RAM region. NVM is rejected. These checks complete before
+executable, profile, configuration, or search-path inspection.
+
+The CLI does not accept an expression. It generates exactly
+`*((char*)0x<lowercase-address>)@<decimal-length>` after fixing GDB's language
+to C. Expression evaluation while the watchpoint is created may read the
+declared range. Region containment is verified and digest-bound, but RAM
+semantics are user-confirmed rather than independently checked. A wrong region
+declaration can therefore turn that evaluation into a side-effectful access.
+
+Only GDB `rwatch` and `awatch` are exposed as `read` and `access`. GDB defines
+those operations as hardware-only. Ordinary write watchpoints are omitted
+because GDB may fall back to software single-stepping for `watch`. Symbols,
+user expressions, conditions, commands, requested slots, persistent
+watchpoints, hit/continue behavior, and arbitrary GDB input have no surface.
+
+The independent `R2_DEVICE_WRITE` digest binds the exact numeric range,
+declared RAM region, mode, generated expression, C-language selection, strict
+insertion and classification policies, delete/empty-table proof, fixed success
+and failure protocols, tool/config/profile identities, expected current target,
+deadlines, effects, restoration, and confirmation boundary. It does not bind
+runtime adapter identity, dynamic port, actual RAM semantics, target-supported
+watchpoint widths, comparator capacity, physical allocation, or physical
+cleanup.
+
+A confirmed test requires the selected target to start `running` and permits
+this success sequence only:
+
+```text
+1-gdb-version                                      -> 1^done
+2-target-select remote 127.0.0.1:<dynamic-port>   -> 2^connected
+3-gdb-set language c                               -> 3^done
+4-break-watch -r|-a <generated-expression>         -> 4^done
+5-break-list                                       -> 5^done
+6-break-delete 1                                   -> 6^done
+7-break-list                                       -> 7^done
+8-target-detach                                    -> 8^done
+9-gdb-exit                                         -> 9^exit
+```
+
+Insertion must return exactly one `hw-rwpt` tuple for `read` or `hw-awpt` tuple
+for `access`, containing only `number="1"` and the exact generated `exp`.
+The first list must then return one row in the canonical six-column
+`BreakpointTable`. That row must have number 1, `disp="keep"`,
+`enabled="y"`, `times="0"`, exact `what` and `original-location`, and type
+`read watchpoint` or `acc watchpoint` matching the mode. A bounded
+`thread-groups` list is optional. Address, pending, condition, command, script,
+locations, unknown, malformed, duplicate, extra, write/software, or mismatched
+data is `PROTOCOL_ERROR`.
+
+Deletion is not complete from `6^done` alone. Token 7 must return exactly zero
+rows, six canonical columns, and an empty body. Success then requires final
+selected-target `running`, using the existing one fixed Tcl resume fallback
+only after hardware classification and the empty GDB table are proven. The
+target is never intentionally continued while the watchpoint exists, and no hit
+is requested.
+
+After an insertion attempt fails before normal detach, the MI owner attempts
+token-10 delete, token-11 exact empty-table verification, and token-12 detach,
+then bounded GDB exit and OpenOCD cleanup. A connection or language-selection
+failure attempts detach without issuing an unnecessary delete. Every GDB
+failure records a point-in-time target observation and sends no additional Tcl
+resume because physical cleanup is unproven. GDB detach, GDB exit, or configured
+detach handlers may still resume the target. Manual recovery may be required,
+and failed physical tests are never retried automatically.
+
+The insertion tuple and listed type prove GDB hardware classification, not that
+a physical comparator was allocated. GDB can defer resource-limit failure until
+the inferior resumes, which this qualification deliberately does not do. An
+empty table proves GDB bookkeeping cleanup, not physical comparator readback.
+Complete success therefore enables only a temporary read/access classification
+and cleanup roundtrip. Write-only or persistent watchpoints, hit execution,
+breakpoints, general execution control, symbol loading, explicit register or
+general memory commands, memory writes, stack reads, flash, monitor input, and
+arbitrary MI/Tcl remain unavailable. Controlled parser, digest, cleanup,
+target-state, two-process, and CLI regressions pass. No physical watchpoint
+acceptance is inherited from those tests.
+
 ## Confirmed OpenOCD target state roundtrip
 
 `openocd target plan` accepts one exact OpenOCD executable, at least one

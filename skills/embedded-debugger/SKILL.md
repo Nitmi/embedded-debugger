@@ -1,6 +1,6 @@
 ---
 name: embedded-debugger
-description: Use embedded-debugger for structured embedded flashing and debugging through probe-rs or Replay, plus confirmed OpenOCD/GDB lifecycles and temporary hardware-breakpoint qualification. Trigger when work needs exact probe selection, bounded target control, cleanup evidence, or verified debug-tool integration.
+description: Use embedded-debugger for structured embedded flashing and debugging through probe-rs or Replay, plus confirmed OpenOCD/GDB lifecycles and temporary hardware-breakpoint/watchpoint qualification. Trigger when work needs exact probe selection, bounded target control, cleanup evidence, or verified debug-tool integration.
 ---
 
 # Embedded Debugger
@@ -213,6 +213,34 @@ profile, and configuration. It does not independently verify physical
 comparator cleanup or capacity, qualify CPU1, or authorize a persistent
 breakpoint, breakpoint-hit execution, watchpoint, symbol loading, or general
 GDB control. It is not standing authorization for another physical run.
+
+For a temporary OpenOCD hardware-watchpoint qualification, use only
+`openocd watchpoint plan/test`. Require an exact nonzero `--address`, exact
+`--length 1|2|4|8`, containing `--region-start`/`--region-length`, explicit
+`--region-kind ram`, and `--mode read|access`, plus identical exact session
+inputs. The address must be naturally aligned and the whole range contained in
+the declared RAM region. Never infer RAM from an address; NVM, MMIO, unknown
+regions, symbols, user expressions, and write-only mode are not authorized.
+
+Surface before confirmation that the tool fixes GDB to C and evaluates
+`*((char*)0x<address>)@<length>` during creation. That evaluation may read the
+declared range, and a wrong RAM declaration may make it side effectful. Only
+GDB `rwatch` and `awatch` are used because they are hardware-only; normal
+write-only watchpoints may fall back to software stepping. Require a fresh exact
+watchpoint digest immediately before every physical `test`; no breakpoint,
+memory, session, or historical acceptance authorizes it.
+
+Success requires the exact `hw-rwpt`/`hw-awpt` insertion tuple, one matching
+`read watchpoint`/`acc watchpoint` table row with number 1 and zero hits,
+deletion, the exact empty six-column table, final running, and full process
+cleanup. The target is not intentionally continued while installed, so do not
+claim a hit, physical comparator allocation, target width/capacity support, or
+physical cleanup. GDB can defer resource failure until resume. After insertion
+failure the tool attempts fixed delete/list/detach, records point-in-time target
+state, and sends no additional Tcl resume; detach/exit or configured handlers
+may still resume the target. Never retry automatically, and perform manual
+recovery only with fresh authority. Controlled tests are not physical target
+acceptance.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

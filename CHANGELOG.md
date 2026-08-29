@@ -158,6 +158,27 @@ All notable changes to this project will be documented in this file.
   consecutive UART heartbeats after retained boundary fragments. Physical
   comparator state/capacity, CPU1, hit execution, and persistent breakpoints
   remain unqualified.
+- Confirmed `openocd watchpoint plan/test` for one temporary hardware-only read
+  or access watchpoint over an exact, naturally aligned 1/2/4/8-byte range in a
+  user-declared RAM region. Invalid, overflowing, cross-region, NVM, and
+  misaligned inputs fail before tool inspection. The independent R2 digest
+  binds the range, RAM declaration, mode, fixed C artificial-array expression,
+  possible expression-evaluation read, nine-command MI protocol, strict
+  insertion/classification parsers, delete/empty-table proof, identities,
+  effects, deadlines, and restoration. Only GDB `rwatch`/`awatch` are exposed;
+  write-only watchpoints are omitted because GDB may implement them with
+  software stepping. Insertion must return exact `hw-rwpt`/`hw-awpt` metadata,
+  and the first canonical table must contain exactly one matching
+  `read watchpoint`/`acc watchpoint` row with zero hits. The target is never
+  intentionally continued while the watchpoint exists. Failures after insertion
+  attempt fixed delete/list/detach cleanup, record point-in-time target state,
+  and issue no additional Tcl resume. GDB hardware classification does not prove
+  comparator allocation; width/capacity failure may be deferred until resume.
+  Empty-table cleanup likewise does not independently read physical comparator
+  state. Runtime adapter identity, RAM semantics, target width/capacity,
+  physical allocation/cleanup, hits, CPU1, and any later physical plan remain
+  unqualified. Controlled parser, digest, success, failure-cleanup, two-process,
+  and CLI regressions pass; no physical watchpoint execution has occurred.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current
