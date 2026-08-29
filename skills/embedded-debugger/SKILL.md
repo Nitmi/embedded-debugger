@@ -204,9 +204,15 @@ fixed delete/list/detach. Every GDB failure records a point-in-time target state
 but sends no additional Tcl resume. GDB detach, GDB exit, or configured detach
 handlers may still resume the target. Treat the outcome as potentially
 indeterminate, perform explicit recovery only with fresh authority, and never
-retry automatically. This workflow has controlled host coverage but no
-physical target acceptance yet; it does not authorize a persistent breakpoint,
-breakpoint-hit execution, watchpoint, symbol loading, or general GDB control.
+retry automatically. ESP32-S3 CPU0 has passed one exact, independently
+confirmed, non-retried run at `0x420129E4`: insertion metadata matched, deletion
+returned an exact empty GDB table, final running was proven, both processes and
+ports cleaned up, and UART recovered after retained boundary fragments. Treat
+that acceptance as exact to digest `f388b4e3...a8802`, address, CPU0, tools,
+profile, and configuration. It does not independently verify physical
+comparator cleanup or capacity, qualify CPU1, or authorize a persistent
+breakpoint, breakpoint-hit execution, watchpoint, symbol loading, or general
+GDB control. It is not standing authorization for another physical run.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

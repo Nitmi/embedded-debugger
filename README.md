@@ -905,8 +905,11 @@ ELF-annotation contract has also passed one exact-plan ESP32-S3 CPU0 run: one
 top frame resolved to eight bounded DWARF annotations, one caller remained
 unresolved, and cleanup plus UART recovery completed. A separate temporary
 OpenOCD hardware-breakpoint roundtrip now passes strict parser, digest,
-two-process success, and failure-cleanup regressions; it has not yet received
-physical target acceptance. GDB-loaded symbols,
+two-process success, and failure-cleanup regressions. One independently
+confirmed, non-retried ESP32-S3 CPU0 run at `0x420129E4` also proved the exact
+hardware insertion, deletion, empty GDB table, final running state, graceful
+cleanup, reusable ports, and UART recovery. Physical comparator state and
+capacity remain independently unverified. GDB-loaded symbols,
 trusted runtime symbolization, argument/local/value
 inspection, general ELF/HEX loading, RTT, memory writes, Generic/MMIO or
 undeclared-region reads, register writes, software/symbolic/conditional

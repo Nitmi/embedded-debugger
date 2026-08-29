@@ -151,7 +151,13 @@ All notable changes to this project will be documented in this file.
   never retried automatically. Runtime adapter identity, comparator capacity,
   and physical comparator cleanup remain unbound or independently unverified.
   Controlled parser, digest, success, failure-cleanup, two-process, and CLI
-  regressions pass; physical target acceptance is still pending.
+  regressions pass. A separately confirmed, non-retried ESP32-S3 CPU0 run at
+  `0x420129E4` installed the exact zero-hit hardware breakpoint, deleted it,
+  proved the canonical GDB table empty, restored final running, gracefully
+  cleaned both process trees, proved both ports reusable, and recovered eight
+  consecutive UART heartbeats after retained boundary fragments. Physical
+  comparator state/capacity, CPU1, hit execution, and persistent breakpoints
+  remain unqualified.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current

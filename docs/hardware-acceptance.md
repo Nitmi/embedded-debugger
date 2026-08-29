@@ -1100,3 +1100,55 @@ authorization for a later physical execution.
   not standing authorization. Any physical qualification requires a fresh
   host-only plan, independent exact-digest confirmation, one non-retried run,
   cleanup review, and external liveness checks.
+
+## OpenOCD temporary hardware-breakpoint physical acceptance (2026-08-29)
+
+- The user independently returned exact digest
+  `f388b4e39504cd18387d6d1367ea12019d17e05796785b703e7c4fc6731a8802`.
+  The confirmed physical command then ran exactly once against
+  `esp32s3.cpu0` at `0x420129E4`, exited 0, and was not retried.
+- Before execution, baud, Windows PnP, and probe-rs agreed on COM3 and the
+  accessible EspJtag identity `303A:1001 / E0:72:A1:D4:1F:DC`. The
+  zero-transmit 115200-baud baseline kept DTR/RTS false and returned complete
+  consecutive heartbeats `49440..49444`.
+- OpenOCD became ready in 217 ms on dynamic loopback Tcl/GDB ports 13769/13770.
+  It logged the same adapter serial, examined CPU0, and proved the selected
+  target initially running. CPU1 examination again failed with
+  `OCD_ID=00000000` and remains unqualified. Confirmed attach handlers also
+  probed flash mappings and halted CPU0; those effects remain part of R2.
+- GDB returned the fixed result classes
+  `done / connected / done / done / done / done / exit`. It installed exactly
+  breakpoint 1 as enabled `hw breakpoint`, `disp=keep`, address `0x420129E4`,
+  and hit count 0 in 13 ms. Delete returned `done` in 12 ms. The subsequent
+  table contained exactly the canonical six columns, zero rows, and an empty
+  body. No continue or breakpoint-hit execution was requested.
+- Detach left CPU0 observed halted. Because the successful delete and empty
+  GDB table were proven, the one fixed resume fallback was allowed and proved
+  final `esp32s3.cpu0=running` in 4 ms. GDB and OpenOCD exited 0 gracefully in
+  7/12 ms; neither process tree was force-killed and both cleanup reports were
+  complete.
+- The first post-run monitor retained 96 bytes of fragmented boundary output,
+  including counter fragment `49508`; the next monitor returned complete
+  heartbeats `49539..49540` with residual fragments. A final eight-second
+  zero-transmit stability monitor returned eight complete consecutive
+  heartbeats `49574..49581`. Every monitor kept DTR/RTS false. Serial, PnP, and
+  probe enumeration identities were unchanged and the probe remained
+  accessible.
+- No related OpenOCD or GDB process remained, neither dynamic port had a TCP
+  row, and independent bind-and-close checks proved ports 13769 and 13770
+  reusable. Evidence is retained under
+  `target/hardware-acceptance/2026-08-29-openocd-hardware-breakpoint`. The test
+  JSON SHA-256 is
+  `55c7f0a714c5c0028acc0efb29417577499c1cb6c3b85266737c13b82acf8c42`,
+  complete stderr SHA-256 is
+  `fc6a924a51ae5aede86ad1174afa44ce44ebadd8a4fc4d5df014bdb4c16b9996`,
+  and acceptance-summary SHA-256 is
+  `0d098b848a80bebe0d66ea20a9eaf41c6b8e59bafbca7331b186d42da4407cff`.
+
+This accepts only the exact temporary hardware-breakpoint insert/delete/table
+roundtrip above. The empty GDB table is still not an independent physical
+comparator readback; runtime adapter identity, comparator capacity, and
+physical comparator cleanup remain unbound or independently unverified. CPU1,
+persistent/software/symbolic/conditional breakpoints, breakpoint-hit
+execution, watchpoints, and broader GDB control remain unqualified. This
+evidence is not standing authorization for another physical execution.

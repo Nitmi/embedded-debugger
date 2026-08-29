@@ -546,6 +546,18 @@ flash, monitor input, and arbitrary MI/Tcl remain unavailable. Controlled
 protocol, parser, digest, cleanup, target-state, and two-process regressions
 pass. No physical target acceptance is inherited from those tests.
 
+A separately confirmed, non-retried ESP32-S3 CPU0 physical run has now passed
+for digest `f388b4e3...a8802` and exact address `0x420129E4`. GDB reported one
+enabled hardware breakpoint with zero hits, accepted its deletion, and returned
+the exact zero-row six-column table before detach. The fixed fallback then
+proved final running, both managed processes exited gracefully, both dynamic
+ports were reusable, and zero-transmit UART monitoring recovered from boundary
+fragments to eight consecutive heartbeats. This acceptance remains exact to
+that digest, address, CPU0, tools, profile, and configuration. It does not turn
+the empty GDB table into physical comparator readback, qualify CPU1 or
+comparator capacity, authorize hit execution or persistent breakpoints, or
+provide standing authority for a later physical run.
+
 ## Confirmed OpenOCD target state roundtrip
 
 `openocd target plan` accepts one exact OpenOCD executable, at least one
