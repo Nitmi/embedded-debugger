@@ -459,24 +459,25 @@ completeness and implicit unwind-read addresses also remain unproven. This
 feature adds no target command or capability and retains the base R2/no-retry
 policy.
 
-One exact `esp32s3.cpu0`, `--max-frames 8` annotated plan has passed a
-separately confirmed, non-retried physical qualification. It returned two GDB
-frames, resolved the exact top address into eight bounded DWARF annotations,
-marked that inline result truncated, and retained the adjusted caller as
-structured unresolved evidence. The fixed fallback proved final running,
-managed-process cleanup completed, both dynamic ports were reusable, and UART
-heartbeats recovered. This acceptance is exact to that ELF SHA-256, target,
-tools, profile, configuration, limit, and policy. It does not change the
-mandatory runtime-identity, unwind-address, physical-completeness, CPU1,
-external-data, source-read, or disabled-capability statements above.
+The earlier eight-annotation, nonzero-sized-only policy passed one exact
+`esp32s3.cpu0`, `--max-frames 8` qualification but returned a truncated top
+frame and unresolved caller. That result remains historical evidence only; its
+outer digest is stale for the current policy.
 
-The accepted physical result above used the earlier eight-annotation,
-nonzero-sized-only fallback policy. The current policy has separate host-only
-evidence against the same ELF: the top address yields 12 annotations without
-truncation, and adjusted caller `0x40378694` selects `Reset` from inferred range
-`[0x40378638, 0x40378698)`. This does not retroactively extend the physical
-acceptance. The old outer digest is stale, and the revised policy requires a
-new independently confirmed plan before another single physical execution.
+The current policy then passed a separate exact, independently confirmed,
+non-retried physical qualification. GDB returned level zero `0x420129E4` and
+level one `0x40378695`. The in-memory resolver returned 12 top-frame DWARF
+annotations through `main` with no truncation and adjusted the caller to
+`0x40378694`, where it selected `Reset` from inferred range
+`[0x40378638, 0x40378698)` with declared size zero and inferred size 96. The
+fixed fallback proved final CPU0 running, both managed processes exited
+gracefully, dynamic ports 14947/14949 were reusable, and UART heartbeats
+recovered. This acceptance is exact to outer digest `b85c65e2...b4ed2`, ELF
+SHA-256, target, tools, profile, configuration, and frame limit. It does not
+change the mandatory runtime-identity, unwind-address, physical-completeness,
+CPU1, external-data, source-read, or disabled-capability statements above, and
+does not authorize a later physical execution without a fresh plan review and
+confirmation.
 
 ## Confirmed OpenOCD target state roundtrip
 

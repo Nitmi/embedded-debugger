@@ -128,9 +128,13 @@ All notable changes to this project will be documented in this file.
   range only to the next distinct text symbol or executable-section end in the
   same section, with structured range evidence and explicit-size symbols taking
   priority. Against the same ELF, the current parser returns all 12 top-frame
-  annotations and inferred caller range `[0x40378638, 0x40378698)`. This revised
-  policy has not inherited the earlier physical acceptance and requires a new
-  confirmation digest.
+  annotations and inferred caller range `[0x40378638, 0x40378698)`. A new
+  independently confirmed, non-retried ESP32-S3 CPU0 run then returned those 12
+  annotations through `main`, resolved the caller as inferred `Reset` with
+  structured 96-byte range evidence, restored running, gracefully cleaned both
+  processes, proved both ports reusable, and recovered UART heartbeats. Runtime
+  ELF identity, physical call-stack completeness, CPU1, and implicit unwind
+  addresses remain unqualified.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current

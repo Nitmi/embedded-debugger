@@ -999,7 +999,7 @@ identity, resolution of every frame, a complete physical call stack, bounded
 implicit unwind reads, source/external debug loading, CPU1, another ELF/target/
 limit/tool plan, or any broader debugging capability.
 
-### Later host-only resolver refinement (not physically accepted)
+### Host-only resolver refinement before the second physical acceptance
 
 After this acceptance, read-only ELF inspection proved that `Reset` is a
 zero-sized `STT_FUNC` at `0x40378638` in executable section `.rwtext`; the next
@@ -1013,6 +1013,71 @@ annotations without truncation.
 The new policy permits only nonempty same-executable-section ranges ending at
 the next distinct text symbol or section end, caps inferred spans at 64 KiB,
 prefers explicit-sized symbols, and binds that policy into a new outer digest.
-These are host-only parser results. Digest `661893f5...23b6c` remains the exact
-historical acceptance above but is stale for the revised policy; no new target
-operation has run and no physical acceptance is inherited.
+At this checkpoint these were host-only parser results. Digest
+`661893f5...23b6c` remained the exact historical acceptance above but was stale
+for the revised policy; no physical acceptance was inherited from it.
+
+## Confirmed bounded zero-sized-symbol annotation acceptance (2026-08-29)
+
+- The user independently confirmed exact outer digest
+  `b85c65e2d3777f3730edf28c8d0fbf9cf2be782ac7121f1b429c638c2aeb4ed2`.
+  The base stack digest remained
+  `f03172e03098e8da27210b5b4d97a53fa6178884c84d09d8f7557ebc13cbf5ae`.
+  The plan bound `esp32s3.cpu0`, `--max-frames 8`, the unchanged fixed
+  five-command GDB protocol, exact tools/profile/configuration, and the same
+  2,221,600-byte ELF with SHA-256
+  `676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`.
+- Immediately before execution, commit
+  `28ba1a8fcfdb3e11ca0e43471219cfdcd2ae92da` had a clean worktree and all six
+  checked binary/configuration/ELF hashes matched. `baud 0.1.0`, Windows PnP,
+  and probe-rs found only COM3 and accessible EspJtag identity
+  `303A:1001 / E0:72:A1:D4:1F:DC`. No related process was running. The
+  zero-transmit 115200-baud baseline kept DTR/RTS false, received 205 bytes,
+  and contained consecutive heartbeats `3192..3196`.
+- The confirmed physical command ran exactly once and exited 0; no automatic
+  retry occurred. OpenOCD became ready in 108 ms on dynamic loopback Tcl/GDB
+  ports 14947/14949, logged the exact adapter serial, examined CPU0, and proved
+  selected CPU0 initially running. CPU1 examination again failed with
+  `OCD_ID=00000000` and remains unqualified.
+- GDB completed the fixed result classes
+  `done / connected / done / done / exit`. It returned exactly two frames:
+  level zero `0x420129E4` and level one `0x40378695`; neither GDB frame supplied
+  a usable function name and the frame limit was not reached.
+- Offline lookup retained exact top address `0x420129E4` and returned 12 DWARF
+  annotations, beginning with `core::ptr::read_volatile::<u32>` and ending with
+  `main`. `inline_annotations_truncated=false`. It adjusted the caller to
+  `0x40378694` and returned `resolution=inferred_symbol_table`, function
+  `Reset`, section index 1, range `[0x40378638, 0x40378698)`, declared size 0,
+  inferred size 96, and `size_inferred=true`. Both frames were inside loadable
+  segments; neither requested external debug data, reported a lookup error, or
+  rejected metadata. The report recorded 2 resolved / 0 unresolved frames.
+- Detach left CPU0 observed halted. The one fixed resume fallback proved final
+  `esp32s3.cpu0=running` in 4 ms. GDB exited 0 gracefully in 16 ms and OpenOCD
+  exited 0 gracefully in 39 ms; neither process tree was force-killed and both
+  cleanup reports were complete. OpenOCD attach handlers still emitted reset,
+  flash-mapping, and memory-map behavior, while the wrapper issued no explicit
+  reset, flash, register/memory, breakpoint, monitor, symbol-loading, or
+  arbitrary command.
+- The post-run zero-transmit UART monitor kept DTR/RTS false, received 190
+  bytes, observed one boundary fragment, then complete consecutive heartbeats
+  `3305..3308`. Serial/PnP identity was unchanged and probe-rs still found the
+  exact EspJtag. No related process remained. Seven unowned `TIME_WAIT` rows
+  were visible, and independent bind-and-close checks proved both exact dynamic
+  ports reusable.
+- Evidence is retained under
+  `target/hardware-acceptance/2026-08-29-openocd-annotated-stack-v2`. The test
+  JSON SHA-256 is
+  `22cc005ab560741c734cc157db5f3f7641639fe4d84543a5be0679acbf2c1f51`,
+  complete stderr SHA-256 is
+  `5b6eaf42808874e96274468e40969615e5f2e1c13ef17f5a91a6f407e7708d4e`,
+  and acceptance-summary SHA-256 is
+  `f0c98c4b9dd802a25b94c6345d54376f9a3b9e5f14cf56fa315d18b9115d92a7`.
+
+This accepts the current bounded zero-sized-symbol annotation policy only for
+the exact digest, ELF, CPU0, frame limit, tools, profile, and configuration
+above. `runtime_firmware_identity_verified=false`,
+`runtime_firmware_identity_bound=false`, physical call-stack completeness
+false, and implicit unwind-address binding false remain mandatory. CPU1,
+another target/ELF/limit/tool plan, external/source debug loading, and every
+broader debugging capability remain unaccepted. This evidence is not standing
+authorization for a later physical execution.

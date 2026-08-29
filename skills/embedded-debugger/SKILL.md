@@ -171,21 +171,19 @@ target runs it. Never claim physical call-stack completeness, and retain the
 same R2 effects, unbound unwind-read warning, disabled capabilities, and
 no-automatic-retry rule.
 
-ESP32-S3 CPU0 has passed one exact annotated acceptance with `--max-frames 8`
-and the bound heartbeat ELF. The top frame resolved to eight bounded DWARF
-annotations and reported truncation; the adjusted caller remained unresolved.
-The fixed fallback restored running, both managed processes cleaned up, both
-ports were reusable, and UART recovered. Treat this as acceptance of partial
-offline annotation only for that exact ELF, target, limit, tools, profile, and
-configuration. Do not infer complete resolution, current target/ELF equality,
-CPU1 support, or broader symbol correctness.
-
-That physical acceptance used the earlier eight-annotation,
-nonzero-sized-only fallback policy. The current policy is host-validated against
-the same ELF to return 12 top-frame annotations and infer `Reset` for adjusted
-caller `0x40378694`, but the old outer digest is stale. Require a newly generated
-plan and independent exact digest confirmation before one physical run; never
-reuse the prior acceptance digest.
+The earlier eight-annotation, nonzero-sized-only policy passed one ESP32-S3 CPU0
+run but produced partial annotation; its digest is stale. The current policy has
+passed a separate exact, independently confirmed, non-retried acceptance with
+`--max-frames 8` and the same bound heartbeat ELF. It returned 12 untruncated
+top-frame annotations through `main` and inferred `Reset` for adjusted caller
+`0x40378694` over `[0x40378638, 0x40378698)`. The fixed fallback restored CPU0
+running, both managed processes cleaned up, both ports were reusable, and UART
+recovered. Treat this as acceptance only for digest `b85c65e2...b4ed2`, that
+ELF, CPU0, limit, tools, profile, and configuration. Do not infer current
+target/ELF equality, physical call-stack completeness, bounded unwind reads,
+CPU1 support, or broader symbol correctness. Acceptance evidence is not
+standing authorization: require a fresh plan review and exact confirmation for
+every later physical execution, and never retry automatically.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

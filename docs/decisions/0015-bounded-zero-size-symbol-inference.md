@@ -66,6 +66,17 @@ a small fixed bound.
   `[0x40378638, 0x40378698)`. It does not prove runtime ELF identity or extend
   the earlier target acceptance.
 
+## Validation
+
+After the host-only checkpoint, the user independently confirmed outer digest
+`b85c65e2d3777f3730edf28c8d0fbf9cf2be782ac7121f1b429c638c2aeb4ed2`.
+One non-retried ESP32-S3 CPU0 execution returned 12 untruncated top-frame DWARF
+annotations through `main` and inferred `Reset` for adjusted caller
+`0x40378694` with exact range `[0x40378638, 0x40378698)`. Fixed restoration
+proved CPU0 running, managed cleanup completed, dynamic ports were reusable,
+and UART heartbeats recovered. Runtime ELF identity, CPU1, implicit unwind
+addresses, and physical call-stack completeness remain unqualified.
+
 ## References
 
 - [ADR-0014: Bind an ELF for offline stack annotation](0014-offline-elf-stack-annotations.md)

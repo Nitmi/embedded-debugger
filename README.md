@@ -354,24 +354,25 @@ connected target is running those bytes; reports therefore keep
 unbound unwind-read risk, R2 classification, no-retry rule, and all disabled
 debug capabilities remain unchanged.
 
-This annotated contract has passed one separately confirmed, non-retried
-ESP32-S3 CPU0 physical run with `--max-frames 8` and an exact 2,221,600-byte
-Xtensa ELF. The top frame at `0x420129FF` resolved to eight bounded DWARF inline
-annotations and correctly reported truncation; the adjusted caller address
-`0x40378694` remained structured `unresolved`. The fixed fallback restored CPU0
-to running, both managed processes exited gracefully, the dynamic ports were
-reusable, and zero-transmit UART heartbeats recovered. This qualifies partial
-offline annotation for only that exact plan. It still does not prove that the
-current target ran the bound ELF, resolve every frame, qualify CPU1, or prove a
-complete physical call stack.
+The earlier eight-annotation, nonzero-sized-only policy passed one separately
+confirmed ESP32-S3 CPU0 run but produced partial annotation: eight truncated
+top-frame entries and one unresolved caller. Its outer digest is historical and
+stale for the current policy.
 
-That physical run predates the current 16-annotation and bounded zero-sized
-symbol policy. Host-only validation against the same ELF now returns all 12
-top-frame annotations without truncation and resolves adjusted caller
-`0x40378694` as inferred symbol `Reset` over
-`[0x40378638, 0x40378698)`. This is parser evidence only: the prior digest is
-stale for the new policy, and no physical acceptance is claimed until a new
-plan is independently confirmed and run once.
+The current policy has now passed its own separately confirmed, non-retried
+ESP32-S3 CPU0 run with `--max-frames 8` and the exact 2,221,600-byte Xtensa ELF.
+GDB returned level zero `0x420129E4` and level one `0x40378695`. Offline lookup
+returned all 12 top-frame DWARF annotations through `main` without truncation,
+then adjusted the caller to `0x40378694` and resolved it as
+`inferred_symbol_table / Reset` with evidence range
+`[0x40378638, 0x40378698)`, declared size zero, and inferred size 96. The single
+fixed fallback restored CPU0 running; GDB and OpenOCD exited gracefully; both
+dynamic ports were reusable; and zero-transmit UART heartbeats recovered. This
+acceptance remains exact to digest `b85c65e2...b4ed2`, ELF, CPU0, frame limit,
+tools, profile, and configuration. It does not prove runtime target/ELF
+identity, physical stack completeness, bounded implicit unwind addresses, CPU1,
+or any broader debugging capability, and it is not standing authorization for
+a future physical execution.
 
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
