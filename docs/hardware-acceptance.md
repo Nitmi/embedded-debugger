@@ -1152,3 +1152,59 @@ physical comparator cleanup remain unbound or independently unverified. CPU1,
 persistent/software/symbolic/conditional breakpoints, breakpoint-hit
 execution, watchpoints, and broader GDB control remain unqualified. This
 evidence is not standing authorization for another physical execution.
+
+## Host-only OpenOCD temporary hardware-watchpoint checkpoint (2026-08-29)
+
+- `openocd watchpoint plan/test` is implemented for one exact naturally
+  aligned numeric RAM range. It accepts only 1/2/4/8-byte `read` and `access`
+  modes, mapped to hardware-only GDB `rwatch` and `awatch`; write-only
+  watchpoints are excluded because GDB may silently use software stepping.
+- The fixed successful MI protocol has nine commands: GDB version, remote
+  connection, C language selection, watchpoint insertion, strict one-row
+  breakpoint-table classification, deletion, strict empty-table proof,
+  detach, and exit. It never continues the target or waits for a hit while the
+  watchpoint is installed. Expression evaluation may read the declared RAM.
+  The empty table is protocol evidence only and does not independently prove
+  physical comparator allocation or cleanup.
+- Strict parsing accepts only exact `hw-rwpt`/`read watchpoint` or
+  `hw-awpt`/`acc watchpoint` shapes for number 1, enabled, keep, hit count 0,
+  and the exact expression. Software/write/pending/conditional/multi-location
+  or otherwise expanded records are rejected. Failure cleanup is bounded and
+  never adds a Tcl resume after a GDB failure, although GDB detach/exit and
+  OpenOCD handlers may still resume the target.
+- The implementation commit is
+  `06a96d03d0bc5133e03d8d1991a02287b78b429a`; its rebuilt Windows binary is
+  32,252,416 bytes with SHA-256
+  `237c7a118576f8055ac11846c2e5c7b13276d654ef1be6c07e63ac8ca4ae33e3`.
+  Gates passed with 214 library tests, 78 CLI tests, rustfmt, strict Clippy,
+  `rustdoc -D warnings`, a 68-file Cargo package, the official Skill validator,
+  and `git diff --check`.
+- Two host-only plans bind `esp32s3.cpu0`, access mode, address `0x3FCDB550`,
+  length 4, and declared RAM `[0x3FC88000, 0x3FCF0000)`. The exact expression
+  is `*((char*)0x3fcdb550)@4`; the address lies in the previously accepted
+  non-alias `SRAM1 Data bus` range. Both plans produced confirmation digest
+  `3a502b8a88fa5778f9bbbb11cd92c7d4ebc5cf160858bb2035a634e038e20db8`.
+  After removing random operation IDs and tool-version elapsed times, their
+  JSON is identical; both stderr files are empty.
+- The same committed binary regenerated the already accepted temporary
+  hardware-breakpoint plan with unchanged digest
+  `f388b4e39504cd18387d6d1367ea12019d17e05796785b703e7c4fc6731a8802`
+  and unchanged insertion command `3-break-insert -h *0x420129e4`.
+- Evidence is retained under
+  `target/host-validation/2026-08-29-openocd-hardware-watchpoint`. Plan SHA-256
+  values are respectively
+  `613f330d8d4a59d65cc6ac4b4ba77aaa92258625fe0668a40c71a1202711d61c`
+  and `cbaadbdd2106cad6df9f0d41e9fedde289c9b517b09fb5268ec9472ef1b86784`;
+  `host-validation-summary.json` is 3,461 bytes with SHA-256
+  `f214adf7b7dc4c125ffaabb4076abc1c1bf3dda44806ae12172a3cf990c5530c`.
+- No OpenOCD server was started, no GDB remote connection was requested, no
+  USB/JTAG access occurred, no physical watchpoint was inserted, no retry ran,
+  and no related process remained. Hardware width/capacity, target RAM
+  semantics, runtime adapter identity, hit behavior, physical comparator
+  allocation, and physical cleanup are therefore still unqualified.
+
+The next physical step is permitted only after the user independently returns
+the exact new digest above. It is limited to one non-retried ESP32-S3 CPU0
+`openocd watchpoint test`, followed by process/port cleanup review and external
+UART/probe liveness checks. Historical confirmations and the connected board
+are not standing authorization.
