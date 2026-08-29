@@ -1081,3 +1081,22 @@ false, and implicit unwind-address binding false remain mandatory. CPU1,
 another target/ELF/limit/tool plan, external/source debug loading, and every
 broader debugging capability remain unaccepted. This evidence is not standing
 authorization for a later physical execution.
+
+## Host-only OpenOCD temporary hardware-breakpoint checkpoint (2026-08-29)
+
+- `openocd breakpoint plan/test` is implemented for one exact nonzero numeric
+  address and a fixed hardware-only insert/delete/empty-table roundtrip.
+- Controlled tests cover official GDB/MI insertion and breakpoint-table shapes,
+  unsafe result rejection, deterministic address-bound planning, stale digest
+  rejection before Tcl execution, successful two-process cleanup, and malformed
+  insertion cleanup without an additional OpenOCD Tcl resume.
+- The empty GDB table is explicitly not treated as independent physical
+  comparator readback. Runtime adapter identity, comparator capacity, and
+  physical comparator cleanup remain unbound or unverified. Failure cleanup
+  detach/exit may resume the target even though no extra Tcl resume is sent.
+- No OpenOCD server was launched against physical hardware for this checkpoint,
+  no breakpoint was installed on the attached ESP32-S3, and no physical target
+  acceptance is claimed. Board attachment and all historical confirmations are
+  not standing authorization. Any physical qualification requires a fresh
+  host-only plan, independent exact-digest confirmation, one non-retried run,
+  cleanup review, and external liveness checks.

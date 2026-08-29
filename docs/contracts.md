@@ -479,6 +479,73 @@ CPU1, external-data, source-read, or disabled-capability statements above, and
 does not authorize a later physical execution without a fresh plan review and
 confirmation.
 
+## Confirmed OpenOCD temporary hardware-breakpoint roundtrip
+
+`openocd breakpoint plan` reuses the exact combined OpenOCD/GDB session inputs
+and requires one `--address`. The address must be a nonzero numeric value; zero
+is rejected before executable or configuration lookup. Symbols, source
+locations, expressions, conditions, command lists, requested slots, software
+breakpoints, persistent breakpoints, and hit/continue behavior have no input
+surface.
+
+The independent `R2_DEVICE_WRITE` digest binds the exact numeric address,
+hardware-only insertion policy, strict insertion response, deletion and empty
+table proof, fixed success and failure protocols, tool/config/profile
+identities, expected current target, deadlines, restoration policy, effects,
+and confirmation boundary. It does not bind the runtime adapter identity,
+dynamic port, hardware-breakpoint capacity, or physical comparator state.
+
+A confirmed test requires the selected target to start `running` and permits
+this success sequence only:
+
+```text
+1-gdb-version                                      -> 1^done
+2-target-select remote 127.0.0.1:<dynamic-port>   -> 2^connected
+3-break-insert -h *0x<confirmed-address>           -> 3^done
+4-break-delete 1                                   -> 4^done
+5-break-list                                       -> 5^done
+6-target-detach                                    -> 6^done
+7-gdb-exit                                         -> 7^exit
+```
+
+The target is not intentionally continued while the breakpoint exists and no
+breakpoint hit is requested. The insertion result must contain exactly one
+`bkpt` tuple. Breakpoint number 1 must be an enabled `hw breakpoint` with
+`disp=keep`, the exact requested hexadecimal address, and `times=0`. Only
+bounded documented scalar metadata and bounded `thread-groups` are accepted.
+Pending, multi-location, software, condition, command, script, duplicate,
+unknown, malformed, or extra result data is `PROTOCOL_ERROR`.
+
+Deletion is not considered complete from `4^done` alone. `-break-list` must
+return exactly `nr_rows="0"`, `nr_cols="6"`, canonical columns `number`,
+`type`, `disp`, `enabled`, `addr`, and `what`, plus an empty body. The parser
+supports the official named `body=[bkpt={...}]` shape so a residual entry is
+reported as a nonempty table rather than accepted or ignored. Success then
+requires final selected-target `running`, using the existing single fixed Tcl
+resume fallback only after the empty GDB table has been proven.
+
+After a breakpoint-exchange failure following remote connection and before
+normal detach, the MI owner attempts token-8 fixed delete, token-9 list
+verification, and token-10 detach before bounded GDB exit. Delete may report
+`done` or `error`; cleanup is complete only when the follow-up list proves the
+exact empty table and detach succeeds. Every GDB failure path records a
+point-in-time target observation and does not send an additional OpenOCD Tcl
+resume because physical comparator cleanup has not been independently proven.
+GDB detach, GDB exit, or configuration-defined detach handlers may still
+resume the target. Reports therefore expose both
+`target_resume_possible_during_failure_cleanup=true` and
+`explicit_openocd_resume_after_gdb_failure=false`; manual recovery may be
+required and no failed physical test is automatically retried.
+
+An empty GDB table proves GDB bookkeeping cleanup, not an independent physical
+comparator readback. Complete success enables only one temporary hardware
+breakpoint roundtrip. Persistent, software, symbolic, conditional, and
+multi-location breakpoints, watchpoints, breakpoint-hit execution, general
+execution control, symbol loading, explicit register/memory/stack commands,
+flash, monitor input, and arbitrary MI/Tcl remain unavailable. Controlled
+protocol, parser, digest, cleanup, target-state, and two-process regressions
+pass. No physical target acceptance is inherited from those tests.
+
 ## Confirmed OpenOCD target state roundtrip
 
 `openocd target plan` accepts one exact OpenOCD executable, at least one

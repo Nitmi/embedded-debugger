@@ -2129,6 +2129,164 @@ fn openocd_registers_validate_selection_before_filesystem_inputs() {
 }
 
 #[test]
+fn openocd_breakpoint_plan_binds_exact_hardware_only_roundtrip() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let make_plan = |address: &str| {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .args(["openocd", "breakpoint", "plan"])
+            .arg("--openocd-executable")
+            .arg(&openocd)
+            .arg("--gdb-executable")
+            .arg(&gdb)
+            .arg("--expected-target")
+            .arg("fake.cpu0")
+            .arg("--config")
+            .arg(&config)
+            .arg("--search")
+            .arg(directory.path())
+            .arg("--address")
+            .arg(address)
+            .arg("--json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Value>(&output).unwrap()
+    };
+    let first = make_plan("0x420129e4");
+    let second = make_plan("0x420129e4");
+    let changed = make_plan("0x420129e8");
+
+    assert_eq!(first["operation"], "openocd.breakpoint.plan");
+    assert_eq!(first["data"]["operation"], "openocd.breakpoint.test");
+    assert_eq!(first["data"]["risk"], "R2_DEVICE_WRITE");
+    assert_eq!(
+        first["data"]["breakpoint_policy"]["requested_address"],
+        "0x420129E4"
+    );
+    assert_eq!(
+        first["data"]["protocol"]["commands"][2]["command"],
+        "-break-insert -h *0x420129e4"
+    );
+    assert_eq!(
+        first["data"]["target_state_policy"]["normal_restoration_command"],
+        "6-target-detach"
+    );
+    assert_eq!(
+        first["data"]["breakpoint_policy"]["breakpoint_hit_requested"],
+        false
+    );
+    assert_eq!(
+        first["data"]["breakpoint_policy"]["symbols_or_expressions_allowed"],
+        false
+    );
+    assert_eq!(
+        first["data"]["breakpoint_policy"]["explicit_openocd_resume_after_gdb_failure"],
+        false
+    );
+    assert_eq!(
+        first["data"]["breakpoint_policy"]["target_resume_possible_during_failure_cleanup"],
+        true
+    );
+    assert_eq!(
+        first["data"]["breakpoint_policy"]["failure_cleanup_commands"][0]["token"],
+        8
+    );
+    assert_eq!(
+        first["data"]["confirmation_boundary"]["runtime_adapter_identity_bound"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirm_digest"],
+        second["data"]["confirm_digest"]
+    );
+    assert_ne!(
+        first["data"]["confirm_digest"],
+        changed["data"]["confirm_digest"]
+    );
+}
+
+#[test]
+fn openocd_breakpoint_test_rejects_stale_digest_before_tcl_execution() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args(["openocd", "breakpoint", "test"])
+        .arg("--openocd-executable")
+        .arg(&openocd)
+        .arg("--gdb-executable")
+        .arg(&gdb)
+        .arg("--expected-target")
+        .arg("fake.cpu0")
+        .arg("--config")
+        .arg(&config)
+        .arg("--address")
+        .arg("0x420129e4")
+        .arg("--confirm")
+        .arg("00".repeat(32))
+        .arg("--json")
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.breakpoint.test");
+    assert_eq!(result["error"]["code"], "CONFIRMATION_MISMATCH");
+    assert_eq!(
+        result["error"]["suggested_actions"][0]["action"],
+        "review_openocd_hardware_breakpoint_plan"
+    );
+    assert_eq!(result["error"]["details"]["hardware_access_started"], false);
+    assert!(result["error"]["details"]["openocd_readiness"].is_null());
+}
+
+#[test]
+fn openocd_breakpoint_rejects_zero_before_filesystem_inputs() {
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "openocd",
+            "breakpoint",
+            "plan",
+            "--openocd-executable",
+            "deliberately-missing-openocd",
+            "--gdb-executable",
+            "deliberately-missing-gdb",
+            "--expected-target",
+            "fake.cpu0",
+            "--config",
+            "deliberately-missing.cfg",
+            "--address",
+            "0",
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.breakpoint.plan");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["address"], "0x00000000");
+}
+
+#[test]
 fn openocd_stack_plan_binds_limit_protocol_unwind_risk_and_restoration() {
     let directory = tempdir().unwrap();
     let openocd = write_fake_openocd(directory.path());

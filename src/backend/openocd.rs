@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{DebugError, ErrorCode, Result, SuggestedAction};
 
+mod breakpoint;
 mod gdb;
 mod memory;
 mod registers;
@@ -26,13 +27,21 @@ mod stack;
 mod stack_elf;
 mod target;
 
+pub use breakpoint::{
+    OpenOcdHardwareBreakpointCapabilities, OpenOcdHardwareBreakpointConfirmationBoundary,
+    OpenOcdHardwareBreakpointEffects, OpenOcdHardwareBreakpointExchange,
+    OpenOcdHardwareBreakpointOptions, OpenOcdHardwareBreakpointPlan,
+    OpenOcdHardwareBreakpointPolicy, OpenOcdHardwareBreakpointTestReport, plan_hardware_breakpoint,
+    test_hardware_breakpoint,
+};
 pub use gdb::{
     DEFAULT_GDB_MI_COMMAND_TIMEOUT_MS, DEFAULT_GDB_MI_SHUTDOWN_TIMEOUT_MS,
     DEFAULT_GDB_MI_STARTUP_TIMEOUT_MS, DEFAULT_GDB_VERSION_TIMEOUT_MS, GdbExecutableFileIdentity,
-    GdbExecutableInspection, GdbInspectOptions, GdbInspection, GdbMiCommandResult, GdbMiHandshake,
-    GdbMiMemoryBlock, GdbMiMemorySnapshot, GdbMiOutput, GdbMiProtocol, GdbMiRecordCounts,
-    GdbMiRegisterInventory, GdbMiRegisterValue, GdbMiShutdown, GdbMiStackFrame, GdbMiStackSnapshot,
-    GdbMiTestOptions, GdbMiTestReport, MAX_GDB_MI_COMMAND_TIMEOUT_MS,
+    GdbExecutableInspection, GdbInspectOptions, GdbInspection, GdbMiBreakpointTable,
+    GdbMiCommandResult, GdbMiHandshake, GdbMiHardwareBreakpoint, GdbMiHardwareBreakpointRoundtrip,
+    GdbMiMemoryBlock, GdbMiMemorySnapshot, GdbMiOutput, GdbMiPlannedCommand, GdbMiProtocol,
+    GdbMiRecordCounts, GdbMiRegisterInventory, GdbMiRegisterValue, GdbMiShutdown, GdbMiStackFrame,
+    GdbMiStackSnapshot, GdbMiTestOptions, GdbMiTestReport, MAX_GDB_MI_COMMAND_TIMEOUT_MS,
     MAX_GDB_MI_SHUTDOWN_TIMEOUT_MS, MAX_GDB_MI_STARTUP_TIMEOUT_MS, MAX_GDB_VERSION_TIMEOUT_MS,
     MIN_GDB_MI_COMMAND_TIMEOUT_MS, MIN_GDB_MI_SHUTDOWN_TIMEOUT_MS, MIN_GDB_MI_STARTUP_TIMEOUT_MS,
     MIN_GDB_VERSION_TIMEOUT_MS, inspect_gdb, test_gdb_mi,

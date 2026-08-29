@@ -9,9 +9,9 @@ use crate::{
         DebugBackend,
         openocd::{
             self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
-            OpenOcdInspectOptions, OpenOcdMemorySnapshotOptions, OpenOcdRegisterSnapshotOptions,
-            OpenOcdServerOptions, OpenOcdStackElfOptions, OpenOcdStackSnapshotOptions,
-            OpenOcdTargetOptions,
+            OpenOcdHardwareBreakpointOptions, OpenOcdInspectOptions, OpenOcdMemorySnapshotOptions,
+            OpenOcdRegisterSnapshotOptions, OpenOcdServerOptions, OpenOcdStackElfOptions,
+            OpenOcdStackSnapshotOptions, OpenOcdTargetOptions,
         },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
@@ -103,6 +103,10 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum OpenOcdCommand {
     Inspect(OpenOcdInspectSelection),
+    Breakpoint {
+        #[command(subcommand)]
+        command: OpenOcdBreakpointCommand,
+    },
     Gdb {
         #[command(subcommand)]
         command: OpenOcdGdbCommand,
@@ -135,6 +139,38 @@ pub enum OpenOcdCommand {
         #[command(subcommand)]
         command: OpenOcdTargetCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdBreakpointCommand {
+    Plan(OpenOcdBreakpointSelection),
+    Test(OpenOcdBreakpointTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdBreakpointSelection {
+    #[command(flatten)]
+    pub session: OpenOcdSessionSelection,
+
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        value_parser = parse_address,
+        help = "exact non-zero numeric instruction address for one temporary hardware breakpoint"
+    )]
+    pub address: Address,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdBreakpointTestSelection {
+    #[command(flatten)]
+    pub breakpoint: OpenOcdBreakpointSelection,
+
+    #[arg(
+        long,
+        help = "exact confirm_digest returned by openocd breakpoint plan"
+    )]
+    pub confirm: String,
 }
 
 #[derive(Debug, Args)]
@@ -904,6 +940,18 @@ impl Cli {
             } => "openocd.inspect",
             Command::Openocd {
                 command:
+                    OpenOcdCommand::Breakpoint {
+                        command: OpenOcdBreakpointCommand::Plan(_),
+                    },
+            } => "openocd.breakpoint.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Breakpoint {
+                        command: OpenOcdBreakpointCommand::Test(_),
+                    },
+            } => "openocd.breakpoint.test",
+            Command::Openocd {
+                command:
                     OpenOcdCommand::Gdb {
                         command: OpenOcdGdbCommand::Inspect(_),
                     },
@@ -1305,6 +1353,53 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report.openocd.executable.resolved,
                     report.gdb.executable.resolved,
                     report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Breakpoint {
+                    command: OpenOcdBreakpointCommand::Plan(selection),
+                },
+        } => {
+            let report = openocd::plan_hardware_breakpoint(&openocd_breakpoint_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.breakpoint.plan",
+                &report,
+                format!(
+                    "OpenOCD temporary hardware-breakpoint plan ready\nRisk: {}\nTarget: {}\nAddress: {}\nBreakpoint execution requested: false\nAdditional Tcl resume after failure: false\nGDB detach/exit may resume target: true\nConfirm digest: {}",
+                    report.risk,
+                    report.target_state_policy.expected_current_target,
+                    report.breakpoint_policy.requested_address,
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Breakpoint {
+                    command: OpenOcdBreakpointCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_hardware_breakpoint(
+                &openocd_breakpoint_options(&selection.breakpoint),
+                &selection.confirm,
+            )?;
+            Ok(CommandResult::serializable(
+                "openocd.breakpoint.test",
+                &report,
+                format!(
+                    "OpenOCD temporary hardware-breakpoint roundtrip complete\nTarget: {}\nAddress: {}\nInserted kind: {}\nBreakpoint table rows after delete: {}\nTarget state: {} -> {}\nShutdown: graceful",
+                    report.target_restoration.initial.target_name,
+                    report.exchange.roundtrip.inserted.address,
+                    report.exchange.roundtrip.inserted.breakpoint_type,
+                    report.exchange.roundtrip.table_after_delete.reported_rows,
+                    report.target_restoration.initial.state,
+                    report
+                        .target_restoration
+                        .final_observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
                 ),
             ))
         }
@@ -2302,6 +2397,15 @@ fn openocd_register_options(
     OpenOcdRegisterSnapshotOptions {
         session: openocd_session_options(&selection.session),
         registers: selection.registers.clone(),
+    }
+}
+
+fn openocd_breakpoint_options(
+    selection: &OpenOcdBreakpointSelection,
+) -> OpenOcdHardwareBreakpointOptions {
+    OpenOcdHardwareBreakpointOptions {
+        session: openocd_session_options(&selection.session),
+        address: selection.address,
     }
 }
 

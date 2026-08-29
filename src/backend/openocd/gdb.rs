@@ -72,6 +72,17 @@ const MEMORY_EXIT_TOKEN: u64 = 5;
 const STACK_LIST_TOKEN: u64 = 3;
 const STACK_DETACH_TOKEN: u64 = 4;
 const STACK_EXIT_TOKEN: u64 = 5;
+const BREAKPOINT_INSERT_TOKEN: u64 = 3;
+const BREAKPOINT_DELETE_TOKEN: u64 = 4;
+const BREAKPOINT_LIST_TOKEN: u64 = 5;
+const BREAKPOINT_DETACH_TOKEN: u64 = 6;
+const BREAKPOINT_EXIT_TOKEN: u64 = 7;
+const BREAKPOINT_CLEANUP_DELETE_TOKEN: u64 = 8;
+const BREAKPOINT_CLEANUP_LIST_TOKEN: u64 = 9;
+const BREAKPOINT_CLEANUP_DETACH_TOKEN: u64 = 10;
+const BREAKPOINT_NUMBER: u64 = 1;
+const BREAKPOINT_DELETE_COMMAND: &str = "-break-delete 1";
+const BREAKPOINT_LIST_COMMAND: &str = "-break-list";
 const MI_LAUNCH_ARGUMENTS: [&str; 4] = ["--nx", "--nh", "--quiet", "--interpreter=mi2"];
 pub(super) const XTENSA_GNU_CONFIG_ENV: &str = "XTENSA_GNU_CONFIG";
 
@@ -322,6 +333,42 @@ pub struct GdbMiStackSnapshot {
     pub frames: Vec<GdbMiStackFrame>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiHardwareBreakpoint {
+    pub number: u64,
+    pub breakpoint_type: String,
+    pub disposition: String,
+    pub enabled: bool,
+    pub address: Address,
+    pub hit_count: u64,
+    pub thread_groups: Vec<String>,
+    pub original_location: Option<String>,
+    pub function: Option<String>,
+    pub file: Option<String>,
+    pub fullname: Option<String>,
+    pub line: Option<u64>,
+    pub address_flags: Option<String>,
+    pub at: Option<String>,
+    pub what: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiBreakpointTable {
+    pub reported_rows: u64,
+    pub reported_columns: u64,
+    pub header_columns: Vec<String>,
+    pub body_entries: u64,
+    pub empty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GdbMiHardwareBreakpointRoundtrip {
+    pub inserted: GdbMiHardwareBreakpoint,
+    pub table_after_delete: GdbMiBreakpointTable,
+    pub gdb_breakpoint_table_empty: bool,
+    pub physical_comparator_state_independently_verified: bool,
+}
+
 pub(super) struct RemoteGdbExecution {
     pub endpoint: String,
     pub startup_elapsed: Duration,
@@ -390,6 +437,29 @@ pub(super) struct RemoteStackExecution {
     pub list_result_class: String,
     pub list_command: String,
     pub snapshot: GdbMiStackSnapshot,
+    pub detach_elapsed: Duration,
+    pub detach_result_class: String,
+    pub record_counts: GdbMiRecordCounts,
+    pub shutdown: GdbMiShutdown,
+    pub output: GdbMiOutput,
+}
+
+pub(super) struct RemoteBreakpointExecution {
+    pub endpoint: String,
+    pub startup_elapsed: Duration,
+    pub version_elapsed: Duration,
+    pub version_result_class: String,
+    pub version_stream_records: u64,
+    pub connect_elapsed: Duration,
+    pub connect_result_class: String,
+    pub insert_elapsed: Duration,
+    pub insert_result_class: String,
+    pub insert_command: String,
+    pub delete_elapsed: Duration,
+    pub delete_result_class: String,
+    pub list_elapsed: Duration,
+    pub list_result_class: String,
+    pub roundtrip: GdbMiHardwareBreakpointRoundtrip,
     pub detach_elapsed: Duration,
     pub detach_result_class: String,
     pub record_counts: GdbMiRecordCounts,
@@ -796,6 +866,82 @@ pub(super) fn execute_remote_stack_snapshot(
     })
 }
 
+pub(super) fn execute_remote_breakpoint_roundtrip(
+    executable: &str,
+    xtensa_config: Option<&str>,
+    gdb_port: u16,
+    address: Address,
+    startup_timeout_ms: u64,
+    command_timeout_ms: u64,
+    shutdown_timeout_ms: u64,
+) -> Result<RemoteBreakpointExecution> {
+    let endpoint = format!("127.0.0.1:{gdb_port}");
+    let mut command = Command::new(executable);
+    command
+        .args(MI_LAUNCH_ARGUMENTS)
+        .env_remove(XTENSA_GNU_CONFIG_ENV);
+    if let Some(config) = xtensa_config {
+        command.env(XTENSA_GNU_CONFIG_ENV, config);
+    }
+    let mut gdb = ManagedGdb::spawn(command, executable, BREAKPOINT_EXIT_TOKEN)?;
+    let lifecycle = match gdb.run_breakpoint_lifecycle(
+        &endpoint,
+        address,
+        Duration::from_millis(startup_timeout_ms),
+        Duration::from_millis(command_timeout_ms),
+        Duration::from_millis(shutdown_timeout_ms),
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(failure) => {
+            return Err(finalize_failure(gdb, failure, shutdown_timeout_ms));
+        }
+    };
+
+    let mut shutdown = gdb.cleanup(Duration::from_millis(shutdown_timeout_ms));
+    let record_counts = gdb.record_counts.clone();
+    let output = gdb.finish_output();
+    shutdown.process_tree_cleanup_complete &= output_streams_closed(&output);
+    if !shutdown.command_sent
+        || !shutdown.result_observed
+        || !shutdown.graceful
+        || !shutdown.exit_success
+        || !shutdown.process_tree_cleanup_complete
+    {
+        return Err(protocol_error_with_lifecycle(
+            "hardware-breakpoint GDB/MI process did not complete a graceful shutdown",
+            json!({"endpoint": endpoint}),
+            &shutdown,
+            &output,
+        ));
+    }
+    validate_complete_output(&output).map_err(|message| {
+        protocol_error_with_lifecycle(message, json!({"endpoint": endpoint}), &shutdown, &output)
+    })?;
+
+    Ok(RemoteBreakpointExecution {
+        endpoint,
+        startup_elapsed: lifecycle.startup_elapsed,
+        version_elapsed: lifecycle.version_elapsed,
+        version_result_class: lifecycle.version_result_class,
+        version_stream_records: lifecycle.version_stream_records,
+        connect_elapsed: lifecycle.connect_elapsed,
+        connect_result_class: lifecycle.connect_result_class,
+        insert_elapsed: lifecycle.insert_elapsed,
+        insert_result_class: lifecycle.insert_result_class,
+        insert_command: lifecycle.insert_command,
+        delete_elapsed: lifecycle.delete_elapsed,
+        delete_result_class: lifecycle.delete_result_class,
+        list_elapsed: lifecycle.list_elapsed,
+        list_result_class: lifecycle.list_result_class,
+        roundtrip: lifecycle.roundtrip,
+        detach_elapsed: lifecycle.detach_elapsed,
+        detach_result_class: lifecycle.detach_result_class,
+        record_counts,
+        shutdown,
+        output,
+    })
+}
+
 fn protocol_contract() -> GdbMiProtocol {
     GdbMiProtocol {
         interpreter: "mi2".to_string(),
@@ -989,6 +1135,78 @@ pub(super) fn stack_protocol_contract(maximum_frames: u64) -> GdbMiProtocol {
             },
         ],
     }
+}
+
+pub(super) fn breakpoint_protocol_contract(address: Address) -> GdbMiProtocol {
+    GdbMiProtocol {
+        interpreter: "mi2".to_string(),
+        launch_arguments: MI_LAUNCH_ARGUMENTS
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        initialization_files_enabled: false,
+        input_encoding: "ascii".to_string(),
+        line_terminator: "lf".to_string(),
+        token_correlation_required: true,
+        process_isolation: process_isolation().to_string(),
+        commands: vec![
+            GdbMiPlannedCommand {
+                token: VERSION_TOKEN,
+                command: VERSION_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: REMOTE_SELECT_TOKEN,
+                command: REMOTE_SELECT_COMMAND_PLACEHOLDER.to_string(),
+                expected_result_class: "connected".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: BREAKPOINT_INSERT_TOKEN,
+                command: breakpoint_insert_command(address),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: BREAKPOINT_DELETE_TOKEN,
+                command: BREAKPOINT_DELETE_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: BREAKPOINT_LIST_TOKEN,
+                command: BREAKPOINT_LIST_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: BREAKPOINT_DETACH_TOKEN,
+                command: REMOTE_DETACH_COMMAND.to_string(),
+                expected_result_class: "done".to_string(),
+            },
+            GdbMiPlannedCommand {
+                token: BREAKPOINT_EXIT_TOKEN,
+                command: EXIT_COMMAND.to_string(),
+                expected_result_class: "exit".to_string(),
+            },
+        ],
+    }
+}
+
+pub(super) fn breakpoint_failure_cleanup_contract() -> Vec<GdbMiPlannedCommand> {
+    vec![
+        GdbMiPlannedCommand {
+            token: BREAKPOINT_CLEANUP_DELETE_TOKEN,
+            command: BREAKPOINT_DELETE_COMMAND.to_string(),
+            expected_result_class: "done_or_error_then_verify_table".to_string(),
+        },
+        GdbMiPlannedCommand {
+            token: BREAKPOINT_CLEANUP_LIST_TOKEN,
+            command: BREAKPOINT_LIST_COMMAND.to_string(),
+            expected_result_class: "done".to_string(),
+        },
+        GdbMiPlannedCommand {
+            token: BREAKPOINT_CLEANUP_DETACH_TOKEN,
+            command: REMOTE_DETACH_COMMAND.to_string(),
+            expected_result_class: "done".to_string(),
+        },
+    ]
 }
 
 fn validate_test_options(options: &GdbMiTestOptions) -> Result<()> {
@@ -1945,6 +2163,305 @@ impl ManagedGdb {
         failure
     }
 
+    fn run_breakpoint_lifecycle(
+        &mut self,
+        endpoint: &str,
+        address: Address,
+        startup_timeout: Duration,
+        command_timeout: Duration,
+        shutdown_timeout: Duration,
+    ) -> std::result::Result<BreakpointLifecycleSuccess, LifecycleFailure> {
+        let startup_deadline = self.started + startup_timeout;
+        self.wait_for_prompt(startup_deadline)?;
+        let startup_elapsed = self.started.elapsed();
+
+        let streams_before_version = stream_record_count(&self.record_counts);
+        let version_started = Instant::now();
+        self.send_command(VERSION_TOKEN, VERSION_COMMAND)?;
+        let version_result_class = self.wait_for_result(VERSION_TOKEN, "done", startup_deadline)?;
+        let version_elapsed = version_started.elapsed();
+        let version_stream_records =
+            stream_record_count(&self.record_counts).saturating_sub(streams_before_version);
+
+        let connect_command = format!("-target-select remote {endpoint}");
+        let connect_started = Instant::now();
+        self.send_command(REMOTE_SELECT_TOKEN, &connect_command)?;
+        let connect_result_class = match self.wait_for_result(
+            REMOTE_SELECT_TOKEN,
+            "connected",
+            connect_started + command_timeout,
+        ) {
+            Ok(class) => class,
+            Err(failure) => {
+                return Err(self.with_breakpoint_detach_attempt(failure, command_timeout));
+            }
+        };
+        let connect_elapsed = connect_started.elapsed();
+
+        let roundtrip = match self.run_breakpoint_roundtrip(address, command_timeout) {
+            Ok(roundtrip) => roundtrip,
+            Err(failure) => {
+                return Err(
+                    self.with_breakpoint_cleanup_and_detach_attempt(failure, command_timeout)
+                );
+            }
+        };
+
+        let detach_started = Instant::now();
+        self.send_command(BREAKPOINT_DETACH_TOKEN, REMOTE_DETACH_COMMAND)?;
+        let detach_result_class = self.wait_for_result(
+            BREAKPOINT_DETACH_TOKEN,
+            "done",
+            detach_started + command_timeout,
+        )?;
+        let detach_elapsed = detach_started.elapsed();
+
+        self.send_command(BREAKPOINT_EXIT_TOKEN, EXIT_COMMAND)?;
+        let shutdown_deadline = Instant::now() + shutdown_timeout;
+        self.wait_for_result(BREAKPOINT_EXIT_TOKEN, "exit", shutdown_deadline)?;
+        self.wait_for_exit(shutdown_deadline)?;
+
+        Ok(BreakpointLifecycleSuccess {
+            startup_elapsed,
+            version_elapsed,
+            version_result_class,
+            version_stream_records,
+            connect_elapsed,
+            connect_result_class,
+            insert_elapsed: roundtrip.insert_elapsed,
+            insert_result_class: roundtrip.insert_result_class,
+            insert_command: roundtrip.insert_command,
+            delete_elapsed: roundtrip.delete_elapsed,
+            delete_result_class: roundtrip.delete_result_class,
+            list_elapsed: roundtrip.list_elapsed,
+            list_result_class: roundtrip.list_result_class,
+            roundtrip: roundtrip.roundtrip,
+            detach_elapsed,
+            detach_result_class,
+        })
+    }
+
+    fn run_breakpoint_roundtrip(
+        &mut self,
+        address: Address,
+        command_timeout: Duration,
+    ) -> std::result::Result<BreakpointRoundtripSuccess, LifecycleFailure> {
+        let insert_command = breakpoint_insert_command(address);
+        let insert_started = Instant::now();
+        self.send_command(BREAKPOINT_INSERT_TOKEN, &insert_command)?;
+        let insert_result = self.wait_for_result_record(
+            BREAKPOINT_INSERT_TOKEN,
+            "done",
+            insert_started + command_timeout,
+        )?;
+        let insert_elapsed = insert_started.elapsed();
+        let inserted = parse_hardware_breakpoint(&insert_result.variables, address)?;
+
+        let delete_started = Instant::now();
+        self.send_command(BREAKPOINT_DELETE_TOKEN, BREAKPOINT_DELETE_COMMAND)?;
+        let delete_result_class = self.wait_for_result(
+            BREAKPOINT_DELETE_TOKEN,
+            "done",
+            delete_started + command_timeout,
+        )?;
+        let delete_elapsed = delete_started.elapsed();
+
+        let list_started = Instant::now();
+        self.send_command(BREAKPOINT_LIST_TOKEN, BREAKPOINT_LIST_COMMAND)?;
+        let list_result = self.wait_for_result_record(
+            BREAKPOINT_LIST_TOKEN,
+            "done",
+            list_started + command_timeout,
+        )?;
+        let list_elapsed = list_started.elapsed();
+        let table_after_delete = parse_empty_breakpoint_table(&list_result.variables)?;
+
+        Ok(BreakpointRoundtripSuccess {
+            insert_elapsed,
+            insert_result_class: insert_result.class,
+            insert_command,
+            delete_elapsed,
+            delete_result_class,
+            list_elapsed,
+            list_result_class: list_result.class,
+            roundtrip: GdbMiHardwareBreakpointRoundtrip {
+                inserted,
+                table_after_delete,
+                gdb_breakpoint_table_empty: true,
+                physical_comparator_state_independently_verified: false,
+            },
+        })
+    }
+
+    fn with_breakpoint_cleanup_and_detach_attempt(
+        &mut self,
+        mut failure: LifecycleFailure,
+        command_timeout: Duration,
+    ) -> LifecycleFailure {
+        let cleanup_started = Instant::now();
+        let delete_started = Instant::now();
+        let delete = self
+            .send_command(BREAKPOINT_CLEANUP_DELETE_TOKEN, BREAKPOINT_DELETE_COMMAND)
+            .and_then(|()| {
+                self.wait_for_any_result_record(
+                    BREAKPOINT_CLEANUP_DELETE_TOKEN,
+                    delete_started + command_timeout,
+                )
+            });
+        let delete_evidence = match delete {
+            Ok(result) => json!({
+                "attempted": true,
+                "token": BREAKPOINT_CLEANUP_DELETE_TOKEN,
+                "command": BREAKPOINT_DELETE_COMMAND,
+                "result_class": result.class,
+                "elapsed_ms": duration_ms(delete_started.elapsed()),
+            }),
+            Err(delete_failure) => json!({
+                "attempted": true,
+                "token": BREAKPOINT_CLEANUP_DELETE_TOKEN,
+                "command": BREAKPOINT_DELETE_COMMAND,
+                "elapsed_ms": duration_ms(delete_started.elapsed()),
+                "failure": lifecycle_failure_value(&delete_failure),
+            }),
+        };
+
+        let list_started = Instant::now();
+        let list = self
+            .send_command(BREAKPOINT_CLEANUP_LIST_TOKEN, BREAKPOINT_LIST_COMMAND)
+            .and_then(|()| {
+                self.wait_for_result_record(
+                    BREAKPOINT_CLEANUP_LIST_TOKEN,
+                    "done",
+                    list_started + command_timeout,
+                )
+            })
+            .and_then(|result| {
+                parse_empty_breakpoint_table(&result.variables).map(|table| (result.class, table))
+            });
+        let (table_empty, list_evidence) = match list {
+            Ok((result_class, table)) => (
+                table.empty,
+                json!({
+                    "attempted": true,
+                    "token": BREAKPOINT_CLEANUP_LIST_TOKEN,
+                    "command": BREAKPOINT_LIST_COMMAND,
+                    "result_class": result_class,
+                    "table": table,
+                    "elapsed_ms": duration_ms(list_started.elapsed()),
+                }),
+            ),
+            Err(list_failure) => (
+                false,
+                json!({
+                    "attempted": true,
+                    "token": BREAKPOINT_CLEANUP_LIST_TOKEN,
+                    "command": BREAKPOINT_LIST_COMMAND,
+                    "elapsed_ms": duration_ms(list_started.elapsed()),
+                    "failure": lifecycle_failure_value(&list_failure),
+                }),
+            ),
+        };
+
+        let detach_started = Instant::now();
+        let detach = self
+            .send_command(BREAKPOINT_CLEANUP_DETACH_TOKEN, REMOTE_DETACH_COMMAND)
+            .and_then(|()| {
+                self.wait_for_result(
+                    BREAKPOINT_CLEANUP_DETACH_TOKEN,
+                    "done",
+                    detach_started + command_timeout,
+                )
+            });
+        let (detach_complete, detach_evidence) = match detach {
+            Ok(result_class) => (
+                true,
+                json!({
+                    "attempted": true,
+                    "complete": true,
+                    "token": BREAKPOINT_CLEANUP_DETACH_TOKEN,
+                    "command": REMOTE_DETACH_COMMAND,
+                    "result_class": result_class,
+                    "elapsed_ms": duration_ms(detach_started.elapsed()),
+                }),
+            ),
+            Err(detach_failure) => (
+                false,
+                json!({
+                    "attempted": true,
+                    "complete": false,
+                    "token": BREAKPOINT_CLEANUP_DETACH_TOKEN,
+                    "command": REMOTE_DETACH_COMMAND,
+                    "elapsed_ms": duration_ms(detach_started.elapsed()),
+                    "failure": lifecycle_failure_value(&detach_failure),
+                }),
+            ),
+        };
+
+        let mut details = failure.details.as_object().cloned().unwrap_or_default();
+        details.insert(
+            "breakpoint_cleanup".to_string(),
+            json!({
+                "attempted": true,
+                "delete": delete_evidence,
+                "list": list_evidence,
+                "gdb_breakpoint_table_empty": table_empty,
+                "physical_comparator_state_independently_verified": false,
+                "complete": table_empty && detach_complete,
+                "elapsed_ms": duration_ms(cleanup_started.elapsed()),
+            }),
+        );
+        details.insert("cleanup_detach".to_string(), detach_evidence);
+        failure.details = Value::Object(details);
+        failure
+    }
+
+    fn with_breakpoint_detach_attempt(
+        &mut self,
+        mut failure: LifecycleFailure,
+        command_timeout: Duration,
+    ) -> LifecycleFailure {
+        let started = Instant::now();
+        let attempt = self
+            .send_command(BREAKPOINT_CLEANUP_DETACH_TOKEN, REMOTE_DETACH_COMMAND)
+            .and_then(|()| {
+                self.wait_for_result(
+                    BREAKPOINT_CLEANUP_DETACH_TOKEN,
+                    "done",
+                    started + command_timeout,
+                )
+            });
+        let evidence = match attempt {
+            Ok(result_class) => json!({
+                "attempted": true,
+                "complete": true,
+                "token": BREAKPOINT_CLEANUP_DETACH_TOKEN,
+                "command": REMOTE_DETACH_COMMAND,
+                "result_class": result_class,
+                "elapsed_ms": duration_ms(started.elapsed()),
+            }),
+            Err(detach_failure) => json!({
+                "attempted": true,
+                "complete": false,
+                "token": BREAKPOINT_CLEANUP_DETACH_TOKEN,
+                "command": REMOTE_DETACH_COMMAND,
+                "elapsed_ms": duration_ms(started.elapsed()),
+                "failure": lifecycle_failure_value(&detach_failure),
+            }),
+        };
+        let mut details = failure.details.as_object().cloned().unwrap_or_default();
+        details.insert("cleanup_detach".to_string(), evidence);
+        details.insert(
+            "breakpoint_cleanup".to_string(),
+            json!({
+                "attempted": false,
+                "required": false,
+                "complete": true,
+            }),
+        );
+        failure.details = Value::Object(details);
+        failure
+    }
+
     fn wait_for_prompt(&mut self, deadline: Instant) -> std::result::Result<(), LifecycleFailure> {
         loop {
             match self.next_record(deadline, "startup prompt")? {
@@ -1999,6 +2516,33 @@ impl ManagedGdb {
                         json!({
                             "token": expected_token,
                             "expected_result_class": expected_class,
+                            "observed_result_class": class,
+                        }),
+                    ));
+                }
+                return Ok(MiResultRecord { class, variables });
+            }
+        }
+    }
+
+    fn wait_for_any_result_record(
+        &mut self,
+        expected_token: u64,
+        deadline: Instant,
+    ) -> std::result::Result<MiResultRecord, LifecycleFailure> {
+        loop {
+            if let ParsedRecord::Result {
+                token,
+                class,
+                variables,
+            } = self.next_record(deadline, "result")?
+            {
+                if token != Some(expected_token) {
+                    return Err(protocol_failure(
+                        "GDB/MI result token did not match the outstanding cleanup command",
+                        json!({
+                            "expected_token": expected_token,
+                            "observed_token": token,
                             "observed_result_class": class,
                         }),
                     ));
@@ -2397,6 +2941,38 @@ struct StackSnapshotSuccess {
 }
 
 #[derive(Debug)]
+struct BreakpointLifecycleSuccess {
+    startup_elapsed: Duration,
+    version_elapsed: Duration,
+    version_result_class: String,
+    version_stream_records: u64,
+    connect_elapsed: Duration,
+    connect_result_class: String,
+    insert_elapsed: Duration,
+    insert_result_class: String,
+    insert_command: String,
+    delete_elapsed: Duration,
+    delete_result_class: String,
+    list_elapsed: Duration,
+    list_result_class: String,
+    roundtrip: GdbMiHardwareBreakpointRoundtrip,
+    detach_elapsed: Duration,
+    detach_result_class: String,
+}
+
+#[derive(Debug)]
+struct BreakpointRoundtripSuccess {
+    insert_elapsed: Duration,
+    insert_result_class: String,
+    insert_command: String,
+    delete_elapsed: Duration,
+    delete_result_class: String,
+    list_elapsed: Duration,
+    list_result_class: String,
+    roundtrip: GdbMiHardwareBreakpointRoundtrip,
+}
+
+#[derive(Debug)]
 struct MiResultRecord {
     class: String,
     variables: HashMap<String, MiValue>,
@@ -2788,6 +3364,10 @@ fn stack_list_command(maximum_frames: u64) -> String {
     format!("-stack-list-frames --no-frame-filters 0 {maximum_frame_index}")
 }
 
+fn breakpoint_insert_command(address: Address) -> String {
+    format!("-break-insert -h *0x{:x}", address.0)
+}
+
 fn parse_stack_snapshot(
     variables: &HashMap<String, MiValue>,
     maximum_frames: u64,
@@ -2918,6 +3498,385 @@ fn parse_stack_snapshot(
         additional_gdb_frames_possible: frame_limit_reached,
         physical_call_stack_completeness_proven: false,
         frames,
+    })
+}
+
+fn parse_hardware_breakpoint(
+    variables: &HashMap<String, MiValue>,
+    requested_address: Address,
+) -> std::result::Result<GdbMiHardwareBreakpoint, LifecycleFailure> {
+    const MAX_BREAKPOINT_TEXT_BYTES: usize = 4 * 1024;
+    const ALLOWED_FIELDS: [&str; 16] = [
+        "number",
+        "type",
+        "disp",
+        "enabled",
+        "addr",
+        "addr_flags",
+        "func",
+        "file",
+        "filename",
+        "fullname",
+        "line",
+        "at",
+        "original-location",
+        "times",
+        "thread-groups",
+        "what",
+    ];
+
+    if variables.len() != 1 {
+        return Err(protocol_failure(
+            "GDB/MI hardware-breakpoint insertion contained unexpected result fields",
+            json!({"expected_field": "bkpt", "field_count": variables.len()}),
+        ));
+    }
+    let Some(MiValue::Dict(fields)) = variables.get("bkpt") else {
+        return Err(protocol_failure(
+            "GDB/MI hardware-breakpoint insertion did not return a breakpoint tuple",
+            json!({"expected_field": "bkpt"}),
+        ));
+    };
+    if fields
+        .keys()
+        .any(|field| !ALLOWED_FIELDS.contains(&field.as_str()))
+    {
+        let mut reported_fields = fields.keys().cloned().collect::<Vec<_>>();
+        reported_fields.sort();
+        return Err(protocol_failure(
+            "GDB/MI hardware-breakpoint tuple contained unsupported fields",
+            json!({"reported_fields": reported_fields, "allowed_fields": ALLOWED_FIELDS}),
+        ));
+    }
+    if fields.contains_key("file") && fields.contains_key("filename") {
+        return Err(protocol_failure(
+            "GDB/MI hardware-breakpoint tuple contained duplicate file metadata",
+            json!({"fields": ["file", "filename"]}),
+        ));
+    }
+
+    let number = parse_decimal_text(
+        exact_string_field(fields, "number", "hardware breakpoint")?,
+        "hardware breakpoint number",
+    )?;
+    if number != BREAKPOINT_NUMBER {
+        return Err(protocol_failure(
+            "GDB/MI hardware-breakpoint number did not match the fixed cleanup identifier",
+            json!({"expected": BREAKPOINT_NUMBER, "observed": number}),
+        ));
+    }
+    let breakpoint_type = exact_string_field(fields, "type", "hardware breakpoint")?;
+    if breakpoint_type != "hw breakpoint" {
+        return Err(protocol_failure(
+            "GDB/MI did not identify the inserted breakpoint as hardware-assisted",
+            json!({"expected": "hw breakpoint", "observed": bounded_line(breakpoint_type)}),
+        ));
+    }
+    let disposition = exact_string_field(fields, "disp", "hardware breakpoint")?;
+    if disposition != "keep" {
+        return Err(protocol_failure(
+            "GDB/MI hardware breakpoint had an unexpected disposition",
+            json!({"expected": "keep", "observed": bounded_line(disposition)}),
+        ));
+    }
+    let enabled = exact_string_field(fields, "enabled", "hardware breakpoint")?;
+    if enabled != "y" {
+        return Err(protocol_failure(
+            "GDB/MI hardware breakpoint was not enabled",
+            json!({"expected": "y", "observed": bounded_line(enabled)}),
+        ));
+    }
+    let address = parse_hex_address_text(
+        exact_string_field(fields, "addr", "hardware breakpoint")?,
+        "hardware breakpoint address",
+    )?;
+    if address != requested_address.0 {
+        return Err(protocol_failure(
+            "GDB/MI hardware-breakpoint address did not match the exact request",
+            json!({"requested": requested_address, "observed": Address(address)}),
+        ));
+    }
+    let hit_count = parse_decimal_text(
+        exact_string_field(fields, "times", "hardware breakpoint")?,
+        "hardware breakpoint hit count",
+    )?;
+    if hit_count != 0 {
+        return Err(protocol_failure(
+            "GDB/MI hardware breakpoint reported an unexpected hit count",
+            json!({"expected": 0, "observed": hit_count}),
+        ));
+    }
+
+    let thread_groups = match fields.get("thread-groups") {
+        None => Vec::new(),
+        Some(MiValue::List(groups)) if groups.len() <= 64 => groups
+            .iter()
+            .enumerate()
+            .map(|(index, value)| match value {
+                MiValue::String(group)
+                    if !group.is_empty()
+                        && group.len() <= 128
+                        && !group.chars().any(char::is_control) =>
+                {
+                    Ok(group.clone())
+                }
+                _ => Err(protocol_failure(
+                    "GDB/MI hardware-breakpoint thread group was not a bounded string",
+                    json!({"index": index}),
+                )),
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        Some(_) => {
+            return Err(protocol_failure(
+                "GDB/MI hardware-breakpoint thread groups exceeded the safe boundary",
+                json!({"maximum_entries": 64}),
+            ));
+        }
+    };
+    let original_location =
+        optional_bounded_breakpoint_field(fields, "original-location", MAX_BREAKPOINT_TEXT_BYTES)?;
+    let expected_location = format!("*0x{:x}", requested_address.0);
+    if original_location
+        .as_deref()
+        .is_some_and(|location| location != expected_location)
+    {
+        return Err(protocol_failure(
+            "GDB/MI hardware-breakpoint original location did not match the numeric request",
+            json!({"expected": expected_location, "observed": original_location}),
+        ));
+    }
+    let file = match (
+        optional_bounded_breakpoint_field(fields, "file", MAX_BREAKPOINT_TEXT_BYTES)?,
+        optional_bounded_breakpoint_field(fields, "filename", MAX_BREAKPOINT_TEXT_BYTES)?,
+    ) {
+        (Some(file), None) | (None, Some(file)) => Some(file),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("duplicate file fields were rejected above"),
+    };
+    let line = fields
+        .contains_key("line")
+        .then(|| {
+            parse_decimal_text(
+                exact_string_field(fields, "line", "hardware breakpoint")?,
+                "hardware breakpoint source line",
+            )
+        })
+        .transpose()?;
+
+    Ok(GdbMiHardwareBreakpoint {
+        number,
+        breakpoint_type: breakpoint_type.to_string(),
+        disposition: disposition.to_string(),
+        enabled: true,
+        address: Address(address),
+        hit_count,
+        thread_groups,
+        original_location,
+        function: optional_bounded_breakpoint_field(fields, "func", MAX_BREAKPOINT_TEXT_BYTES)?,
+        file,
+        fullname: optional_bounded_breakpoint_field(fields, "fullname", MAX_BREAKPOINT_TEXT_BYTES)?,
+        line,
+        address_flags: optional_bounded_breakpoint_field(
+            fields,
+            "addr_flags",
+            MAX_BREAKPOINT_TEXT_BYTES,
+        )?,
+        at: optional_bounded_breakpoint_field(fields, "at", MAX_BREAKPOINT_TEXT_BYTES)?,
+        what: optional_bounded_breakpoint_field(fields, "what", MAX_BREAKPOINT_TEXT_BYTES)?,
+    })
+}
+
+fn parse_empty_breakpoint_table(
+    variables: &HashMap<String, MiValue>,
+) -> std::result::Result<GdbMiBreakpointTable, LifecycleFailure> {
+    const EXPECTED_COLUMNS: [&str; 6] = ["number", "type", "disp", "enabled", "addr", "what"];
+    if variables.len() != 1 {
+        return Err(protocol_failure(
+            "GDB/MI breakpoint-list result contained unexpected fields",
+            json!({"expected_field": "BreakpointTable", "field_count": variables.len()}),
+        ));
+    }
+    let Some(MiValue::Dict(table)) = variables.get("BreakpointTable") else {
+        return Err(protocol_failure(
+            "GDB/MI breakpoint-list result did not contain a table",
+            json!({"expected_field": "BreakpointTable"}),
+        ));
+    };
+    let expected_fields = ["nr_rows", "nr_cols", "hdr", "body"];
+    if table.len() != expected_fields.len()
+        || table
+            .keys()
+            .any(|field| !expected_fields.contains(&field.as_str()))
+    {
+        let mut reported_fields = table.keys().cloned().collect::<Vec<_>>();
+        reported_fields.sort();
+        return Err(protocol_failure(
+            "GDB/MI breakpoint table contained unexpected fields",
+            json!({"expected_fields": expected_fields, "reported_fields": reported_fields}),
+        ));
+    }
+    let reported_rows = parse_decimal_text(
+        exact_string_field(table, "nr_rows", "breakpoint table")?,
+        "breakpoint table row count",
+    )?;
+    let reported_columns = parse_decimal_text(
+        exact_string_field(table, "nr_cols", "breakpoint table")?,
+        "breakpoint table column count",
+    )?;
+    if reported_rows != 0 || reported_columns != EXPECTED_COLUMNS.len() as u64 {
+        return Err(protocol_failure(
+            "GDB/MI breakpoint table was not the expected empty six-column table",
+            json!({
+                "reported_rows": reported_rows,
+                "reported_columns": reported_columns,
+                "expected_rows": 0,
+                "expected_columns": EXPECTED_COLUMNS.len(),
+            }),
+        ));
+    }
+
+    let Some(MiValue::List(headers)) = table.get("hdr") else {
+        return Err(protocol_failure(
+            "GDB/MI breakpoint table header was not a list",
+            json!({"field": "hdr"}),
+        ));
+    };
+    if headers.len() != EXPECTED_COLUMNS.len() {
+        return Err(protocol_failure(
+            "GDB/MI breakpoint table header count did not match the declared columns",
+            json!({"header_count": headers.len(), "reported_columns": reported_columns}),
+        ));
+    }
+    let mut header_columns = Vec::with_capacity(headers.len());
+    for (index, header) in headers.iter().enumerate() {
+        let MiValue::Dict(fields) = header else {
+            return Err(protocol_failure(
+                "GDB/MI breakpoint table header entry was not a tuple",
+                json!({"index": index}),
+            ));
+        };
+        let expected_header_fields = ["width", "alignment", "col_name", "colhdr"];
+        if fields.len() != expected_header_fields.len()
+            || fields
+                .keys()
+                .any(|field| !expected_header_fields.contains(&field.as_str()))
+        {
+            return Err(protocol_failure(
+                "GDB/MI breakpoint table header contained unexpected fields",
+                json!({"index": index}),
+            ));
+        }
+        parse_decimal_text(
+            exact_string_field(fields, "width", "breakpoint table header")?,
+            "breakpoint table header width",
+        )?;
+        let alignment = exact_string_field(fields, "alignment", "breakpoint table header")?;
+        alignment.parse::<i64>().map_err(|_| {
+            protocol_failure(
+                "GDB/MI breakpoint table header alignment was not a signed integer",
+                json!({"index": index, "alignment": bounded_line(alignment)}),
+            )
+        })?;
+        let column = exact_string_field(fields, "col_name", "breakpoint table header")?;
+        if column != EXPECTED_COLUMNS[index] {
+            return Err(protocol_failure(
+                "GDB/MI breakpoint table columns did not match the fixed schema",
+                json!({"index": index, "expected": EXPECTED_COLUMNS[index], "observed": bounded_line(column)}),
+            ));
+        }
+        let label = exact_string_field(fields, "colhdr", "breakpoint table header")?;
+        if label.is_empty() || label.len() > 128 || label.chars().any(char::is_control) {
+            return Err(protocol_failure(
+                "GDB/MI breakpoint table column label exceeded the safe boundary",
+                json!({"index": index}),
+            ));
+        }
+        header_columns.push(column.to_string());
+    }
+    let Some(MiValue::List(body)) = table.get("body") else {
+        return Err(protocol_failure(
+            "GDB/MI breakpoint table body was not a list",
+            json!({"field": "body"}),
+        ));
+    };
+    if !body.is_empty() {
+        return Err(protocol_failure(
+            "GDB/MI breakpoint table was not empty after fixed deletion",
+            json!({"body_entries": body.len()}),
+        ));
+    }
+
+    Ok(GdbMiBreakpointTable {
+        reported_rows,
+        reported_columns,
+        header_columns,
+        body_entries: 0,
+        empty: true,
+    })
+}
+
+fn optional_bounded_breakpoint_field(
+    fields: &HashMap<String, MiValue>,
+    key: &str,
+    maximum_bytes: usize,
+) -> std::result::Result<Option<String>, LifecycleFailure> {
+    let Some(value) = fields.get(key) else {
+        return Ok(None);
+    };
+    let MiValue::String(value) = value else {
+        return Err(protocol_failure(
+            "GDB/MI hardware-breakpoint optional metadata was not a string",
+            json!({"field": key}),
+        ));
+    };
+    if value.is_empty() || value.len() > maximum_bytes || value.chars().any(char::is_control) {
+        return Err(protocol_failure(
+            "GDB/MI hardware-breakpoint optional metadata exceeded the safe text boundary",
+            json!({"field": key, "bytes": value.len(), "maximum_bytes": maximum_bytes}),
+        ));
+    }
+    Ok(Some(value.clone()))
+}
+
+fn parse_decimal_text(value: &str, label: &str) -> std::result::Result<u64, LifecycleFailure> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(protocol_failure(
+            format!("GDB/MI {label} was not an unsigned decimal integer"),
+            json!({"value": bounded_line(value)}),
+        ));
+    }
+    value.parse::<u64>().map_err(|_| {
+        protocol_failure(
+            format!("GDB/MI {label} exceeded 64 bits"),
+            json!({"value": bounded_line(value)}),
+        )
+    })
+}
+
+fn parse_hex_address_text(value: &str, label: &str) -> std::result::Result<u64, LifecycleFailure> {
+    let Some(digits) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    else {
+        return Err(protocol_failure(
+            format!("GDB/MI {label} was not hexadecimal"),
+            json!({"value": bounded_line(value)}),
+        ));
+    };
+    if digits.is_empty()
+        || digits.len() > 16
+        || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(protocol_failure(
+            format!("GDB/MI {label} had an invalid hexadecimal payload"),
+            json!({"value": bounded_line(value)}),
+        ));
+    }
+    u64::from_str_radix(digits, 16).map_err(|_| {
+        protocol_failure(
+            format!("GDB/MI {label} exceeded 64 bits"),
+            json!({"value": bounded_line(value)}),
+        )
     })
 }
 
@@ -3360,6 +4319,9 @@ fn parse_result_record(
     if payload.starts_with("done,stack=") {
         return parse_stack_result_record(line, token, class);
     }
+    if payload.starts_with("done,BreakpointTable=") {
+        return parse_breakpoint_table_result_record(line, token, class);
+    }
     let response = serde_gdbmi::parser::Response::try_from(line)
         .map_err(|error| format!("result record has invalid structured MI data: {error}"))?;
     let parsed_token = response
@@ -3467,6 +4429,186 @@ fn parse_named_stack_frame_list(
         match tokens.next() {
             Some(MiToken::Punct(',')) if tokens.peek().is_some() => {}
             _ => return Err("stack result-list separator was malformed".to_string()),
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_breakpoint_table_result_record(
+    line: &str,
+    token: Option<u64>,
+    class: String,
+) -> std::result::Result<ParsedRecord, String> {
+    if class != "done" {
+        return Err("breakpoint-table result used an unexpected result class".to_string());
+    }
+    let tokens = lexer::lex(line)
+        .map_err(|error| format!("breakpoint-table result has invalid MI data: {error}"))?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut tokens = tokens.into_iter();
+
+    if let Some(expected_token) = token {
+        match tokens.next() {
+            Some(MiToken::Text(value)) if value == expected_token.to_string() => {}
+            _ => {
+                return Err(
+                    "breakpoint-table result token was not represented exactly once".to_string(),
+                );
+            }
+        }
+    }
+    match tokens.next() {
+        Some(MiToken::Punct('^')) => {}
+        _ => return Err("breakpoint-table result marker was missing".to_string()),
+    }
+    match tokens.next() {
+        Some(MiToken::Text(value)) if value == "done" => {}
+        _ => return Err("breakpoint-table result class was not done".to_string()),
+    }
+    match tokens.next() {
+        Some(MiToken::Punct(',')) => {}
+        _ => return Err("breakpoint-table variable separator was missing".to_string()),
+    }
+    match tokens.next() {
+        Some(MiToken::Text(value)) if value == "BreakpointTable" => {}
+        _ => return Err("result did not contain the exact BreakpointTable variable".to_string()),
+    }
+    match tokens.next() {
+        Some(MiToken::Punct('=')) => {}
+        _ => return Err("breakpoint-table assignment was missing".to_string()),
+    }
+    let table = match tokens.next() {
+        Some(MiToken::Braced(fields)) => parse_breakpoint_table_fields(fields)?,
+        _ => return Err("BreakpointTable was not a tuple".to_string()),
+    };
+    if tokens.next().is_some() {
+        return Err("breakpoint-table result contained trailing variables".to_string());
+    }
+
+    Ok(ParsedRecord::Result {
+        token,
+        class,
+        variables: HashMap::from([("BreakpointTable".to_string(), MiValue::Dict(table))]),
+    })
+}
+
+fn parse_breakpoint_table_fields(
+    fields: lexer::TokenStream,
+) -> std::result::Result<HashMap<String, MiValue>, String> {
+    let mut tokens = fields.into_iter().peekable();
+    let mut parsed = HashMap::new();
+    while tokens.peek().is_some() {
+        let key = match tokens.next() {
+            Some(MiToken::Text(key)) => key,
+            _ => return Err("breakpoint-table field name was malformed".to_string()),
+        };
+        match tokens.next() {
+            Some(MiToken::Punct('=')) => {}
+            _ => return Err("breakpoint-table field assignment was missing".to_string()),
+        }
+        let value = match (key.as_str(), tokens.next()) {
+            ("hdr", Some(MiToken::Bracketed(headers))) => {
+                MiValue::List(parse_breakpoint_header_list(headers)?)
+            }
+            ("body", Some(MiToken::Bracketed(body))) => {
+                MiValue::List(parse_breakpoint_body_list(body)?)
+            }
+            (_, Some(MiToken::Text(value))) => MiValue::String(value),
+            _ => return Err("breakpoint-table field had an unexpected value shape".to_string()),
+        };
+        if parsed.insert(key, value).is_some() {
+            return Err("breakpoint table contained a duplicate field".to_string());
+        }
+        if tokens.peek().is_none() {
+            break;
+        }
+        match tokens.next() {
+            Some(MiToken::Punct(',')) if tokens.peek().is_some() => {}
+            _ => return Err("breakpoint-table field separator was malformed".to_string()),
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_breakpoint_header_list(
+    headers: lexer::TokenStream,
+) -> std::result::Result<Vec<MiValue>, String> {
+    let mut tokens = headers.into_iter().peekable();
+    let mut parsed = Vec::new();
+    while tokens.peek().is_some() {
+        let fields = match tokens.next() {
+            Some(MiToken::Braced(fields)) => parse_breakpoint_header_fields(fields)?,
+            _ => return Err("breakpoint-table header entry was not a tuple".to_string()),
+        };
+        parsed.push(MiValue::Dict(fields));
+        if tokens.peek().is_none() {
+            break;
+        }
+        match tokens.next() {
+            Some(MiToken::Punct(',')) if tokens.peek().is_some() => {}
+            _ => return Err("breakpoint-table header separator was malformed".to_string()),
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_breakpoint_header_fields(
+    fields: lexer::TokenStream,
+) -> std::result::Result<HashMap<String, MiValue>, String> {
+    let mut tokens = fields.into_iter().peekable();
+    let mut parsed = HashMap::new();
+    while tokens.peek().is_some() {
+        let key = match tokens.next() {
+            Some(MiToken::Text(key)) => key,
+            _ => return Err("breakpoint-table header field name was malformed".to_string()),
+        };
+        match tokens.next() {
+            Some(MiToken::Punct('=')) => {}
+            _ => return Err("breakpoint-table header assignment was missing".to_string()),
+        }
+        let value = match tokens.next() {
+            Some(MiToken::Text(value)) => MiValue::String(value),
+            _ => return Err("breakpoint-table header field was not scalar".to_string()),
+        };
+        if parsed.insert(key, value).is_some() {
+            return Err("breakpoint-table header contained a duplicate field".to_string());
+        }
+        if tokens.peek().is_none() {
+            break;
+        }
+        match tokens.next() {
+            Some(MiToken::Punct(',')) if tokens.peek().is_some() => {}
+            _ => return Err("breakpoint-table header field separator was malformed".to_string()),
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_breakpoint_body_list(
+    body: lexer::TokenStream,
+) -> std::result::Result<Vec<MiValue>, String> {
+    let mut tokens = body.into_iter().peekable();
+    let mut parsed = Vec::new();
+    while tokens.peek().is_some() {
+        match tokens.next() {
+            Some(MiToken::Text(value)) if value == "bkpt" => {}
+            _ => return Err("breakpoint-table body entry was not named bkpt".to_string()),
+        }
+        match tokens.next() {
+            Some(MiToken::Punct('=')) => {}
+            _ => return Err("breakpoint-table body assignment was missing".to_string()),
+        }
+        match tokens.next() {
+            Some(MiToken::Braced(_)) => parsed.push(MiValue::Dict(HashMap::new())),
+            _ => return Err("breakpoint-table body entry was not a tuple".to_string()),
+        }
+        if tokens.peek().is_none() {
+            break;
+        }
+        match tokens.next() {
+            Some(MiToken::Punct(',')) if tokens.peek().is_some() => {}
+            _ => return Err("breakpoint-table body separator was malformed".to_string()),
         }
     }
     Ok(parsed)
@@ -3834,6 +4976,79 @@ mod tests {
     }
 
     #[test]
+    fn hardware_breakpoint_result_accepts_the_bounded_official_shape() {
+        let record = parse_record(
+            "3^done,bkpt={number=\"1\",type=\"hw breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x420129e4\",thread-groups=[\"i1\"],times=\"0\",original-location=\"*0x420129e4\"}",
+        )
+        .unwrap();
+        let ParsedRecord::Result { variables, .. } = record else {
+            panic!("expected result record");
+        };
+        let breakpoint = parse_hardware_breakpoint(&variables, Address(0x4201_29e4)).unwrap();
+
+        assert_eq!(breakpoint.number, 1);
+        assert_eq!(breakpoint.breakpoint_type, "hw breakpoint");
+        assert_eq!(breakpoint.address, Address(0x4201_29e4));
+        assert_eq!(breakpoint.hit_count, 0);
+        assert_eq!(breakpoint.thread_groups, ["i1"]);
+        assert_eq!(breakpoint.original_location.as_deref(), Some("*0x420129e4"));
+    }
+
+    #[test]
+    fn hardware_breakpoint_result_rejects_unsafe_type_address_and_fields() {
+        let invalid = [
+            "3^done,bkpt={number=\"1\",type=\"breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x420129e4\",times=\"0\"}",
+            "3^done,bkpt={number=\"1\",type=\"hw breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x420129e8\",times=\"0\"}",
+            "3^done,bkpt={number=\"1\",type=\"hw breakpoint\",disp=\"keep\",enabled=\"y\",addr=\"0x420129e4\",times=\"0\",cond=\"x == 1\"}",
+        ];
+        for line in invalid {
+            let record = parse_record(line).unwrap();
+            let ParsedRecord::Result { variables, .. } = record else {
+                panic!("expected result record");
+            };
+            assert!(
+                parse_hardware_breakpoint(&variables, Address(0x4201_29e4)).is_err(),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn breakpoint_delete_requires_the_exact_empty_table_shape() {
+        let record = parse_record(
+            "5^done,BreakpointTable={nr_rows=\"0\",nr_cols=\"6\",hdr=[{width=\"3\",alignment=\"-1\",col_name=\"number\",colhdr=\"Num\"},{width=\"14\",alignment=\"-1\",col_name=\"type\",colhdr=\"Type\"},{width=\"4\",alignment=\"-1\",col_name=\"disp\",colhdr=\"Disp\"},{width=\"3\",alignment=\"-1\",col_name=\"enabled\",colhdr=\"Enb\"},{width=\"18\",alignment=\"-1\",col_name=\"addr\",colhdr=\"Address\"},{width=\"40\",alignment=\"2\",col_name=\"what\",colhdr=\"What\"}],body=[]}",
+        )
+        .unwrap();
+        let ParsedRecord::Result { variables, .. } = record else {
+            panic!("expected result record");
+        };
+        let table = parse_empty_breakpoint_table(&variables).unwrap();
+
+        assert_eq!(table.reported_rows, 0);
+        assert_eq!(table.reported_columns, 6);
+        assert_eq!(
+            table.header_columns,
+            ["number", "type", "disp", "enabled", "addr", "what"]
+        );
+        assert!(table.empty);
+    }
+
+    #[test]
+    fn breakpoint_delete_rejects_a_nonempty_or_extended_table() {
+        let invalid = [
+            "5^done,BreakpointTable={nr_rows=\"1\",nr_cols=\"6\",hdr=[],body=[bkpt={number=\"1\"}]}",
+            "5^done,BreakpointTable={nr_rows=\"0\",nr_cols=\"6\",hdr=[],body=[],extra=\"x\"}",
+        ];
+        for line in invalid {
+            let record = parse_record(line).unwrap();
+            let ParsedRecord::Result { variables, .. } = record else {
+                panic!("expected result record");
+            };
+            assert!(parse_empty_breakpoint_table(&variables).is_err(), "{line}");
+        }
+    }
+
+    #[test]
     fn test_options_validate_scalar_bounds_before_executable_lookup() {
         let mut options = GdbMiTestOptions {
             executable: PathBuf::from("missing-gdb"),
@@ -3893,5 +5108,27 @@ mod tests {
         );
         assert_eq!(contract.commands[3].command, REMOTE_DETACH_COMMAND);
         assert_eq!(contract.commands[4].command, EXIT_COMMAND);
+    }
+
+    #[test]
+    fn breakpoint_protocol_contract_binds_one_temporary_hardware_roundtrip() {
+        let contract = breakpoint_protocol_contract(Address(0x4201_29e4));
+        assert_eq!(contract.commands.len(), 7);
+        assert_eq!(contract.commands[0].command, VERSION_COMMAND);
+        assert_eq!(
+            contract.commands[1].command,
+            REMOTE_SELECT_COMMAND_PLACEHOLDER
+        );
+        assert_eq!(contract.commands[2].command, "-break-insert -h *0x420129e4");
+        assert_eq!(contract.commands[3].command, BREAKPOINT_DELETE_COMMAND);
+        assert_eq!(contract.commands[4].command, BREAKPOINT_LIST_COMMAND);
+        assert_eq!(contract.commands[5].command, REMOTE_DETACH_COMMAND);
+        assert_eq!(contract.commands[6].command, EXIT_COMMAND);
+
+        let cleanup = breakpoint_failure_cleanup_contract();
+        assert_eq!(cleanup.len(), 3);
+        assert_eq!(cleanup[0].token, BREAKPOINT_CLEANUP_DELETE_TOKEN);
+        assert_eq!(cleanup[1].token, BREAKPOINT_CLEANUP_LIST_TOKEN);
+        assert_eq!(cleanup[2].token, BREAKPOINT_CLEANUP_DETACH_TOKEN);
     }
 }

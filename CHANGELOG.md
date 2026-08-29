@@ -135,6 +135,23 @@ All notable changes to this project will be documented in this file.
   processes, proved both ports reusable, and recovered UART heartbeats. Runtime
   ELF identity, physical call-stack completeness, CPU1, and implicit unwind
   addresses remain unqualified.
+- Confirmed `openocd breakpoint plan/test` for one temporary hardware-only
+  breakpoint at an exact nonzero numeric address. Its independent R2 digest
+  binds fixed `-break-insert -h`, breakpoint-1 deletion, exact empty-table
+  verification, tools/config/profile, target, deadlines, effects, and
+  restoration. Structured parsing requires an enabled `hw breakpoint` at the
+  requested address with zero hits, accepts the official named breakpoint-table
+  body grammar, and rejects software, pending, conditional, multi-location,
+  malformed, extra, or residual entries. The target is never intentionally
+  continued while the breakpoint exists. Breakpoint-exchange failures after
+  connection and before normal detach attempt fixed delete/list/detach cleanup.
+  Every GDB failure records a point-in-time target state and issues no additional
+  Tcl resume; GDB detach/exit or configured detach handlers may
+  still resume the target, so manual recovery may be required and failures are
+  never retried automatically. Runtime adapter identity, comparator capacity,
+  and physical comparator cleanup remain unbound or independently unverified.
+  Controlled parser, digest, success, failure-cleanup, two-process, and CLI
+  regressions pass; physical target acceptance is still pending.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current
@@ -300,14 +317,16 @@ All notable changes to this project will be documented in this file.
 
 ### Known limitations
 
-- OpenOCD host inspection, a confirmed managed server, GDB/MI host validation,
-  a confirmed fixed remote attach/detach lifecycle, and one fixed direct CPU0
-  halt/resume roundtrip are implemented; the latter is physically accepted on
-  ESP32-S3. A fixed global reset-halt and selected-target recovery workflow is
-  also physically accepted on ESP32-S3 CPU0. General OpenOCD target
-  discovery/control, configurable reset, non-selected target restoration,
-  symbol/ELF loading, register or memory inspection, breakpoints/watchpoints,
-  and flashing are not. The MCP adapter
+- OpenOCD host inspection, managed server and GDB/MI validation, fixed remote
+  attach/detach, direct halt/resume, global reset-halt with selected-target
+  recovery, selected-register, bounded memory/stack, and offline stack-ELF
+  annotation workflows are implemented and physically accepted on ESP32-S3
+  CPU0 within their exact plans. One temporary numeric hardware-breakpoint
+  roundtrip is implemented with controlled coverage but has no physical
+  acceptance yet. General OpenOCD target discovery/control, configurable reset,
+  non-selected target restoration, GDB symbol loading, persistent/software/
+  symbolic/conditional breakpoints, breakpoint-hit execution, watchpoints, and
+  flashing are not exposed. The MCP adapter
   currently exposes only the probe-rs/Replay persistent session contract;
   OpenOCD and flash planning/execution remain CLI operations.
 - Native raw BIN requires an explicit base address; Replay uses the fixture

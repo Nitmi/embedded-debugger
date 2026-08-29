@@ -374,6 +374,51 @@ identity, physical stack completeness, bounded implicit unwind addresses, CPU1,
 or any broader debugging capability, and it is not standing authorization for
 a future physical execution.
 
+Temporary OpenOCD hardware-breakpoint qualification is a separate confirmed
+checkpoint:
+
+```console
+cargo run -- openocd breakpoint plan \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --address 0x420129E4 \
+  --json
+
+cargo run -- openocd breakpoint test \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --address 0x420129E4 \
+  --confirm <confirm_digest> \
+  --json
+```
+
+The plan accepts only one exact nonzero numeric address and fixes
+`-break-insert -h *0x...`; it has no symbol, expression, software-breakpoint,
+condition, command-list, continue, or hit-wait input. The target is not
+intentionally run while the breakpoint is installed. Success requires GDB to
+report breakpoint 1 as an enabled `hw breakpoint` at the exact address with
+zero hits, then accept its deletion and return an exact empty six-column
+breakpoint table before detach and running-state restoration.
+
+This is still `R2_DEVICE_WRITE`. Runtime adapter identity, hardware-breakpoint
+capacity, and physical comparator state are not independently bound or read
+back. If the breakpoint exchange fails after connection but before normal
+detach, the tool attempts fixed delete, list, and detach cleanup before exit.
+Every GDB failure records a point-in-time target observation and sends no
+additional OpenOCD Tcl resume. GDB detach, GDB exit, or configuration-defined
+detach handlers may nevertheless resume the target, so failure can require
+manual recovery and must never be retried automatically. Controlled parser and
+two-process lifecycle tests pass; no physical target acceptance has been
+performed for this command yet.
+
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
 ```console
@@ -796,8 +841,11 @@ See [docs/contracts.md](docs/contracts.md),
 [ADR-0009](docs/decisions/0009-confirmed-openocd-target-state-roundtrip.md),
 [ADR-0010](docs/decisions/0010-confirmed-openocd-reset-recovery.md),
 [ADR-0011](docs/decisions/0011-confirmed-openocd-register-snapshot.md),
-[ADR-0012](docs/decisions/0012-confirmed-openocd-memory-snapshot.md), and
-[ADR-0013](docs/decisions/0013-confirmed-openocd-stack-snapshot.md).
+[ADR-0012](docs/decisions/0012-confirmed-openocd-memory-snapshot.md),
+[ADR-0013](docs/decisions/0013-confirmed-openocd-stack-snapshot.md),
+[ADR-0014](docs/decisions/0014-offline-elf-stack-annotations.md),
+[ADR-0015](docs/decisions/0015-bounded-zero-size-symbol-inference.md), and
+[ADR-0016](docs/decisions/0016-confirmed-openocd-hardware-breakpoint-roundtrip.md).
 
 ## Current status
 
@@ -855,11 +903,15 @@ returned frame range is bound; implicit unwind-read addresses, symbol identity,
 and physical call-stack completeness remain unproven. The separate offline
 ELF-annotation contract has also passed one exact-plan ESP32-S3 CPU0 run: one
 top frame resolved to eight bounded DWARF annotations, one caller remained
-unresolved, and cleanup plus UART recovery completed. GDB-loaded symbols,
+unresolved, and cleanup plus UART recovery completed. A separate temporary
+OpenOCD hardware-breakpoint roundtrip now passes strict parser, digest,
+two-process success, and failure-cleanup regressions; it has not yet received
+physical target acceptance. GDB-loaded symbols,
 trusted runtime symbolization, argument/local/value
 inspection, general ELF/HEX loading, RTT, memory writes, Generic/MMIO or
 undeclared-region reads, register writes, software/symbolic/conditional
-breakpoints, watchpoints,
+breakpoints, persistent OpenOCD breakpoints, breakpoint-hit execution,
+watchpoints,
 asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,
 and non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD

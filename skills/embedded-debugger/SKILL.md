@@ -1,6 +1,6 @@
 ---
 name: embedded-debugger
-description: Use embedded-debugger for structured embedded flashing and debugging through probe-rs or Replay, plus confirmed OpenOCD and GDB lifecycles. Trigger when work needs exact probe selection, bounded target control, evidence, safe session cleanup, or verified debug-tool integration.
+description: Use embedded-debugger for structured embedded flashing and debugging through probe-rs or Replay, plus confirmed OpenOCD/GDB lifecycles and temporary hardware-breakpoint qualification. Trigger when work needs exact probe selection, bounded target control, cleanup evidence, or verified debug-tool integration.
 ---
 
 # Embedded Debugger
@@ -184,6 +184,29 @@ target/ELF equality, physical call-stack completeness, bounded unwind reads,
 CPU1 support, or broader symbol correctness. Acceptance evidence is not
 standing authorization: require a fresh plan review and exact confirmation for
 every later physical execution, and never retry automatically.
+
+For a temporary OpenOCD hardware-breakpoint qualification, use only
+`openocd breakpoint plan/test` with an exact nonzero numeric `--address` and
+the same exact session inputs. Surface the R2 effects and the fixed
+`-break-insert -h *0x...`, delete, and empty-table protocol. The command does
+not accept symbols, expressions, software or conditional breakpoints, continue
+the target while installed, or wait for a hit. Require a fresh exact digest
+immediately before every physical `test`; prior breakpoint, stack, or session
+acceptance is not authorization.
+
+Success requires GDB to identify breakpoint 1 as hardware-assisted at the
+exact address with zero hits, delete it, and return the exact empty six-column
+table before running restoration. Do not claim that this independently reads
+the physical comparator: runtime adapter identity, comparator capacity, and
+physical comparator cleanup remain unbound or unverified. If the breakpoint
+exchange fails after connection but before normal detach, the tool attempts
+fixed delete/list/detach. Every GDB failure records a point-in-time target state
+but sends no additional Tcl resume. GDB detach, GDB exit, or configured detach
+handlers may still resume the target. Treat the outcome as potentially
+indeterminate, perform explicit recovery only with fresh authority, and never
+retry automatically. This workflow has controlled host coverage but no
+physical target acceptance yet; it does not authorize a persistent breakpoint,
+breakpoint-hit execution, watchpoint, symbol loading, or general GDB control.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state
