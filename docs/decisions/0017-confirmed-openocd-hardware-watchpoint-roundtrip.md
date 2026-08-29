@@ -76,6 +76,24 @@ safely from a numeric address alone.
   remain unavailable until they have distinct policies and evidence.
 - Every physical execution requires a fresh plan and exact user confirmation.
 
+## Physical acceptance
+
+After independent confirmation of digest
+`3a502b8a88fa5778f9bbbb11cd92c7d4ebc5cf160858bb2035a634e038e20db8`,
+one non-retried ESP32-S3 CPU0 `access` run over `0x3FCDB550 + 4` passed the
+fixed nine-command protocol. GDB returned exact `hw-awpt` insertion metadata
+and one `acc watchpoint` row, deletion returned `done`, the following canonical
+table was empty, and final target state was proven running. Both managed
+processes exited gracefully, both dynamic ports were reusable, device identity
+was unchanged, and zero-transmit UART monitoring recovered to eight consecutive
+heartbeats.
+
+This acceptance is exact to that digest, access mode, range, CPU0, tools,
+profile, and configuration. It does not alter the decision's separation between
+GDB hardware classification and physical comparator allocation/readback. RAM
+semantics, target width/capacity, physical comparator cleanup, `read` mode,
+watchpoint-hit execution, CPU1, and all later physical plans remain unqualified.
+
 ## References
 
 - [GDB watchpoint semantics](https://www.sourceware.org/gdb/current/onlinedocs/gdb.html/Set-Watchpoints.html)

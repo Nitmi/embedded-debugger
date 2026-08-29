@@ -468,8 +468,13 @@ comparator cleanup; some resource failures are reported by GDB only when the
 inferior resumes. Runtime adapter identity and target RAM semantics also remain
 unbound. Failures after insertion attempt fixed delete/list/detach cleanup,
 record a point-in-time target state, issue no additional Tcl resume, and must
-not be retried automatically. This implementation has controlled and CLI
-coverage, but no physical watchpoint acceptance yet.
+not be retried automatically. Controlled and CLI coverage passes. One
+independently confirmed, non-retried ESP32-S3 CPU0 `access` run over
+`0x3FCDB550 + 4` also returned exact `hw-awpt`/`acc watchpoint` evidence,
+deleted it, proved the canonical table empty, restored final running, cleaned
+both processes and ports, and recovered stable UART heartbeats. That exact
+acceptance does not qualify `read`, hit execution, physical comparator
+allocation/cleanup, another range/target/tool plan, or a later physical run.
 
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
@@ -964,9 +969,12 @@ hardware insertion, deletion, empty GDB table, final running state, graceful
 cleanup, reusable ports, and UART recovery. Physical comparator state and
 capacity remain independently unverified. A separate temporary OpenOCD
 hardware-watchpoint workflow now has strict `read`/`access` planning,
-classification, cleanup, digest, controlled-process, and CLI coverage. It has
-not yet run on a physical target, and does not claim comparator allocation,
-width/capacity support, hit behavior, or physical cleanup. GDB-loaded symbols,
+classification, cleanup, digest, controlled-process, and CLI coverage. One
+independently confirmed, non-retried ESP32-S3 CPU0 `access` run over
+`0x3FCDB550 + 4` proved the exact GDB hardware classification, deletion, empty
+table, final running state, graceful cleanup, reusable ports, and UART
+recovery. `read` mode, comparator allocation, width/capacity support, hit
+behavior, and physical cleanup remain unqualified. GDB-loaded symbols,
 trusted runtime symbolization, argument/local/value
 inspection, general ELF/HEX loading, RTT, memory writes, Generic/MMIO or
 undeclared-region reads, register writes, software/symbolic/conditional

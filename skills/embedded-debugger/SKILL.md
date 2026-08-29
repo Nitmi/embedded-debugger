@@ -240,7 +240,13 @@ failure the tool attempts fixed delete/list/detach, records point-in-time target
 state, and sends no additional Tcl resume; detach/exit or configured handlers
 may still resume the target. Never retry automatically, and perform manual
 recovery only with fresh authority. Controlled tests are not physical target
-acceptance.
+acceptance. One separately confirmed, non-retried ESP32-S3 CPU0 `access` run
+over `0x3FCDB550 + 4` has passed exact insertion classification, deletion,
+empty-table proof, final-running restoration, process/port cleanup, and UART
+recovery. Treat it as exact to digest `3a502b8a...0db8`, access mode, range,
+CPU0, tools, profile, and configuration. It does not qualify `read`, comparator
+allocation/cleanup, width/capacity, hit execution, CPU1, or any later physical
+plan, and is not standing authorization.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

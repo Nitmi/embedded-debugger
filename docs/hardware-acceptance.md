@@ -1208,3 +1208,74 @@ the exact new digest above. It is limited to one non-retried ESP32-S3 CPU0
 `openocd watchpoint test`, followed by process/port cleanup review and external
 UART/probe liveness checks. Historical confirmations and the connected board
 are not standing authorization.
+
+## OpenOCD temporary hardware-watchpoint physical acceptance (2026-08-29)
+
+- The user independently returned exact digest
+  `3a502b8a88fa5778f9bbbb11cd92c7d4ebc5cf160858bb2035a634e038e20db8`.
+  Exactly one ESP32-S3 CPU0 `openocd watchpoint test` then ran for access mode
+  over `0x3FCDB550 + 4`, exited 0, and was not retried. Immediately before the
+  run, commit `af62d0edadf7e22365089f46eabea42399a4705c` had a clean worktree,
+  the committed binary and four bound tool/config/profile hashes matched, and
+  a fresh host-only plan reproduced the confirmed digest and fixed nine-command
+  protocol.
+- `baud 0.1.0`, Windows PnP, and probe-rs agreed before execution on COM3 and
+  the accessible EspJtag identity `303A:1001 / E0:72:A1:D4:1F:DC`. The
+  five-second 115200-baud baseline held DTR/RTS false, transmitted zero bytes,
+  received 209 monitored bytes, and contained consecutive heartbeats
+  `54867..54871`.
+- OpenOCD became ready in 101 ms on dynamic loopback Tcl/GDB ports 4377/4378,
+  logged the same adapter serial, examined CPU0, and proved the selected target
+  initially running. CPU1 examination again failed with
+  `OCD_ID=00000000` and remains unqualified. Attach handlers also halted CPU0,
+  queried reset cause, initialized flash-mapping helpers, and exchanged a
+  memory map; the wrapper issued no explicit reset, flash, general memory,
+  register, symbol, monitor, continue, or arbitrary command.
+- GDB returned the exact result classes
+  `done / connected / done / done / done / done / done / done / exit`. In 5 ms
+  insertion returned only `hw-awpt={number="1",exp="*((char*)0x3fcdb550)@4"}`.
+  The following list contained exactly one canonical six-column row: number 1,
+  `acc watchpoint`, `keep`, enabled, exact expression/original location, thread
+  group `i1`, and hit count 0. Deletion returned `done` in 14 ms; the next list
+  returned exactly zero rows, six canonical columns, and an empty body. The
+  target was never intentionally continued while the watchpoint existed and no
+  hit was requested.
+- Detach left CPU0 observed halted. Because exact hardware classification,
+  deletion, and the empty GDB table were all proven, the one fixed resume
+  fallback was allowed and proved final `esp32s3.cpu0=running` in 3 ms. GDB and
+  OpenOCD exited 0 gracefully in 20/12 ms; neither process tree was force-killed
+  and both cleanup reports were complete.
+- The first post-run zero-transmit monitor retained a boundary fragment, then
+  returned complete consecutive heartbeats `54967..54970`. The final eight-
+  second stability monitor returned eight complete consecutive heartbeats
+  `54991..54998`. Both kept DTR/RTS false. Serial, PnP, and probe identities
+  were unchanged and the probe remained accessible.
+- No related process remained. Seven unowned `TIME_WAIT` rows were visible,
+  and independent bind-and-close checks proved both exact dynamic ports
+  reusable. The 21-check machine audit had zero failures. Evidence is retained
+  under `target/hardware-acceptance/2026-08-29-openocd-hardware-watchpoint`;
+  all 46 listed artifacts were rehashed with no missing, extra, size-mismatched,
+  or hash-mismatched file. The test JSON SHA-256 is
+  `831ab41a445e074b5be951262b7085d0b981093eeb719e3a44fec630ebc0d4ec`,
+  complete stderr SHA-256 is
+  `ead86f033552bbf6d1c33aa309bba142e39143e401b6fdb23b794a111e354be3`,
+  audit SHA-256 is
+  `4879d706b103605afcd8cc2815af0de93ec90ca6052c6dd594f4b5e2debb7b31`,
+  and acceptance-summary SHA-256 is
+  `d3c78dd7bcd8f1765b60f4776a21234671b5a6d951029897709095ca99a1e9be`.
+- After evidence and documentation synchronization, gates passed again with
+  214 library tests, 78 CLI tests, rustfmt, strict Clippy,
+  `rustdoc -D warnings`, a 68-file Cargo package (1.8 MiB / 355.2 KiB
+  compressed), the official Skill validator, artifact-manifest revalidation,
+  and `git diff --check`. None of these gates started OpenOCD, opened COM3, or
+  accessed USB/JTAG; the physical watchpoint test count remained exactly one.
+
+This accepts only the exact access-mode GDB hardware-classification,
+delete/empty-table, restoration, and cleanup roundtrip above. GDB may defer
+physical comparator allocation until execution resumes, which this test did
+not request; neither allocation nor physical cleanup was independently read
+back. Runtime adapter identity, declared RAM semantics, target width/capacity,
+`read` mode, hit execution, CPU1, persistent/write-only/symbolic/conditional
+watchpoints, another range/target/tool plan, and broader GDB control remain
+unqualified. This evidence is not standing authorization for another physical
+execution.

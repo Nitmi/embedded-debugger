@@ -178,7 +178,13 @@ All notable changes to this project will be documented in this file.
   state. Runtime adapter identity, RAM semantics, target width/capacity,
   physical allocation/cleanup, hits, CPU1, and any later physical plan remain
   unqualified. Controlled parser, digest, success, failure-cleanup, two-process,
-  and CLI regressions pass; no physical watchpoint execution has occurred.
+  and CLI regressions pass. A separately confirmed, non-retried ESP32-S3 CPU0
+  `access` run over `0x3FCDB550 + 4` returned exact `hw-awpt` and
+  `acc watchpoint` evidence, deleted it, proved the canonical table empty,
+  restored final running, gracefully cleaned both process trees, proved both
+  ports reusable, and recovered eight consecutive UART heartbeats. `read`
+  mode, physical comparator allocation/cleanup, width/capacity, hit behavior,
+  CPU1, and any later plan remain unqualified.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current
@@ -349,11 +355,13 @@ All notable changes to this project will be documented in this file.
   recovery, selected-register, bounded memory/stack, and offline stack-ELF
   annotation workflows are implemented and physically accepted on ESP32-S3
   CPU0 within their exact plans. One temporary numeric hardware-breakpoint
-  roundtrip is implemented with controlled coverage but has no physical
-  acceptance yet. General OpenOCD target discovery/control, configurable reset,
-  non-selected target restoration, GDB symbol loading, persistent/software/
-  symbolic/conditional breakpoints, breakpoint-hit execution, watchpoints, and
-  flashing are not exposed. The MCP adapter
+  roundtrip and one access-mode hardware-watchpoint classification/cleanup
+  roundtrip also have exact-plan physical acceptance. General OpenOCD target
+  discovery/control, configurable reset, non-selected target restoration, GDB
+  symbol loading, persistent/software/symbolic/conditional breakpoints,
+  breakpoint-hit execution, write-only/persistent watchpoints, read-mode
+  physical watchpoint acceptance, watchpoint-hit execution, and flashing are
+  not exposed or remain unqualified. The MCP adapter
   currently exposes only the probe-rs/Replay persistent session contract;
   OpenOCD and flash planning/execution remain CLI operations.
 - Native raw BIN requires an explicit base address; Replay uses the fixture
@@ -363,8 +371,9 @@ All notable changes to this project will be documented in this file.
 - Native flashing is limited to readable boot NVM. Multi-core segmented
   execution is physically accepted only on ESP32-S3. RTT, arbitrary
   memory writes, Generic/MMIO reads, register writes, software/symbolic/
-  conditional breakpoints, watchpoints, asynchronous request cancellation, and
-  durable crash recovery or multi-client arbitration are not implemented. The
+  conditional breakpoints, general/persistent watchpoints, watchpoint-hit
+  execution, asynchronous request cancellation, and durable crash recovery or
+  multi-client arbitration are not implemented. The
   supervisor can replace an MCP child but cannot prove target cleanup after a
   hard kill. Persistent hardware
   breakpoints and idle lease expiry are physically accepted only on ESP32-S3

@@ -640,8 +640,17 @@ and cleanup roundtrip. Write-only or persistent watchpoints, hit execution,
 breakpoints, general execution control, symbol loading, explicit register or
 general memory commands, memory writes, stack reads, flash, monitor input, and
 arbitrary MI/Tcl remain unavailable. Controlled parser, digest, cleanup,
-target-state, two-process, and CLI regressions pass. No physical watchpoint
-acceptance is inherited from those tests.
+target-state, two-process, and CLI regressions pass.
+
+One independently confirmed physical ESP32-S3 CPU0 run has passed for exact
+digest `3a502b8a...0db8`, `access` mode, and range `0x3FCDB550 + 4`. It returned
+the exact `hw-awpt` tuple and `acc watchpoint` row, deleted number 1, proved the
+canonical table empty, restored final running, gracefully cleaned both managed
+processes, proved both dynamic ports reusable, and recovered stable UART
+heartbeats. This qualifies only that exact physical classification/cleanup
+roundtrip. It does not independently prove physical comparator allocation or
+cleanup, target width/capacity, RAM semantics, hit behavior, `read` mode, CPU1,
+another plan, or standing authority for a later run.
 
 ## Confirmed OpenOCD target state roundtrip
 
