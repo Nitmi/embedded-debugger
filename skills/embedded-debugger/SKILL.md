@@ -34,6 +34,19 @@ not retry failure automatically. A success proves only fixed selected-target
 halt/run; it does not authorize reset, GDB, register/memory/stack access,
 breakpoints, flash, monitor commands, or arbitrary Tcl.
 
+For a halted-target recovery, use the independent `openocd resume plan/test`
+workflow, never `openocd target test` or `openocd reset test`. Surface that the
+plan accepts only the exact current target in `halted` or `running`, sends one
+fixed catch-wrapped resume only from `halted`, sends no control command from
+`running`, requires final `running`, and fixes both maximum resume count to one
+and automatic retries to zero. Also surface that loading OpenOCD configuration
+executes Tcl, runtime adapter identity and non-selected target states remain
+unbound, and resumed firmware may perform arbitrary I/O. Generate two identical
+host-only plans and require a fresh exact digest immediately before every
+physical recovery. Do not reuse prior authorization, retry a failure, or claim
+halt, reset, watchpoint cleanup, target-data access, or non-selected-target
+restoration.
+
 For reset, use the independent `openocd reset plan/test` workflow. Before
 requesting confirmation, surface that OpenOCD resets all defined targets and
 runs configuration-defined reset events, while the tool observes and recovers

@@ -786,6 +786,59 @@ verified final restoration. Reset, GDB/MI, register/memory/stack reads,
 breakpoints, watchpoints, flash, monitor commands, and arbitrary Tcl remain
 false.
 
+## Confirmed OpenOCD selected-target resume-only recovery
+
+`openocd resume plan` accepts the managed OpenOCD inputs, one exact
+`--expected-target`, and a final-state deadline bounded to 100..=30000 ms. It
+validates target syntax and the deadline before resolving the executable or
+reading configuration files. The resulting `R2_DEVICE_WRITE` digest is
+independent from server, session, halt/run roundtrip, reset, breakpoint, and
+watchpoint digests.
+
+The digest binds the exact executable identity/version, top-level configuration
+manifests, ordered search paths, loopback dynamic-endpoint lifecycle, all
+deadlines, exact selected current-target name, fixed Tcl protocol, accepted
+`halted|running` origin policy, maximum resume count of one, and zero-retry
+policy. Search-directory contents, transitive sources, Tcl semantics, runtime
+adapter identity, dynamic port numbers, and non-selected target inventory and
+states remain explicitly unbound.
+
+`openocd resume test --confirm <DIGEST>` recomputes the plan and rejects a
+mismatch before configuration Tcl executes. Its complete fixed protocol is:
+
+```text
+target current
+  -> exact confirmed selected target name
+<validated-current-target> curstate
+  -> halted or running; every other state fails before control
+if halted only:
+  format {__EMBEDDED_DEBUGGER_RESUME_ONLY_V1__%d} [catch {targets <validated-current-target>; resume}]
+    -> exact catch code 0, issued at most once
+<validated-current-target> curstate
+  -> running proven within the bounded deadline
+shutdown
+  -> graceful OpenOCD exit
+```
+
+A target-name mismatch fails before resume. A running origin is idempotent: the
+tool sends no resume command and treats the initial observation as the final
+running proof. A halted origin receives exactly one fixed catch-wrapped resume,
+then bounded state polling. A nonzero or malformed catch envelope, transport
+error, missing observation, lifecycle error, or non-running final state fails
+closed. Once the managed server has started, every execution error includes the
+available initial, transition, final-state, readiness, shutdown, bounded-log,
+`resume_command_count`, and `automatic_retry_count=0` evidence. No failure path
+sends a second resume or automatically retries the physical operation.
+
+The command sends no halt, reset, flash, register/memory/stack, GDB/monitor,
+breakpoint/watchpoint, or arbitrary Tcl request. This narrow command surface
+does not mean configuration execution is side-effect-free: OpenOCD configuration
+is executable Tcl and can access or reset targets, and resumed firmware can
+perform arbitrary firmware-defined I/O. The result observes and proves only the
+exact selected target; non-selected target states are not inventoried or
+restored. Physical execution always requires two identical host-only plans and
+a fresh exact digest confirmation.
+
 ## Confirmed OpenOCD reset and selected-target recovery
 
 `openocd reset plan` accepts the managed OpenOCD inputs, one exact

@@ -11,8 +11,9 @@ use crate::{
             self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
             OpenOcdHardwareBreakpointOptions, OpenOcdHardwareWatchpointHitOptions,
             OpenOcdHardwareWatchpointMode, OpenOcdHardwareWatchpointOptions, OpenOcdInspectOptions,
-            OpenOcdMemorySnapshotOptions, OpenOcdRegisterSnapshotOptions, OpenOcdServerOptions,
-            OpenOcdStackElfOptions, OpenOcdStackSnapshotOptions, OpenOcdTargetOptions,
+            OpenOcdMemorySnapshotOptions, OpenOcdRegisterSnapshotOptions, OpenOcdResumeOptions,
+            OpenOcdServerOptions, OpenOcdStackElfOptions, OpenOcdStackSnapshotOptions,
+            OpenOcdTargetOptions,
         },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
@@ -119,6 +120,10 @@ pub enum OpenOcdCommand {
     Reset {
         #[command(subcommand)]
         command: OpenOcdResetCommand,
+    },
+    Resume {
+        #[command(subcommand)]
+        command: OpenOcdResumeCommand,
     },
     Stack {
         #[command(subcommand)]
@@ -683,6 +688,41 @@ pub struct OpenOcdResetTestSelection {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum OpenOcdResumeCommand {
+    Plan(OpenOcdResumeSelection),
+    Test(OpenOcdResumeTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdResumeSelection {
+    #[command(flatten)]
+    pub server: OpenOcdServerSelection,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "exact OpenOCD 'target current' name allowed to receive at most one resume"
+    )]
+    pub expected_target: String,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_TARGET_STATE_TIMEOUT_MS,
+        help = "bounded final-running verification deadline in milliseconds (100..=30000)"
+    )]
+    pub target_state_timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdResumeTestSelection {
+    #[command(flatten)]
+    pub resume: OpenOcdResumeSelection,
+
+    #[arg(long, help = "exact confirm_digest returned by openocd resume plan")]
+    pub confirm: String,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum OpenOcdTargetCommand {
     Plan(OpenOcdTargetSelection),
     Test(OpenOcdTargetTestSelection),
@@ -1137,6 +1177,18 @@ impl Cli {
                         command: OpenOcdResetCommand::Test(_),
                     },
             } => "openocd.reset.test",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Resume {
+                        command: OpenOcdResumeCommand::Plan(_),
+                    },
+            } => "openocd.resume.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Resume {
+                        command: OpenOcdResumeCommand::Test(_),
+                    },
+            } => "openocd.resume.test",
             Command::Openocd {
                 command:
                     OpenOcdCommand::Stack {
@@ -1733,6 +1785,49 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                         .observation
                         .as_ref()
                         .map_or("missing", |observation| observation.state.as_str()),
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Resume {
+                    command: OpenOcdResumeCommand::Plan(selection),
+                },
+        } => {
+            let report = openocd::plan_resume(&openocd_resume_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.resume.plan",
+                &report,
+                format!(
+                    "OpenOCD selected-target resume-only plan ready\nRisk: {}\nOpenOCD: {}\nSelected target: {}\nAccepted initial state: halted or running\nMaximum resume commands: {}\nAutomatic retry: false\nConfirm digest: {}",
+                    report.risk,
+                    report.openocd.executable.resolved,
+                    report.resume_policy.expected_current_target,
+                    report.resume_policy.maximum_resume_command_count,
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Resume {
+                    command: OpenOcdResumeCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_resume(
+                &openocd_resume_options(&selection.resume),
+                &selection.confirm,
+            )?;
+            Ok(CommandResult::serializable(
+                "openocd.resume.test",
+                &report,
+                format!(
+                    "OpenOCD selected-target resume-only recovery complete\nSelected target: {}\nStates: {} -> {}\nResume commands: {}\nAutomatic retries: {}\nShutdown: graceful",
+                    report.initial.target_name,
+                    report.initial.state,
+                    report.final_observation.state,
+                    report.resume_command_count,
+                    report.automatic_retry_count,
                 ),
             ))
         }
@@ -2750,6 +2845,14 @@ fn openocd_memory_options(selection: &OpenOcdMemorySelection) -> OpenOcdMemorySn
 
 fn openocd_reset_options(selection: &OpenOcdResetSelection) -> openocd::OpenOcdResetOptions {
     openocd::OpenOcdResetOptions {
+        openocd: openocd_server_options(&selection.server),
+        expected_target: selection.expected_target.clone(),
+        target_state_timeout_ms: selection.target_state_timeout_ms,
+    }
+}
+
+fn openocd_resume_options(selection: &OpenOcdResumeSelection) -> OpenOcdResumeOptions {
+    OpenOcdResumeOptions {
         openocd: openocd_server_options(&selection.server),
         expected_target: selection.expected_target.clone(),
         target_state_timeout_ms: selection.target_state_timeout_ms,

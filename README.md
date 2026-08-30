@@ -528,6 +528,42 @@ operation automatically. Generate two identical host-only plans and obtain a
 fresh exact digest before every physical `test`; classification acceptance and
 all historical digests are insufficient authority.
 
+Selected-target resume-only recovery is an independent confirmed checkpoint:
+
+```console
+cargo run -- openocd resume plan \
+  --executable path/to/openocd \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --json
+
+cargo run -- openocd resume test \
+  --executable path/to/openocd \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --confirm <confirm_digest> \
+  --json
+```
+
+The digest binds the exact OpenOCD/config identities, fixed catch-wrapped Tcl
+protocol, exact selected target, `halted|running -> running` policy, deadlines,
+maximum resume count of one, and zero-retry policy. The test validates the
+runtime current-target name before control. A halted target receives one fixed
+`targets <validated-name>; resume`; a running target receives no control
+command and is verified idempotently. A name mismatch or any other initial
+state fails before resume. No failure path retries or sends a second resume.
+
+The workflow sends no halt, reset, flash, GDB/monitor, target-data,
+breakpoint/watchpoint, or arbitrary Tcl command. It remains
+`R2_DEVICE_WRITE`: launching reviewed OpenOCD configuration executes Tcl that
+may itself access or reset a target, and resumed firmware may perform arbitrary
+peripheral or external I/O. Runtime adapter identity, transitive configuration
+sources, and non-selected target states remain unbound. Generate two identical
+host-only plans and obtain a fresh exact digest before each physical recovery;
+an earlier recovery request or digest is not standing authorization.
+
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
 ```console

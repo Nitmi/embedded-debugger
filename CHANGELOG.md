@@ -199,6 +199,19 @@ All notable changes to this project will be documented in this file.
   plans, stale confirmation, and complete managed-process cleanup. The PC
   interval does not attest runtime firmware identity, and physical ESP32-S3
   acceptance remains pending.
+- Confirmed `openocd resume plan/test` for one selected-target resume-only
+  recovery. Its independent R2 digest binds exact OpenOCD/config identities,
+  the selected current-target name, fixed catch-wrapped Tcl protocol,
+  `halted|running -> running` policy, deadlines, maximum resume count of one,
+  and zero automatic retries. A halted target receives at most one resume; a
+  running target receives no control command. Target mismatch, unsupported
+  state, malformed/error response, or missing final-running proof fails closed
+  with command-count and lifecycle evidence. The workflow requests no halt,
+  reset, target-data access, GDB/monitor, breakpoint/watchpoint, flash, or
+  arbitrary Tcl. Configuration Tcl effects, runtime adapter identity, and
+  non-selected target states remain outside its guarantee. Controlled
+  lifecycle, digest, CLI, and no-retry regressions pass; physical validation
+  requires a fresh exact confirmation.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current

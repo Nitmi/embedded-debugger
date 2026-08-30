@@ -21,6 +21,7 @@ mod gdb;
 mod memory;
 mod registers;
 mod reset;
+mod resume;
 mod server;
 mod session;
 mod stack;
@@ -69,6 +70,11 @@ pub use reset::{
     OpenOcdResetCapabilities, OpenOcdResetConfirmationBoundary, OpenOcdResetEffects,
     OpenOcdResetOptions, OpenOcdResetPlan, OpenOcdResetPolicy, OpenOcdResetProtocol,
     OpenOcdResetProtocolCommand, OpenOcdResetTestReport, plan_reset, test_reset,
+};
+pub use resume::{
+    OpenOcdResumeCapabilities, OpenOcdResumeConfirmationBoundary, OpenOcdResumeEffects,
+    OpenOcdResumeOptions, OpenOcdResumePlan, OpenOcdResumePolicy, OpenOcdResumeProtocol,
+    OpenOcdResumeProtocolCommand, OpenOcdResumeTestReport, plan_resume, test_resume,
 };
 pub use server::{
     DEFAULT_OPENOCD_SERVER_SHUTDOWN_TIMEOUT_MS, DEFAULT_OPENOCD_SERVER_STARTUP_TIMEOUT_MS,
