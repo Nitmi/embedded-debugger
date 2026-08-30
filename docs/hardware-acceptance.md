@@ -1391,3 +1391,70 @@ change requires separate authorization. Any later watchpoint-hit execution also
 requires the host fixes above, two identical new plans, and fresh exact
 confirmation of their new digest; the connected board and this historical
 digest are not standing authorization.
+
+## Rejected CPU0 recovery command and resume-only host checkpoint (2026-08-30)
+
+- The user separately authorized restoring CPU0 to running only, with no
+  watchpoint installation and no retry. Preflight identified the same exact
+  `303A:1001:E0:72:A1:D4:1F:DC` EspJtag and COM3, found no related process, and
+  captured a five-second zero-transmit UART baseline with DTR and RTS disabled.
+  The baseline contained 0 bytes, consistent with but not continuously proving
+  that CPU0 remained halted.
+- Exactly one command invocation requested native probe-rs `core run` for
+  target `esp32s3`, core 0. It returned non-retryable
+  `CAPABILITY_UNAVAILABLE` for missing `post_disconnect_core_state`. The
+  service evaluates that capability before probe listing, selector resolution,
+  attach, or core control, so probe selection, target attach, and `core.run`
+  were not attempted and no target mutation occurred. Automatic retry count
+  remained 0. A second five-second zero-transmit UART check also contained 0
+  bytes, and no related process remained. The requested running outcome was not
+  reached; CPU0 therefore remains likely halted.
+- Recovery evidence remains alongside the failed watchpoint-hit evidence under
+  `target/hardware-acceptance/2026-08-30-openocd-hardware-watchpoint-hit`.
+  `recovery-authorization.json` is 853 bytes with SHA-256
+  `4143c6907d55395231ad662f1fe374bfce8384ceb995450ff04917068f317fd7`.
+  The structured 363-byte rejection has SHA-256
+  `ff7c0f732508ca6da4f8a173e409475cfe4b5652a3ba21dbc9853cbcce87de36`.
+  The 2,919-byte recovery-attempt summary has SHA-256
+  `c7656c0cf71274ec3dc9fdf699d2a70d0ac6c04408a6485e900588a237c92b09`;
+  all seven artifacts registered by that summary rehashed without drift.
+- Commit `f5f88b6775a21143a348f6f91d9ef9c794369cc3` adds the independent
+  `openocd resume plan/test` contract. It accepts only the exact selected target
+  in `halted` or `running`; a halted origin can receive one fixed catch-wrapped
+  resume, while a running origin receives no control command. Final running is
+  mandatory. Halt, reset, flash, target-data, GDB/monitor,
+  breakpoint/watchpoint, arbitrary Tcl, second resume, and automatic retry are
+  excluded. OpenOCD configuration remains executable Tcl, runtime adapter
+  identity and transitive sources remain unbound, and resumed firmware may
+  perform arbitrary I/O.
+- The feature checkpoint passed 231 library tests, 83 CLI tests, rustfmt,
+  strict Clippy, `rustdoc -D warnings`, a 72-file Cargo package, the official
+  Skill validator, and `git diff --check`. Its committed Windows debug binary
+  is 32,706,048 bytes with SHA-256
+  `30f56d641968f9fc58b243dd66174912e01dd79bf0a3fc7b682f2d24969cb3cd`.
+- Two post-commit host-only plans bind `esp32s3.cpu0`, the same OpenOCD and
+  top-level board configuration identities, 2000/10000/3000 ms managed-server
+  deadlines, a 5000 ms target-state deadline, `halted|running -> running`, one
+  maximum resume, and zero retries. Both produced exact digest
+  `b7759dc2aa7b60a6e9e71b7c075d6c70ef84b7b9e4536c97ad0d305419b8224f`.
+  Removing only random operation IDs and OpenOCD version-probe elapsed time
+  makes the complete plans byte-identical, with normalized SHA-256
+  `037a08a8ac184b078c9ae736cbcaa4e8822949c852ddc0dd073089ce36c373c2`.
+  Both stderr files are empty.
+- Host evidence is retained under
+  `target/host-validation/2026-08-30-openocd-resume-only-recovery`. Plan SHA-256
+  values are
+  `24ed74e3e7e7b5cc3c6d342d8573db8a5f2a0372fca54c4ce083d4ef2e558928`
+  and
+  `9263b8beaae90f1e6f4ab11329dee414486f6e47e13133051ab1164575cdbb48`.
+  The 4,710-byte host-validation summary has SHA-256
+  `01c685033d79a2a1e3c9abcfc230115eb8b98966821e00db7e0c8d4a79e8543f`;
+  all seven local artifacts and six referenced recovery artifacts rehashed with
+  zero missing, size, or digest mismatches.
+- The two plans ran only bounded executable-version probes and file hashing.
+  They did not start an OpenOCD server, select a probe, attach to a target, send
+  resume, open serial, install a watchpoint, reset, or perform a physical test;
+  the final related-process count was 0. The prior natural-language authority
+  was consumed by the one rejected command invocation and is not reused. One
+  non-retried physical `openocd resume test` now requires the user to return the
+  new exact digest independently.
