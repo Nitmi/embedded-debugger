@@ -1279,3 +1279,68 @@ back. Runtime adapter identity, declared RAM semantics, target width/capacity,
 watchpoints, another range/target/tool plan, and broader GDB control remain
 unqualified. This evidence is not standing authorization for another physical
 execution.
+
+## Host-only OpenOCD bounded hardware-watchpoint-hit checkpoint (2026-08-30)
+
+- Independent `openocd watchpoint hit plan/test` support is implemented in
+  commit `909dd0ece8f084eb8e93d112c6e4081081d98e7e`. It keeps the existing
+  classification-only command and digest unchanged, but adds asynchronous MI,
+  all-stop mode, exactly one continue, strict watchpoint-stop attribution, a
+  post-hit count of one, deletion/empty-table proof, and bounded failure
+  interruption. No automatic retry is permitted.
+- The fixed success protocol has 13 commands. Token 8 is exactly
+  `-exec-continue --all`; success requires its `^running` result plus one
+  token-correlated `access-watchpoint-trigger`/`hw-awpt` stop, the exact
+  expression and value shape, a top-frame PC in the confirmed half-open
+  interval, and a canonical post-hit row with `times=1`. The fixed failure
+  cleanup is token 19 interrupt, token 20 delete, token 21 empty-table proof,
+  token 22 detach, then bounded token 13 exit. A GDB failure never adds an
+  OpenOCD Tcl resume.
+- Gates passed with 223 library tests, 80 CLI tests, rustfmt, strict Clippy,
+  `rustdoc -D warnings`, a 70-file Cargo package, the official Skill validator,
+  and `git diff --check`. The committed Windows debug binary is 32,585,216
+  bytes with SHA-256
+  `e2d5e7dda271e45d80d1d881f750e16a332e5d4b116e782ab452cc8e4a50b025`.
+- Two host-only plans bind `esp32s3.cpu0`, access mode, exact range
+  `0x3FCDB550 + 4`, declared RAM `[0x3FC88000, 0x3FCF0000)`, expected PC
+  `[0x420128C5, 0x420128D0)`, and a 10000 ms hit timeout. Both produced exact
+  confirmation digest
+  `8c6e2c0384da4aed8f495601ce61dc3d1bace8eaf537df3eca94b4803ea828fb`.
+  Removing only random operation IDs and elapsed-time fields makes the two
+  complete JSON plans identical; both stderr files are empty.
+- The same committed binary regenerated the prior classification-only plan
+  with unchanged digest
+  `3a502b8a88fa5778f9bbbb11cd92c7d4ebc5cf160858bb2035a634e038e20db8`,
+  nine commands, and no target execution request. This proves the old command
+  surface did not inherit the hit behavior.
+- The expected PC interval comes from local firmware ELF SHA-256
+  `676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`.
+  Fresh disassembly records `l32i/addi/s32i/s32i` at `0x420128C5`,
+  `0x420128C8`, `0x420128CA`, and `0x420128CD`. This is provenance only:
+  `runtime_firmware_identity_bound=false` and
+  `runtime_firmware_identity_verified=false`. The tool does not prove that
+  this ELF is currently running on the target.
+- Evidence is retained under
+  `target/host-validation/2026-08-30-openocd-hardware-watchpoint-hit`.
+  Plan SHA-256 values are
+  `d501856b727c31dc5f83063e2f86687df7cbe77fa52386df816fd123b32215e8`
+  and
+  `32164dea851844a54d831381e9da648af4184dddac82c66d7728256c0ca16b04`.
+  The 4,926-byte machine summary has SHA-256
+  `2be7381b81edad6166f7a6c4c2fba3983471aa793c12c5709d14d7d645eba89a`;
+  all eight artifacts it lists were rehashed with zero size or digest
+  mismatches.
+- These plans ran only bounded executable-version probes and file hashing. No
+  OpenOCD server started, no remote GDB connection was requested, no USB/JTAG
+  or serial access occurred, no physical watchpoint was installed, no target
+  continue was sent, no retry ran, and no exact related process remained.
+  Runtime adapter identity, RAM semantics, physical comparator state, and the
+  runtime firmware identity therefore remain unbound or unverified.
+
+The next physical step is limited to one non-retried ESP32-S3 CPU0
+`openocd watchpoint hit test` only after the user independently returns the
+exact new digest above. It will intentionally run target firmware once with the
+watchpoint installed and may trigger arbitrary firmware-defined I/O. Any
+failure ends the attempt and may require separately authorized recovery. The
+connected board, old classification acceptance, and every historical digest
+are not standing authorization.

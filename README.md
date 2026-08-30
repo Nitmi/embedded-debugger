@@ -954,8 +954,9 @@ See [docs/contracts.md](docs/contracts.md),
 [ADR-0013](docs/decisions/0013-confirmed-openocd-stack-snapshot.md),
 [ADR-0014](docs/decisions/0014-offline-elf-stack-annotations.md),
 [ADR-0015](docs/decisions/0015-bounded-zero-size-symbol-inference.md),
-[ADR-0016](docs/decisions/0016-confirmed-openocd-hardware-breakpoint-roundtrip.md), and
-[ADR-0017](docs/decisions/0017-confirmed-openocd-hardware-watchpoint-roundtrip.md).
+[ADR-0016](docs/decisions/0016-confirmed-openocd-hardware-breakpoint-roundtrip.md),
+[ADR-0017](docs/decisions/0017-confirmed-openocd-hardware-watchpoint-roundtrip.md), and
+[ADR-0018](docs/decisions/0018-confirmed-openocd-hardware-watchpoint-hit.md).
 
 ## Current status
 
