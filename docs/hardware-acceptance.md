@@ -1517,6 +1517,12 @@ another recovery or hit attempt.
 
 ## Host-only watchpoint-hit protocol and address amendment (2026-08-31)
 
+- Commit `59171b1ef814737608cb6e6343177fc890376663` contains the
+  protocol, fixture, public evidence, Skill, and address-boundary changes. Full
+  gates passed with 233 library tests, 83 CLI tests, rustfmt, strict Clippy,
+  `rustdoc -D warnings`, a 72-file package, the official Skill validator, and
+  `git diff --check`. Its Windows debug binary is 32,726,016 bytes with SHA-256
+  `b944962aaa07d3405397b62bed49b2a904fb330038404b79daba766d4b70879b`.
 - The GDB/MI hit lifecycle now accepts the asynchronous stop as tokenless, or
   with exact continue token 8 when a token is present, only inside the one fixed
   continue operation. Reports preserve both `observed_stop_token` and
@@ -1542,6 +1548,30 @@ another recovery or hit attempt.
   historical arithmetic candidate `0x3FCDB5F0`; it must not be used as a
   current watch address. The local ELF is also not attested as the image now
   running on the target.
+- Two post-commit host-only `openocd registers plan` runs request only ordered
+  `pc,a1` from `esp32s3.cpu0`. Both returned exact confirmation digest
+  `a817ed1453fb2ff0e4f23d83ba07bf02c7d0fdeccba37c13913cbc939d188ba0`;
+  after removing only `operation_id` and `elapsed_ms`, the complete plans are
+  identical with normalized SHA-256
+  `20c1179bc7823cefafa029177639d9ffa9db1a9203cc8baa75874628e96e1818`.
+  The six-command R2 plan does not bind adapter, ELF, symbols, or firmware
+  identity. It is a next current-frame evidence step, not watchpoint authority.
+- Plan evidence is retained under
+  `target/host-validation/2026-08-31-openocd-current-frame-registers`.
+  Plan SHA-256 values are
+  `8c3497364a6c67789204e6546317868a449bfac4309b4834e47eb719d1b43162`
+  and
+  `bd4f0738459ba3382dffc60882df056f013ead53a1b92cb7d2401d480930c39f`;
+  both stderr files are empty. The 2,297-byte address provenance SHA-256 is
+  `4749730c5bdfa40bccd42bf3d02188d8de402de34f2085f106d9bd73e56a6007`.
+  The 4,041-byte machine summary SHA-256 is
+  `f61e571c6a442daabe95f47659809fe1b9d94ab72c233b18967818e81f2709f4`;
+  all five registered artifacts rehashed without size or digest drift.
+- The paired plans ran only bounded executable-version probes and file hashing.
+  They started no OpenOCD server or remote GDB connection, opened no USB/JTAG
+  or serial device, changed no target state, installed no watchpoint, and left
+  zero related processes. One physical register snapshot requires the user to
+  return the new exact digest independently; it will not be run automatically.
 - Consequently, this checkpoint deliberately produces no physical
   watchpoint-hit authorization. A later run needs separately reviewed current
   runtime frame evidence, adequate firmware-identity provenance, two identical
