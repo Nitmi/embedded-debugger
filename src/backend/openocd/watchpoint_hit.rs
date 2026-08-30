@@ -612,7 +612,10 @@ fn hit_policy(
         expected_expression: watchpoint.expression.clone(),
         accepted_value_tuple_shapes: value_shapes,
         stop_requirements: vec![
-            "exact continue token on one *stopped record".to_string(),
+            "one *stopped record correlated while the single continue is outstanding".to_string(),
+            "stop token absent, or exactly equal to the fixed continue token when present"
+                .to_string(),
+            "competing stops and nonmatching stop tokens rejected".to_string(),
             "exact mode-specific reason and hardware tuple".to_string(),
             "number=1 and exact generated expression".to_string(),
             "top frame address inside the confirmed half-open PC interval".to_string(),
@@ -859,6 +862,20 @@ mod tests {
             "access-watchpoint-trigger"
         );
         assert_eq!(first.hit_policy.expected_stop_tuple, "hw-awpt");
+        assert!(
+            first
+                .hit_policy
+                .stop_requirements
+                .iter()
+                .any(|requirement| requirement.contains("stop token absent"))
+        );
+        assert!(
+            first
+                .hit_policy
+                .stop_requirements
+                .iter()
+                .any(|requirement| requirement.contains("competing stops"))
+        );
         assert!(!first.hit_policy.automatic_retry_allowed);
         assert!(
             first
@@ -895,6 +912,11 @@ mod tests {
         assert!(report.complete);
         assert_eq!(report.exchange.continue_execution.result_class, "running");
         assert_eq!(report.exchange.roundtrip.hit.continue_token, 8);
+        assert_eq!(report.exchange.roundtrip.hit.observed_stop_token, None);
+        assert_eq!(
+            report.exchange.roundtrip.hit.stop_correlation,
+            super::super::GdbMiAsyncStopCorrelation::TokenlessSingleContinue
+        );
         assert_eq!(report.exchange.roundtrip.hit.running_notifications, 2);
         assert_eq!(
             report.exchange.roundtrip.hit.stop_reason,
@@ -953,6 +975,14 @@ mod tests {
         assert_eq!(
             error.details["watchpoint_hit_cleanup"]["interrupt"]["token"],
             19
+        );
+        assert_eq!(
+            error.details["watchpoint_hit_cleanup"]["interrupt"]["observed_stop_token"],
+            Value::Null
+        );
+        assert_eq!(
+            error.details["watchpoint_hit_cleanup"]["interrupt"]["stop_correlation"],
+            "tokenless_single_continue"
         );
         assert_eq!(
             error.details["watchpoint_hit_cleanup"]["gdb_breakpoint_table_empty"],
@@ -1137,11 +1167,11 @@ mod tests {
             let empty_cleanup = batch_escape_mi(&format!("21^done,{EMPTY_BREAKPOINT_TABLE}"));
             let lifecycle = if mode == "timeout" {
                 format!(
-                    "echo 8*running,thread-id=\"all\"\r\necho 8^^running\r\necho {prompt}\r\nset /p interrupt=\r\nif not \"%interrupt%\"==\"19-exec-interrupt --all\" exit /b 19\r\necho 19^^done\r\necho {prompt}\r\necho 8*stopped,signal-name=\"SIGINT\",frame={{addr=\"0x420128cd\",args=[]}}\r\necho {prompt}\r\nset /p cleanup_delete=\r\nif not \"%cleanup_delete%\"==\"20-break-delete 1\" exit /b 20\r\necho 20^^done\r\necho {prompt}\r\nset /p cleanup_list=\r\nif not \"%cleanup_list%\"==\"21-break-list\" exit /b 21\r\necho {empty_cleanup}\r\necho {prompt}\r\nset /p cleanup_detach=\r\nif not \"%cleanup_detach%\"==\"22-target-detach\" exit /b 22\r\necho 22^^done\r\necho {prompt}\r\n"
+                    "echo *running,thread-id=\"all\"\r\necho 8^^running\r\necho {prompt}\r\nset /p interrupt=\r\nif not \"%interrupt%\"==\"19-exec-interrupt --all\" exit /b 19\r\necho 19^^done\r\necho {prompt}\r\necho *stopped,reason=\"signal-received\",signal-name=\"SIGINT\",signal-meaning=\"Interrupt\",frame={{addr=\"0x420128cd\",args=[]}},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"\r\necho {prompt}\r\nset /p cleanup_delete=\r\nif not \"%cleanup_delete%\"==\"20-break-delete 1\" exit /b 20\r\necho 20^^done\r\necho {prompt}\r\nset /p cleanup_list=\r\nif not \"%cleanup_list%\"==\"21-break-list\" exit /b 21\r\necho {empty_cleanup}\r\necho {prompt}\r\nset /p cleanup_detach=\r\nif not \"%cleanup_detach%\"==\"22-target-detach\" exit /b 22\r\necho 22^^done\r\necho {prompt}\r\n"
                 )
             } else {
                 format!(
-                    "echo 8*running,thread-id=\"all\"\r\necho 8*running,thread-id=\"all\"\r\necho 8*stopped,reason=\"access-watchpoint-trigger\",hw-awpt={{number=\"1\",exp=\"{expression}\"}},value={{old=\"6\",new=\"7\"}},frame={{addr=\"0x420128cd\",func=\"main\",args=[],file=\"src/bin/main.rs\",line=\"85\",arch=\"xtensa\"}},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"\r\necho 8^^running\r\necho {prompt}\r\nset /p list_after_hit=\r\nif not \"%list_after_hit%\"==\"9-break-list\" exit /b 9\r\necho {after}\r\necho {prompt}\r\nset /p delete=\r\nif not \"%delete%\"==\"10-break-delete 1\" exit /b 10\r\necho 10^^done\r\necho {prompt}\r\nset /p list_empty=\r\nif not \"%list_empty%\"==\"11-break-list\" exit /b 11\r\necho {empty_success}\r\necho {prompt}\r\nset /p detach=\r\nif not \"%detach%\"==\"12-target-detach\" exit /b 12\r\necho 12^^done\r\necho {prompt}\r\n"
+                    "echo *running,thread-id=\"all\"\r\necho *running,thread-id=\"all\"\r\necho *stopped,reason=\"access-watchpoint-trigger\",hw-awpt={{number=\"1\",exp=\"{expression}\"}},value={{old=\"6\",new=\"7\"}},frame={{addr=\"0x420128cd\",func=\"main\",args=[],file=\"src/bin/main.rs\",line=\"85\",arch=\"xtensa\"}},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"\r\necho 8^^running\r\necho {prompt}\r\nset /p list_after_hit=\r\nif not \"%list_after_hit%\"==\"9-break-list\" exit /b 9\r\necho {after}\r\necho {prompt}\r\nset /p delete=\r\nif not \"%delete%\"==\"10-break-delete 1\" exit /b 10\r\necho 10^^done\r\necho {prompt}\r\nset /p list_empty=\r\nif not \"%list_empty%\"==\"11-break-list\" exit /b 11\r\necho {empty_success}\r\necho {prompt}\r\nset /p detach=\r\nif not \"%detach%\"==\"12-target-detach\" exit /b 12\r\necho 12^^done\r\necho {prompt}\r\n"
                 )
             };
             fs::write(
@@ -1160,11 +1190,11 @@ mod tests {
             let executable = directory.join(format!("fake-watchpoint-hit-gdb-{mode}"));
             let lifecycle = if mode == "timeout" {
                 format!(
-                    "printf '%s\\n' '8*running,thread-id=\"all\"' '8^running' '(gdb)'\nIFS= read -r interrupt\n[ \"$interrupt\" = '19-exec-interrupt --all' ] || exit 19\nprintf '%s\\n' '19^done' '(gdb)' '8*stopped,signal-name=\"SIGINT\",frame={{addr=\"0x420128cd\",args=[]}}' '(gdb)'\nIFS= read -r cleanup_delete\n[ \"$cleanup_delete\" = '20-break-delete 1' ] || exit 20\nprintf '%s\\n' '20^done' '(gdb)'\nIFS= read -r cleanup_list\n[ \"$cleanup_list\" = '21-break-list' ] || exit 21\nprintf '%s\\n' '21^done,{EMPTY_BREAKPOINT_TABLE}' '(gdb)'\nIFS= read -r cleanup_detach\n[ \"$cleanup_detach\" = '22-target-detach' ] || exit 22\nprintf '%s\\n' '22^done' '(gdb)'\n"
+                    "printf '%s\\n' '*running,thread-id=\"all\"' '8^running' '(gdb)'\nIFS= read -r interrupt\n[ \"$interrupt\" = '19-exec-interrupt --all' ] || exit 19\nprintf '%s\\n' '19^done' '(gdb)' '*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",signal-meaning=\"Interrupt\",frame={{addr=\"0x420128cd\",args=[]}},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"' '(gdb)'\nIFS= read -r cleanup_delete\n[ \"$cleanup_delete\" = '20-break-delete 1' ] || exit 20\nprintf '%s\\n' '20^done' '(gdb)'\nIFS= read -r cleanup_list\n[ \"$cleanup_list\" = '21-break-list' ] || exit 21\nprintf '%s\\n' '21^done,{EMPTY_BREAKPOINT_TABLE}' '(gdb)'\nIFS= read -r cleanup_detach\n[ \"$cleanup_detach\" = '22-target-detach' ] || exit 22\nprintf '%s\\n' '22^done' '(gdb)'\n"
                 )
             } else {
                 format!(
-                    "printf '%s\\n' '8*running,thread-id=\"all\"' '8*running,thread-id=\"all\"' '8*stopped,reason=\"access-watchpoint-trigger\",hw-awpt={{number=\"1\",exp=\"{expression}\"}},value={{old=\"6\",new=\"7\"}},frame={{addr=\"0x420128cd\",func=\"main\",args=[],file=\"src/bin/main.rs\",line=\"85\",arch=\"xtensa\"}},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"' '8^running' '(gdb)'\nIFS= read -r list_after_hit\n[ \"$list_after_hit\" = '9-break-list' ] || exit 9\nprintf '%s\\n' '9^done,{after}' '(gdb)'\nIFS= read -r delete\n[ \"$delete\" = '10-break-delete 1' ] || exit 10\nprintf '%s\\n' '10^done' '(gdb)'\nIFS= read -r list_empty\n[ \"$list_empty\" = '11-break-list' ] || exit 11\nprintf '%s\\n' '11^done,{EMPTY_BREAKPOINT_TABLE}' '(gdb)'\nIFS= read -r detach\n[ \"$detach\" = '12-target-detach' ] || exit 12\nprintf '%s\\n' '12^done' '(gdb)'\n"
+                    "printf '%s\\n' '*running,thread-id=\"all\"' '*running,thread-id=\"all\"' '*stopped,reason=\"access-watchpoint-trigger\",hw-awpt={{number=\"1\",exp=\"{expression}\"}},value={{old=\"6\",new=\"7\"}},frame={{addr=\"0x420128cd\",func=\"main\",args=[],file=\"src/bin/main.rs\",line=\"85\",arch=\"xtensa\"}},thread-id=\"1\",stopped-threads=\"all\",core=\"0\"' '8^running' '(gdb)'\nIFS= read -r list_after_hit\n[ \"$list_after_hit\" = '9-break-list' ] || exit 9\nprintf '%s\\n' '9^done,{after}' '(gdb)'\nIFS= read -r delete\n[ \"$delete\" = '10-break-delete 1' ] || exit 10\nprintf '%s\\n' '10^done' '(gdb)'\nIFS= read -r list_empty\n[ \"$list_empty\" = '11-break-list' ] || exit 11\nprintf '%s\\n' '11^done,{EMPTY_BREAKPOINT_TABLE}' '(gdb)'\nIFS= read -r detach\n[ \"$detach\" = '12-target-detach' ] || exit 12\nprintf '%s\\n' '12^done' '(gdb)'\n"
                 )
             };
             fs::write(

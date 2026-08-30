@@ -478,9 +478,18 @@ pub struct GdbMiHardwareWatchpointHitValue {
     pub new: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GdbMiAsyncStopCorrelation {
+    TokenlessSingleContinue,
+    MatchingContinueToken,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GdbMiHardwareWatchpointHit {
     pub continue_token: u64,
+    pub observed_stop_token: Option<u64>,
+    pub stop_correlation: GdbMiAsyncStopCorrelation,
     pub running_notifications: u64,
     pub stop_reason: String,
     pub result_field: String,
@@ -1774,7 +1783,9 @@ pub(super) fn watchpoint_hit_failure_cleanup_contract() -> Vec<GdbMiPlannedComma
         GdbMiPlannedCommand {
             token: WATCHPOINT_HIT_CLEANUP_INTERRUPT_TOKEN,
             command: WATCHPOINT_HIT_INTERRUPT_COMMAND.to_string(),
-            expected_result_class: "done_then_continue_token_stopped_when_running".to_string(),
+            expected_result_class:
+                "done_then_tokenless_or_matching_continue_token_sigint_stop_when_running"
+                    .to_string(),
         },
         GdbMiPlannedCommand {
             token: WATCHPOINT_HIT_CLEANUP_DELETE_TOKEN,
@@ -3499,26 +3510,13 @@ impl ManagedGdb {
         .map_err(|failure| (failure, WatchpointHitCleanupState::RunningOrUnknown))?;
 
         let mut continue_result: Option<(String, Duration, Instant)> = None;
-        let mut stopped: Option<(Option<u64>, String, HashMap<String, MiValue>)> = None;
+        let mut stopped: Option<GdbMiHardwareWatchpointHit> = None;
         let mut running_notifications = 0_u64;
         loop {
             if let Some((result_class, continue_elapsed, result_observed)) = &continue_result
-                && let Some((token, class, variables)) = stopped.take()
+                && let Some(hit) = stopped.take()
             {
                 let hit_wait_elapsed = result_observed.elapsed();
-                let hit = parse_hardware_watchpoint_hit(
-                    token,
-                    &class,
-                    &variables,
-                    HardwareWatchpointHitParsePolicy {
-                        expected_expression,
-                        mode: request.mode,
-                        expected_pc_start: request.expected_pc_start,
-                        expected_pc_end_exclusive: request.expected_pc_end_exclusive,
-                    },
-                    running_notifications,
-                )
-                .map_err(|failure| (failure, WatchpointHitCleanupState::Stopped))?;
                 return Ok(WatchpointHitWaitSuccess {
                     continue_elapsed: *continue_elapsed,
                     continue_result_class: result_class.clone(),
@@ -3639,16 +3637,26 @@ impl ManagedGdb {
                     class,
                     variables,
                 } if class == "stopped" => {
-                    if stopped.is_some() {
-                        return Err((
-                            protocol_failure(
-                                "GDB/MI emitted more than one stop for one watchpoint continue",
-                                json!({"continue_token": WATCHPOINT_HIT_CONTINUE_TOKEN}),
-                            ),
-                            WatchpointHitCleanupState::Stopped,
-                        ));
-                    }
-                    stopped = Some((token, class, variables));
+                    let correlation = correlate_only_async_stop_to_single_continue(
+                        stopped.is_some(),
+                        token,
+                        "watchpoint hit",
+                    )
+                    .map_err(|failure| (failure, WatchpointHitCleanupState::Stopped))?;
+                    let hit = parse_hardware_watchpoint_hit(
+                        correlation,
+                        &class,
+                        &variables,
+                        HardwareWatchpointHitParsePolicy {
+                            expected_expression,
+                            mode: request.mode,
+                            expected_pc_start: request.expected_pc_start,
+                            expected_pc_end_exclusive: request.expected_pc_end_exclusive,
+                        },
+                        running_notifications,
+                    )
+                    .map_err(|failure| (failure, WatchpointHitCleanupState::Stopped))?;
+                    stopped = Some(hit);
                 }
                 ParsedRecord::ExecAsync { token, class, .. } => {
                     return Err((
@@ -3912,9 +3920,11 @@ impl ManagedGdb {
 
         let deadline = started + timeout;
         let mut result_class: Option<String> = None;
-        let mut stop_observed = false;
+        let mut stop_correlation: Option<CorrelatedAsyncStop> = None;
         loop {
-            if result_class.as_deref() == Some("done") && stop_observed {
+            if result_class.as_deref() == Some("done")
+                && let Some(correlation) = stop_correlation
+            {
                 return (
                     true,
                     json!({
@@ -3923,7 +3933,9 @@ impl ManagedGdb {
                         "token": WATCHPOINT_HIT_CLEANUP_INTERRUPT_TOKEN,
                         "command": WATCHPOINT_HIT_INTERRUPT_COMMAND,
                         "result_class": "done",
-                        "stop_token": WATCHPOINT_HIT_CONTINUE_TOKEN,
+                        "expected_stop_token": WATCHPOINT_HIT_CONTINUE_TOKEN,
+                        "observed_stop_token": correlation.observed_token,
+                        "stop_correlation": correlation.kind,
                         "stop_observed": true,
                         "elapsed_ms": duration_ms(started.elapsed()),
                     }),
@@ -3940,7 +3952,7 @@ impl ManagedGdb {
                             "token": WATCHPOINT_HIT_CLEANUP_INTERRUPT_TOKEN,
                             "command": WATCHPOINT_HIT_INTERRUPT_COMMAND,
                             "result_class": result_class,
-                            "stop_observed": stop_observed,
+                            "stop_observed": stop_correlation.is_some(),
                             "failure": lifecycle_failure_value(&failure),
                             "elapsed_ms": duration_ms(started.elapsed()),
                         }),
@@ -3958,7 +3970,21 @@ impl ManagedGdb {
                                 "expected_result_token": WATCHPOINT_HIT_CLEANUP_INTERRUPT_TOKEN,
                                 "observed_result_token": token,
                                 "observed_result_class": class,
-                                "stop_observed": stop_observed,
+                                "stop_observed": stop_correlation.is_some(),
+                            }),
+                        );
+                    }
+                    if result_class.is_some() {
+                        return (
+                            false,
+                            json!({
+                                "attempted": true,
+                                "complete": false,
+                                "token": WATCHPOINT_HIT_CLEANUP_INTERRUPT_TOKEN,
+                                "command": WATCHPOINT_HIT_INTERRUPT_COMMAND,
+                                "duplicate_result": true,
+                                "observed_result_class": class,
+                                "stop_observed": stop_correlation.is_some(),
                             }),
                         );
                     }
@@ -3971,29 +3997,80 @@ impl ManagedGdb {
                                 "token": WATCHPOINT_HIT_CLEANUP_INTERRUPT_TOKEN,
                                 "command": WATCHPOINT_HIT_INTERRUPT_COMMAND,
                                 "result_class": class,
-                                "stop_observed": stop_observed,
+                                "stop_observed": stop_correlation.is_some(),
                                 "elapsed_ms": duration_ms(started.elapsed()),
                             }),
                         );
                     }
                     result_class = Some(class);
                 }
-                ParsedRecord::ExecAsync { token, class, .. } if class == "stopped" => {
-                    if token != Some(WATCHPOINT_HIT_CONTINUE_TOKEN) || stop_observed {
+                ParsedRecord::ExecAsync {
+                    token,
+                    class,
+                    variables,
+                } if class == "stopped" => {
+                    let correlation = match correlate_only_async_stop_to_single_continue(
+                        stop_correlation.is_some(),
+                        token,
+                        "watchpoint hit cleanup interrupt",
+                    ) {
+                        Ok(correlation) => correlation,
+                        Err(failure) => {
+                            return (
+                                false,
+                                json!({
+                                    "attempted": true,
+                                    "complete": false,
+                                    "expected_stop_token": WATCHPOINT_HIT_CONTINUE_TOKEN,
+                                    "observed_stop_token": token,
+                                    "failure": lifecycle_failure_value(&failure),
+                                }),
+                            );
+                        }
+                    };
+                    if let Err(failure) = validate_watchpoint_hit_interrupt_stop(&variables) {
                         return (
                             false,
                             json!({
                                 "attempted": true,
                                 "complete": false,
-                                "expected_stop_token": WATCHPOINT_HIT_CONTINUE_TOKEN,
+                                "expected_stop_reason": "signal-received",
+                                "expected_signal_name": "SIGINT",
                                 "observed_stop_token": token,
-                                "duplicate_stop": stop_observed,
+                                "failure": lifecycle_failure_value(&failure),
                             }),
                         );
                     }
-                    stop_observed = true;
+                    stop_correlation = Some(correlation);
                 }
-                ParsedRecord::ExecAsync { class, .. } if class == "running" => {}
+                ParsedRecord::ExecAsync {
+                    token,
+                    class,
+                    variables,
+                } if class == "running" => {
+                    if token.is_some() && token != Some(WATCHPOINT_HIT_CONTINUE_TOKEN) {
+                        return (
+                            false,
+                            json!({
+                                "attempted": true,
+                                "complete": false,
+                                "expected_running_token": WATCHPOINT_HIT_CONTINUE_TOKEN,
+                                "observed_running_token": token,
+                            }),
+                        );
+                    }
+                    if let Err(failure) = validate_running_notification(&variables) {
+                        return (
+                            false,
+                            json!({
+                                "attempted": true,
+                                "complete": false,
+                                "observed_running_token": token,
+                                "failure": lifecycle_failure_value(&failure),
+                            }),
+                        );
+                    }
+                }
                 ParsedRecord::ExecAsync { token, class, .. } => {
                     return (
                         false,
@@ -5640,8 +5717,58 @@ struct HardwareWatchpointHitParsePolicy<'a> {
     expected_pc_end_exclusive: Address,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CorrelatedAsyncStop {
+    observed_token: Option<u64>,
+    kind: GdbMiAsyncStopCorrelation,
+}
+
+fn correlate_async_stop_to_single_continue(
+    observed_token: Option<u64>,
+    phase: &str,
+) -> std::result::Result<CorrelatedAsyncStop, LifecycleFailure> {
+    let kind = match observed_token {
+        None => GdbMiAsyncStopCorrelation::TokenlessSingleContinue,
+        Some(WATCHPOINT_HIT_CONTINUE_TOKEN) => GdbMiAsyncStopCorrelation::MatchingContinueToken,
+        Some(_) => {
+            return Err(protocol_failure(
+                "GDB/MI asynchronous stop carried a nonmatching token",
+                json!({
+                    "phase": phase,
+                    "expected_token_when_present": WATCHPOINT_HIT_CONTINUE_TOKEN,
+                    "observed_token": observed_token,
+                    "single_continue_outstanding": true,
+                }),
+            ));
+        }
+    };
+    Ok(CorrelatedAsyncStop {
+        observed_token,
+        kind,
+    })
+}
+
+fn correlate_only_async_stop_to_single_continue(
+    stop_already_observed: bool,
+    observed_token: Option<u64>,
+    phase: &str,
+) -> std::result::Result<CorrelatedAsyncStop, LifecycleFailure> {
+    if stop_already_observed {
+        return Err(protocol_failure(
+            "GDB/MI emitted a competing stop while one continue was outstanding",
+            json!({
+                "phase": phase,
+                "continue_token": WATCHPOINT_HIT_CONTINUE_TOKEN,
+                "observed_token": observed_token,
+                "competing_stop": true,
+            }),
+        ));
+    }
+    correlate_async_stop_to_single_continue(observed_token, phase)
+}
+
 fn parse_hardware_watchpoint_hit(
-    token: Option<u64>,
+    correlation: CorrelatedAsyncStop,
     class: &str,
     variables: &HashMap<String, MiValue>,
     policy: HardwareWatchpointHitParsePolicy<'_>,
@@ -5654,16 +5781,6 @@ fn parse_hardware_watchpoint_hit(
         OpenOcdHardwareWatchpointMode::Access => "access-watchpoint-trigger",
     };
     let expected_tuple = policy.mode.insertion_result_field();
-    if token != Some(WATCHPOINT_HIT_CONTINUE_TOKEN) {
-        return Err(protocol_failure(
-            "GDB/MI watchpoint stop was not correlated to the fixed continue token",
-            json!({
-                "expected_token": WATCHPOINT_HIT_CONTINUE_TOKEN,
-                "observed_token": token,
-                "observed_class": class,
-            }),
-        ));
-    }
     if class != "stopped" {
         return Err(protocol_failure(
             "GDB/MI watchpoint hit parser received a non-stop async record",
@@ -5887,6 +6004,8 @@ fn parse_hardware_watchpoint_hit(
 
     Ok(GdbMiHardwareWatchpointHit {
         continue_token: WATCHPOINT_HIT_CONTINUE_TOKEN,
+        observed_stop_token: correlation.observed_token,
+        stop_correlation: correlation.kind,
         running_notifications,
         stop_reason: reason.to_string(),
         result_field: expected_tuple.to_string(),
@@ -5921,6 +6040,44 @@ fn parse_hardware_watchpoint_hit(
         expected_pc_end_exclusive: policy.expected_pc_end_exclusive,
         expected_pc_range_verified: true,
     })
+}
+
+fn validate_watchpoint_hit_interrupt_stop(
+    variables: &HashMap<String, MiValue>,
+) -> std::result::Result<(), LifecycleFailure> {
+    let reason = exact_string_field(variables, "reason", "watchpoint cleanup interrupt stop")?;
+    if reason != "signal-received" {
+        return Err(protocol_failure(
+            "GDB/MI cleanup interrupt produced an unrelated stop reason",
+            json!({"expected": "signal-received", "observed": bounded_line(reason)}),
+        ));
+    }
+    let signal_name = exact_string_field(
+        variables,
+        "signal-name",
+        "watchpoint cleanup interrupt stop",
+    )?;
+    if signal_name != "SIGINT" {
+        return Err(protocol_failure(
+            "GDB/MI cleanup interrupt produced an unexpected signal",
+            json!({"expected": "SIGINT", "observed": bounded_line(signal_name)}),
+        ));
+    }
+    if let Some(stopped_threads) = variables.get("stopped-threads") {
+        let MiValue::String(stopped_threads) = stopped_threads else {
+            return Err(protocol_failure(
+                "GDB/MI cleanup interrupt stopped-threads field was not a string",
+                json!({"field": "stopped-threads"}),
+            ));
+        };
+        if stopped_threads != "all" {
+            return Err(protocol_failure(
+                "GDB/MI all-stop cleanup interrupt did not report all threads stopped",
+                json!({"observed": bounded_line(stopped_threads)}),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_running_notification(
@@ -7513,7 +7670,7 @@ mod tests {
     #[test]
     fn access_watchpoint_hit_requires_exact_tuple_value_shape_and_pc_interval() {
         let record = parse_record(concat!(
-            "8*stopped,reason=\"access-watchpoint-trigger\",",
+            "*stopped,reason=\"access-watchpoint-trigger\",",
             "hw-awpt={number=\"1\",exp=\"*((char*)0x3fcdb550)@4\"},",
             "value={old=\"6\",new=\"7\"},",
             "frame={addr=\"0x420128cd\",func=\"main\",args=[],",
@@ -7529,8 +7686,10 @@ mod tests {
         else {
             panic!("expected exec async record");
         };
+        let correlation =
+            correlate_async_stop_to_single_continue(token, "unit test watchpoint hit").unwrap();
         let hit = parse_hardware_watchpoint_hit(
-            token,
+            correlation,
             &class,
             &variables,
             HardwareWatchpointHitParsePolicy {
@@ -7543,6 +7702,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hit.continue_token, 8);
+        assert_eq!(hit.observed_stop_token, None);
+        assert_eq!(
+            hit.stop_correlation,
+            GdbMiAsyncStopCorrelation::TokenlessSingleContinue
+        );
         assert_eq!(hit.running_notifications, 2);
         assert_eq!(hit.result_field, "hw-awpt");
         assert_eq!(hit.value.old.as_deref(), Some("6"));
@@ -7551,7 +7715,7 @@ mod tests {
         assert_eq!(hit.core, Some(0));
 
         let outside = parse_hardware_watchpoint_hit(
-            token,
+            correlation,
             &class,
             &variables,
             HardwareWatchpointHitParsePolicy {
@@ -7584,8 +7748,10 @@ mod tests {
         else {
             panic!("expected exec async record");
         };
+        let correlation =
+            correlate_async_stop_to_single_continue(token, "unit test watchpoint hit").unwrap();
         let hit = parse_hardware_watchpoint_hit(
-            token,
+            correlation,
             &class,
             &variables,
             HardwareWatchpointHitParsePolicy {
@@ -7598,6 +7764,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hit.value.read.as_deref(), Some("9"));
+        assert_eq!(hit.observed_stop_token, Some(8));
+        assert_eq!(
+            hit.stop_correlation,
+            GdbMiAsyncStopCorrelation::MatchingContinueToken
+        );
 
         let unrelated = parse_record(concat!(
             "8*stopped,reason=\"breakpoint-hit\",bkptno=\"1\",",
@@ -7612,9 +7783,11 @@ mod tests {
         else {
             panic!("expected exec async record");
         };
+        let correlation =
+            correlate_async_stop_to_single_continue(token, "unit test watchpoint hit").unwrap();
         assert!(
             parse_hardware_watchpoint_hit(
-                token,
+                correlation,
                 &class,
                 &variables,
                 HardwareWatchpointHitParsePolicy {
@@ -7627,6 +7800,75 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn async_stop_correlation_accepts_only_tokenless_or_matching_continue_token() {
+        let tokenless =
+            correlate_async_stop_to_single_continue(None, "unit test watchpoint hit").unwrap();
+        assert_eq!(tokenless.observed_token, None);
+        assert_eq!(
+            tokenless.kind,
+            GdbMiAsyncStopCorrelation::TokenlessSingleContinue
+        );
+
+        let matching = correlate_async_stop_to_single_continue(
+            Some(WATCHPOINT_HIT_CONTINUE_TOKEN),
+            "unit test watchpoint hit",
+        )
+        .unwrap();
+        assert_eq!(matching.observed_token, Some(8));
+        assert_eq!(
+            matching.kind,
+            GdbMiAsyncStopCorrelation::MatchingContinueToken
+        );
+
+        let unrelated =
+            correlate_async_stop_to_single_continue(Some(77), "unit test watchpoint hit")
+                .unwrap_err();
+        assert_eq!(unrelated.code, ErrorCode::ProtocolError);
+        assert_eq!(unrelated.details["expected_token_when_present"], 8);
+        assert_eq!(unrelated.details["observed_token"], 77);
+        assert_eq!(unrelated.details["single_continue_outstanding"], true);
+
+        let competing =
+            correlate_only_async_stop_to_single_continue(true, None, "unit test watchpoint hit")
+                .unwrap_err();
+        assert_eq!(competing.code, ErrorCode::ProtocolError);
+        assert_eq!(competing.details["competing_stop"], true);
+        assert_eq!(competing.details["continue_token"], 8);
+    }
+
+    #[test]
+    fn cleanup_interrupt_stop_requires_sigint_and_all_stop_scope() {
+        let valid = parse_record(concat!(
+            "*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",",
+            "signal-meaning=\"Interrupt\",frame={addr=\"0x420128cd\",args=[]},",
+            "thread-id=\"1\",stopped-threads=\"all\",core=\"0\""
+        ))
+        .unwrap();
+        let ParsedRecord::ExecAsync { variables, .. } = valid else {
+            panic!("expected exec async record");
+        };
+        validate_watchpoint_hit_interrupt_stop(&variables).unwrap();
+
+        let wrong_signal = parse_record(
+            "*stopped,reason=\"signal-received\",signal-name=\"SIGTRAP\",stopped-threads=\"all\"",
+        )
+        .unwrap();
+        let ParsedRecord::ExecAsync { variables, .. } = wrong_signal else {
+            panic!("expected exec async record");
+        };
+        assert!(validate_watchpoint_hit_interrupt_stop(&variables).is_err());
+
+        let wrong_scope = parse_record(
+            "*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",stopped-threads=\"1\"",
+        )
+        .unwrap();
+        let ParsedRecord::ExecAsync { variables, .. } = wrong_scope else {
+            panic!("expected exec async record");
+        };
+        assert!(validate_watchpoint_hit_interrupt_stop(&variables).is_err());
     }
 
     #[test]
@@ -8171,6 +8413,10 @@ mod tests {
         assert_eq!(cleanup.len(), 4);
         assert_eq!(cleanup[0].token, WATCHPOINT_HIT_CLEANUP_INTERRUPT_TOKEN);
         assert_eq!(cleanup[0].command, WATCHPOINT_HIT_INTERRUPT_COMMAND);
+        assert_eq!(
+            cleanup[0].expected_result_class,
+            "done_then_tokenless_or_matching_continue_token_sigint_stop_when_running"
+        );
         assert_eq!(cleanup[1].token, WATCHPOINT_HIT_CLEANUP_DELETE_TOKEN);
         assert_eq!(cleanup[2].token, WATCHPOINT_HIT_CLEANUP_LIST_TOKEN);
         assert_eq!(cleanup[3].token, WATCHPOINT_HIT_CLEANUP_DETACH_TOKEN);

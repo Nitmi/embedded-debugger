@@ -2593,6 +2593,17 @@ fn openocd_watchpoint_hit_plan_binds_async_stop_pc_timeout_and_cleanup() {
         "-exec-interrupt --all"
     );
     assert_eq!(
+        first["data"]["hit_policy"]["failure_cleanup_commands"][0]["expected_result_class"],
+        "done_then_tokenless_or_matching_continue_token_sigint_stop_when_running"
+    );
+    assert!(
+        first["data"]["hit_policy"]["stop_requirements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|requirement| requirement.as_str().unwrap().contains("stop token absent"))
+    );
+    assert_eq!(
         first["data"]["effects"]["target_execution_while_watchpoint_installed_requested"],
         true
     );

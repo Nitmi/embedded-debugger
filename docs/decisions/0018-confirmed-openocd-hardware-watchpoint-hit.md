@@ -38,7 +38,9 @@ claiming target firmware identity.
    classify the watchpoint, and execute exactly one `-exec-continue --all`.
 5. Correlate the continue result and asynchronous records without assuming
    their relative ordering. Allow repeated `*running` records, but require the
-   exact continue token on the single accepted `*stopped` record.
+   single accepted `*stopped` record to be tokenless or carry the exact
+   continue token while the one continue operation is outstanding. Reject a
+   nonmatching token or competing stop.
 6. Accept a hit only when its reason, `hw-rwpt`/`hw-awpt` tuple, watchpoint
    number, expression, value tuple shape, and frame address match the confirmed
    policy. Reject unrelated stops, scope loss, exit, signals, extra stop fields,
@@ -48,8 +50,9 @@ claiming target firmware identity.
    detach and exit.
 8. Use a distinct fixed failure protocol. If execution may still be running,
    attempt exactly one `-exec-interrupt --all`, correlate its result and the
-   continue-token stop, then attempt delete, empty-table verification, and
-   detach. Do not retry the continue, hit, interrupt, or physical operation.
+   single tokenless-or-matching-token `signal-received`/`SIGINT` stop, then
+   attempt delete, empty-table verification, and detach. Do not retry the
+   continue, hit, interrupt, or physical operation.
 9. On a verified-success path, retain the existing bounded OpenOCD running-state
    restoration check and fixed Tcl resume fallback. On every GDB failure, send
    no additional Tcl resume and report target state as point-in-time evidence
@@ -85,21 +88,29 @@ and preflight rejection before any hardware process starts. Physical target
 acceptance is recorded only after a separately confirmed, non-retried run.
 
 The first separately confirmed physical attempt on 2026-08-30 was not accepted.
-It timed out because the confirmed address came from an `a1` register snapshot,
-while local disassembly placed the incremented loop value at `a1 + 128`. The run
-also showed that Espressif GDB 17.1 emits a tokenless asynchronous SIGINT stop
-after `-exec-interrupt --all`. The fixtures had emitted token 8 on asynchronous
-stops, so they did not model this real behavior.
+It timed out because the confirmed address came directly from a historical
+`a1` register snapshot rather than a current variable address. The run also
+showed that Espressif GDB 17.1 emits a tokenless asynchronous SIGINT stop after
+`-exec-interrupt --all`; synthetic fixtures had emitted token 8 instead.
 
-Before another physical attempt, items 5 and 8 require a bounded amendment:
-correlate a tokenless stop, or the matching token if one is present, only while
-the one continue is outstanding; retain the complete hit tuple/reason/PC checks
-on the success path and the fixed post-interrupt SIGINT check on the cleanup
-path; and reject competing stops or nonmatching tokens. The watched address must
-also be re-derived without treating the stack pointer as the variable address.
-Implementation, fixtures,
-plans, and digest must all be revised before fresh confirmation. Recovery of the
-point-in-time halted target remains separately authorized.
+The host-only amendment now implements items 5 and 8: a tokenless stop, or the
+matching token if present, is correlated only inside the one fixed continue
+lifecycle; competing and nonmatching stops fail closed; the success path keeps
+the complete hit tuple/reason/PC checks; and cleanup additionally requires the
+fixed SIGINT reason and signal. Controlled fixtures use tokenless records while
+matching-token compatibility and rejection paths have direct regressions.
+
+The address audit also corrected the earlier preliminary `a1 + 128` reading.
+In local ELF SHA-256
+`676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`,
+the concrete `heartbeat` DIE is `DW_OP_fbreg: 160`, and `main` uses
+`DW_OP_reg1 (a1)` as its frame base. Disassembly shows `a1 + 128` as a
+loop-carried temporary and writes the source-level assignment to `a1 + 160` at
+`0x420128CD`. This proves only the static frame-relative relation for that ELF.
+The 2026-08-24 `a1=0x3FCDB550` snapshot was taken at another PC and time, so
+even the arithmetic historical candidate `0x3FCDB5F0` is not a current address.
+No new physical hit plan may treat it as one; runtime frame and firmware
+identity evidence, revised plans, and fresh confirmation remain required.
 
 ## References
 

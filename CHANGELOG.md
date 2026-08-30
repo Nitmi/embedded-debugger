@@ -198,7 +198,17 @@ All notable changes to this project will be documented in this file.
   fixtures cover immediate stop-before-result, timeout cleanup, deterministic
   plans, stale confirmation, and complete managed-process cleanup. The PC
   interval does not attest runtime firmware identity, and physical ESP32-S3
-  acceptance remains pending.
+  acceptance remains pending. The first separately confirmed run timed out and
+  exposed a real MI behavior mismatch: Espressif GDB emitted a tokenless SIGINT
+  stop while fixtures emitted token 8. The amended protocol accepts a tokenless
+  stop or exact token 8 only inside the single outstanding continue lifecycle,
+  records the observed token/correlation method, rejects nonmatching and
+  competing stops, and requires `signal-received`/`SIGINT` during interrupt
+  cleanup. Tokenless success and timeout fixtures plus matching, nonmatching,
+  competing, and signal-shape regressions pass. A follow-up ELF/DWARF audit
+  identifies the demo's `heartbeat` as frame base `a1 + 160`; `a1 + 128` is a
+  compiler temporary. The available `a1` value is historical, so no corrected
+  physical address or new standing authorization is claimed.
 - Confirmed `openocd resume plan/test` for one selected-target resume-only
   recovery. Its independent R2 digest binds exact OpenOCD/config identities,
   the selected current-target name, fixed catch-wrapped Tcl protocol,

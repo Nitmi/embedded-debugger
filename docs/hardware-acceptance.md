@@ -1365,11 +1365,13 @@ execution.
   not attempted because it requires separate authority.
 - Host-only provenance review found the primary planning error. The earlier
   register snapshot established `a1=0x3FCDB550`; it did not establish that
-  `0x3FCDB550` held `heartbeat`. The confirmed disassembly reads and writes the
-  loop-local value at `a1 + 128`, so `0x3FCDB5D0` is a candidate only if that
-  prior stack pointer still applies. The candidate is not runtime-bound or
-  verified. The timed-out run therefore does not demonstrate a comparator or
-  target defect.
+  `0x3FCDB550` held `heartbeat`. A preliminary disassembly-only review treated
+  `a1 + 128` as the loop-local value, but a later concrete DWARF audit corrected
+  that interpretation: `heartbeat` is `DW_OP_fbreg: 160` with frame base `a1`,
+  while `a1 + 128` is a compiler temporary. Even the resulting historical
+  arithmetic value `0x3FCDB5F0` is not runtime-bound or verified because the
+  `a1` snapshot came from another PC and date. The timed-out run therefore does
+  not demonstrate a comparator or target defect.
 - The run also invalidated the synthetic fixture assumption that a GDB/MI
   asynchronous stop will carry the continue token. Before another physical
   attempt, hit and cleanup correlation must accept a tokenless stop only in the
@@ -1512,3 +1514,36 @@ This one-run authority is spent. Any further target control requires a new
 plan and fresh authorization. Host-only work may continue on the watchpoint-hit
 protocol and address derivation, but this checkpoint is not authority for
 another recovery or hit attempt.
+
+## Host-only watchpoint-hit protocol and address amendment (2026-08-31)
+
+- The GDB/MI hit lifecycle now accepts the asynchronous stop as tokenless, or
+  with exact continue token 8 when a token is present, only inside the one fixed
+  continue operation. Reports preserve both `observed_stop_token` and
+  `stop_correlation`. Nonmatching tokens and competing stops fail closed.
+- Timeout cleanup still sends at most one token-19 interrupt and never retries.
+  It now accepts a tokenless-or-token-8 stop only when the event is exactly
+  `reason="signal-received"` and `signal-name="SIGINT"`, then continues the
+  existing delete, empty-table verification, detach, and bounded exit steps.
+  This matches the non-accepted physical run without weakening stop identity.
+- Controlled success and timeout fixtures now emit tokenless asynchronous
+  records like Espressif GDB 17.1. Direct regressions retain matching-token
+  compatibility and reject nonmatching tokens, competing stops, wrong signals,
+  and non-all-stop scope. No target-facing command was run for this amendment.
+- A fresh static audit used the unchanged 2,221,600-byte demo ELF SHA-256
+  `676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`.
+  Its concrete `heartbeat` variable DIE points to `DW_OP_fbreg: 160`; the
+  concrete `main` frame base is `DW_OP_reg1 (a1)`. Source/line/disassembly
+  evidence maps the assignment to `0x420128CD`, which stores the incremented
+  value at `a1 + 160`. The `a1 + 128` load/store is a compiler temporary.
+- The only recorded `a1=0x3FCDB550` value is from the separately confirmed
+  2026-08-24 snapshot at PC `0x42012A0D`. It is historical point-in-time
+  evidence, not the frame base for a later run. Adding 160 yields only the
+  historical arithmetic candidate `0x3FCDB5F0`; it must not be used as a
+  current watch address. The local ELF is also not attested as the image now
+  running on the target.
+- Consequently, this checkpoint deliberately produces no physical
+  watchpoint-hit authorization. A later run needs separately reviewed current
+  runtime frame evidence, adequate firmware-identity provenance, two identical
+  post-commit plans, and a fresh exact digest. The connected board and every
+  historical digest remain insufficient authority.

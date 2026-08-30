@@ -687,7 +687,7 @@ A confirmed success permits only this fixed MI sequence:
 5-gdb-set language c                               -> 5^done
 6-break-watch -r|-a <generated-expression>         -> 6^done
 7-break-list                                       -> 7^done, times=0
-8-exec-continue --all                              -> 8^running + 8*stopped
+8-exec-continue --all                              -> 8^running + [8]*stopped
 9-break-list                                       -> 9^done, times=1
 10-break-delete 1                                  -> 10^done
 11-break-list                                      -> 11^done, empty table
@@ -696,15 +696,17 @@ A confirmed success permits only this fixed MI sequence:
 ```
 
 The result and asynchronous stop may arrive in either order, and bounded
-repeated `*running,thread-id="all"` notifications are accepted. Exactly one
-accepted stop must carry continue token 8, the mode-specific
-`read-watchpoint-trigger`/`hw-rwpt` or
+repeated `*running,thread-id="all"` notifications are accepted. While this
+single continue operation is outstanding, exactly one stop is accepted when it
+is tokenless or carries matching continue token 8. It must also contain the
+mode-specific `read-watchpoint-trigger`/`hw-rwpt` or
 `access-watchpoint-trigger`/`hw-awpt`, number 1, the exact expression, and an
 allowed value tuple. Read mode requires only `value`; access mode permits only
 `new` or `old` plus `new`. Its top-frame address must lie inside the confirmed
 PC interval. If `stopped-threads` is reported it must be `all`. Unrelated
-signals/exits/scope loss, missing or extra fields, wrong tokens, duplicate
-stops, unsupported frame shapes, or out-of-range PCs are `PROTOCOL_ERROR`.
+signals/exits/scope loss, missing or extra fields, nonmatching tokens,
+competing stops, unsupported frame shapes, or out-of-range PCs are
+`PROTOCOL_ERROR`.
 
 After the accepted stop, the canonical one-row table must match the original
 watchpoint with `times=1`. Deletion is complete only after token 11 proves the
@@ -719,22 +721,26 @@ If execution is running or indeterminate after a protocol error or timeout,
 the GDB owner attempts this separate bounded cleanup exactly once:
 
 ```text
-19-exec-interrupt --all   -> 19^done and token-8 *stopped when running
+19-exec-interrupt --all   -> 19^done and tokenless-or-token-8 SIGINT *stopped
 20-break-delete 1        -> done or error, followed by verification
 21-break-list            -> exact empty table
 22-target-detach         -> done
 13-gdb-exit              -> exit
 ```
 
-An already observed stop skips the interrupt. No failure path repeats the
-continue, hit, interrupt, cleanup, or physical test, and no GDB failure path
-sends an additional OpenOCD Tcl resume. Detach, exit, or configuration handlers
-may nevertheless resume the target. A failed interrupt/delete/detach leaves
-the target potentially indeterminate and requires separately authorized manual
-recovery. Controlled fixtures cover immediate stop-before-result ordering,
-repeated running notifications, strict hit parsing, timeout interruption,
-fixed cleanup, deterministic plans, stale digests, and preflight rejection.
-Physical target acceptance is separate and remains pending.
+The interrupt stop must be the single correlated `signal-received`/`SIGINT`
+event; a competing stop, other signal, or nonmatching token leaves interrupt
+cleanup incomplete. An already observed stop skips the interrupt. No failure
+path repeats the continue, hit, interrupt, cleanup, or physical test, and no
+GDB failure path sends an additional OpenOCD Tcl resume. Detach, exit, or
+configuration handlers may nevertheless resume the target. A failed
+interrupt/delete/detach leaves the target potentially indeterminate and
+requires separately authorized manual recovery. Controlled fixtures cover
+tokenless and matching-token correlation, nonmatching and competing stops,
+immediate stop-before-result ordering, repeated running notifications, strict
+hit parsing, timeout interruption, fixed cleanup, deterministic plans, stale
+digests, and preflight rejection. Physical target acceptance is separate and
+remains pending.
 
 ## Confirmed OpenOCD target state roundtrip
 

@@ -286,15 +286,28 @@ arbitrary firmware-defined I/O. There is no automatic retry under any failure
 condition; a second attempt requires a new plan review and a new confirmation.
 
 Accept success only when token 8 yields `^running` plus one correlated
-mode-specific `*stopped`, the exact watchpoint number/expression/value shape,
-a top-frame PC inside the confirmed interval, a canonical post-hit row with
-`times=1`, deletion, exact empty-table proof, final running, and complete
-process cleanup. Result/stop ordering may vary and repeated running notices are
-allowed. On timeout or malformed/unrelated stop, the tool may attempt exactly
-one interrupt followed by fixed delete/list/detach/exit; it sends no additional
-Tcl resume after GDB failure. Treat incomplete cleanup as indeterminate,
-perform recovery only with fresh authority, and never present controlled host
-fixtures as physical target acceptance.
+mode-specific `*stopped` while that single continue is outstanding. The stop
+may be tokenless, or may carry exactly token 8; reject every nonmatching token
+and competing stop. Continue to require the exact watchpoint
+number/expression/value shape, a top-frame PC inside the confirmed interval, a
+canonical post-hit row with `times=1`, deletion, exact empty-table proof, final
+running, and complete process cleanup. Result/stop ordering may vary and
+repeated running notices are allowed. On timeout or malformed/unrelated stop,
+the tool may attempt exactly one interrupt; accept its stop only when it is
+tokenless or token 8 and exactly `signal-received`/`SIGINT`, then perform fixed
+delete/list/detach/exit. It sends no additional Tcl resume after GDB failure.
+Treat incomplete cleanup as indeterminate, perform recovery only with fresh
+authority, and never present controlled host fixtures as physical target
+acceptance.
+
+When the watch address is stack-local, keep static and runtime evidence
+separate. DWARF or disassembly may establish a frame-relative offset, but it
+does not establish the current frame base or runtime firmware identity. Never
+add a static offset to a historical stack-pointer snapshot and present the sum
+as a current address. The audited ESP32-S3 demo ELF places `heartbeat` at
+`DW_OP_fbreg: 160` with frame base register `a1`; `a1 + 128` is only a compiler
+temporary in that build. A new physical hit plan needs separately reviewed
+current runtime evidence and a fresh digest.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

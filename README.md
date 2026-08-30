@@ -431,7 +431,7 @@ cargo run -- openocd watchpoint plan \
   --expected-target <exact-openocd-target-name> \
   --config path/to/board.cfg \
   --search path/to/openocd/scripts \
-  --address 0x3FCDB550 \
+  --address <current-runtime-address> \
   --length 4 \
   --region-start 0x3FC88000 \
   --region-length 425984 \
@@ -487,14 +487,14 @@ cargo run -- openocd watchpoint hit plan \
   --expected-target <exact-openocd-target-name> \
   --config path/to/board.cfg \
   --search path/to/openocd/scripts \
-  --address 0x3FCDB550 \
+  --address <current-runtime-address> \
   --length 4 \
   --region-start 0x3FC88000 \
   --region-length 425984 \
   --region-kind ram \
   --mode access \
-  --expected-pc-start 0x420128C5 \
-  --expected-pc-length 11 \
+  --expected-pc-start <derived-pc-start> \
+  --expected-pc-length <derived-pc-length> \
   --hit-timeout-ms 10000 \
   --json
 
@@ -511,22 +511,33 @@ The interval is runtime provenance only: neither its executable semantics nor
 the identity of the firmware running on the target is verified. While the
 watchpoint is active, target firmware executes and may perform arbitrary I/O.
 
-Success requires `^running` and exactly one continue-token-correlated
-mode-specific `*stopped` record, number 1, the exact expression and value-tuple
-shape, a top-frame PC inside the confirmed interval, `times=1`, deletion, an
-exact empty table, final running restoration, and complete process cleanup.
-Result and stop ordering may vary, and repeated running notifications are
-accepted. An unrelated stop, wrong token/reason/tuple/PC, unsupported field,
-timeout, or malformed record fails closed.
+Success requires token-8 `^running` and exactly one mode-specific `*stopped`
+record while that single continue operation is outstanding. The asynchronous
+stop is normally tokenless; a present token is accepted only when it is exactly
+8. The stop must also carry number 1, the exact expression and value-tuple
+shape, a top-frame PC inside the confirmed interval, followed by `times=1`,
+deletion, an exact empty table, final running restoration, and complete process
+cleanup. Result and stop ordering may vary, and repeated running notifications
+are accepted. A competing or unrelated stop, nonmatching token, wrong
+reason/tuple/PC, unsupported field, timeout, or malformed record fails closed.
 
 If execution may still be running after failure, cleanup attempts exactly one
-`-exec-interrupt --all`, then fixed delete/list/detach and bounded exit. It
-sends no additional OpenOCD Tcl resume after a GDB failure. Cleanup handlers
-may nevertheless resume the target, and incomplete cleanup can leave state
-indeterminate. The tool never retries the continue, interrupt, or physical
-operation automatically. Generate two identical host-only plans and obtain a
-fresh exact digest before every physical `test`; classification acceptance and
-all historical digests are insufficient authority.
+`-exec-interrupt --all` and requires one tokenless-or-token-8
+`signal-received`/`SIGINT` stop before fixed delete/list/detach and bounded
+exit. It sends no additional OpenOCD Tcl resume after a GDB failure. Cleanup
+handlers may nevertheless resume the target, and incomplete cleanup can leave
+state indeterminate. The tool never retries the continue, interrupt, or
+physical operation automatically. Generate two identical host-only plans and
+obtain a fresh exact digest before every physical `test`; classification
+acceptance and all historical digests are insufficient authority.
+
+For stack-local watch values, an ELF frame-relative offset is not a current
+runtime address. Bind the exact ELF evidence, derive the variable's frame
+offset, and obtain a current frame base through a separately reviewed runtime
+operation. Never combine a historical stack-pointer snapshot with a static
+offset. In the ESP32-S3 demo evidence, DWARF identifies `heartbeat` as frame
+base `a1 + 160`; the previously considered `a1 + 128` slot is a compiler
+temporary. Neither relation attests the firmware currently executing.
 
 Selected-target resume-only recovery is an independent confirmed checkpoint:
 
