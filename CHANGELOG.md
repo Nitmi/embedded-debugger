@@ -211,7 +211,12 @@ All notable changes to this project will be documented in this file.
   arbitrary Tcl. Configuration Tcl effects, runtime adapter identity, and
   non-selected target states remain outside its guarantee. Controlled
   lifecycle, digest, CLI, and no-retry regressions pass; physical validation
-  requires a fresh exact confirmation.
+  requires a fresh exact confirmation. One separately confirmed ESP32-S3 CPU0
+  run physically accepted the running-origin idempotent branch: OpenOCD
+  observed running before the conditional phase, sent zero resume commands,
+  proved final running, and cleaned all processes and ports. It did not exercise
+  halted-origin resume, and a zero-transmit UART check remained silent, so
+  firmware liveness and heartbeat recovery remain unqualified.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current

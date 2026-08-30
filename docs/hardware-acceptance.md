@@ -1458,3 +1458,57 @@ digest are not standing authorization.
   was consumed by the one rejected command invocation and is not reused. One
   non-retried physical `openocd resume test` now requires the user to return the
   new exact digest independently.
+
+## OpenOCD resume-only running-origin acceptance (2026-08-30)
+
+- The user independently returned exact digest
+  `b7759dc2aa7b60a6e9e71b7c075d6c70ef84b7b9e4536c97ad0d305419b8224f`.
+  A fresh post-confirmation plan matched it and all 35 machine preflight checks
+  passed. Exactly one physical `openocd resume test` then ran against
+  `esp32s3.cpu0`; it exited 0 with `ok=true` and `complete=true`. Automatic and
+  manual retry counts remained 0, and no watchpoint, halt, reset, flash,
+  target-data, GDB/monitor, or arbitrary Tcl command was requested.
+- After OpenOCD readiness, the first selected-target observation was already
+  `running`. The confirmed idempotent policy therefore skipped its conditional
+  resume: `resume=null`, `resume_command_count=0`, and the same observation was
+  retained as the final `running` proof. This accepts the physical
+  running-origin idempotent path and requested CPU0 running-state outcome. It
+  does not physically qualify the `halted -> running` resume command path, and
+  the evidence cannot determine whether CPU0 was already running before
+  OpenOCD configuration executed or configuration-side effects changed it.
+- OpenOCD recorded the exact adapter serial
+  `E0:72:A1:D4:1F:DC`, found both JTAG taps, and successfully examined CPU0.
+  CPU1 again returned `OCD_ID=00000000` and failed examination, so it remains
+  unqualified. Dynamic Tcl/GDB ports were 13011/13012. Shutdown completed in 11
+  ms with exit code 0, no forced process-tree kill, complete stdout/stderr
+  drains, and complete process-tree cleanup.
+- Independent cleanup checks found zero related OpenOCD, GDB,
+  embedded-debugger, or baud processes. Three connection rows were unowned
+  cleanup records; both 13011 and 13012 passed an immediate independent bind
+  test. COM3, all three PnP nodes, and the exact accessible EspJtag identity
+  were unchanged after the run.
+- Firmware-level liveness was not recovered or proven. The five-second
+  pre-run and eight-second post-run UART monitors both used 115200 baud,
+  DTR/RTS false, and zero transmission; each received 0 bytes. Therefore this
+  checkpoint does not accept heartbeat recovery, firmware operational
+  liveness, watchpoint comparator cleanup, or any external-system behavior,
+  despite the point-in-time CPU0 `running` state proof.
+- Evidence is retained under
+  `target/hardware-acceptance/2026-08-30-openocd-resume-only-recovery`.
+  The test JSON is 9,960 bytes with SHA-256
+  `5c4383a49a4e1de247013a77cc3e64bd3f1a9195d7f7cf2df21180750964133c`;
+  complete stderr is 1,890 bytes with SHA-256
+  `b208ec413015c04b574efa0022a93014ee887b6c1bb177a4d74c59bbb6b8f814`.
+  The 35-check preflight SHA-256 is
+  `f72aea4f1cc0c31b670977448eda305378d9367dcbd444b441558992bd8ecf8d`;
+  the 37-check post-run audit SHA-256 is
+  `ff3aa2be847cb3cb268de9855b17c07a887e8e4463d7cea59ca3ef1cd80522f7`.
+  The 8,474-byte acceptance summary has SHA-256
+  `82e88ba991cbb36cd0eae7d5263166c229bdb8626d595649e2ac9ae60d7e0bcc`;
+  all 34 registered artifacts rehashed with no missing, extra, size, or digest
+  mismatch.
+
+This one-run authority is spent. Any further target control requires a new
+plan and fresh authorization. Host-only work may continue on the watchpoint-hit
+protocol and address derivation, but this checkpoint is not authority for
+another recovery or hit attempt.

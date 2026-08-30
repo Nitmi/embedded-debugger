@@ -47,6 +47,13 @@ physical recovery. Do not reuse prior authorization, retry a failure, or claim
 halt, reset, watchpoint cleanup, target-data access, or non-selected-target
 restoration.
 
+ESP32-S3 CPU0 has physically passed only the running-origin idempotent branch:
+OpenOCD observed it running before the conditional phase, sent zero resume
+commands, proved final running, and cleaned the managed process and ports. The
+post-run zero-transmit UART monitor remained silent. Do not treat this as
+halted-origin resume qualification, firmware liveness, heartbeat recovery,
+CPU1 support, or standing authorization for another target-control run.
+
 For reset, use the independent `openocd reset plan/test` workflow. Before
 requesting confirmation, surface that OpenOCD resets all defined targets and
 runs configuration-defined reset events, while the tool observes and recovers

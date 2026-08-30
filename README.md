@@ -564,6 +564,15 @@ sources, and non-selected target states remain unbound. Generate two identical
 host-only plans and obtain a fresh exact digest before each physical recovery;
 an earlier recovery request or digest is not standing authorization.
 
+ESP32-S3 CPU0 has physically passed only the running-origin idempotent branch
+of this workflow under digest
+`b7759dc2aa7b60a6e9e71b7c075d6c70ef84b7b9e4536c97ad0d305419b8224f`.
+OpenOCD observed CPU0 already running after readiness, so the tool sent zero
+resume commands and proved final running plus complete cleanup. The
+halted-origin resume command remains physically unqualified. A zero-transmit
+post-run UART monitor remained silent, so this acceptance does not claim
+firmware liveness or heartbeat recovery.
+
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
 ```console

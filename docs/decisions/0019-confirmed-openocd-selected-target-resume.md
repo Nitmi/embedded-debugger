@@ -1,6 +1,6 @@
 # ADR-0019: Confirm one selected-target OpenOCD resume-only recovery
 
-- Status: accepted; physical validation pending
+- Status: accepted; running-origin physical validation passed, halted-origin pending
 - Date: 2026-08-30
 
 ## Context
@@ -75,6 +75,16 @@ final-state failure, deterministic digests, stale confirmation, pre-filesystem
 validation, lifecycle cleanup, exact command counts, and zero retries. Physical
 validation requires a separately confirmed, non-retried run and independent
 post-run evidence.
+
+The first separately confirmed physical run on 2026-08-30 passed only the
+running-origin idempotent branch. OpenOCD observed `esp32s3.cpu0=running`
+immediately after readiness, so the policy sent no resume command and retained
+that observation as the final running proof. Shutdown and process/port cleanup
+completed, with no retry. The post-run zero-transmit UART monitor remained
+silent. This validates selected-target running observation, idempotent command
+suppression, and managed cleanup; it does not validate the halted-origin resume
+transition, firmware operational liveness, heartbeat recovery, CPU1, or
+watchpoint cleanup.
 
 ## References
 
