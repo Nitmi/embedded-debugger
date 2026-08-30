@@ -1,6 +1,6 @@
 # ADR-0018: Confirm one bounded OpenOCD hardware-watchpoint hit
 
-- Status: accepted; physical validation failed and protocol amendment pending
+- Status: accepted and amended; physical validation pending
 - Date: 2026-08-29
 
 ## Context
@@ -108,9 +108,17 @@ the concrete `heartbeat` DIE is `DW_OP_fbreg: 160`, and `main` uses
 loop-carried temporary and writes the source-level assignment to `a1 + 160` at
 `0x420128CD`. This proves only the static frame-relative relation for that ELF.
 The 2026-08-24 `a1=0x3FCDB550` snapshot was taken at another PC and time, so
-even the arithmetic historical candidate `0x3FCDB5F0` is not a current address.
-No new physical hit plan may treat it as one; runtime frame and firmware
-identity evidence, revised plans, and fresh confirmation remain required.
+its arithmetic candidate was historical and could not authorize another run.
+
+A separately confirmed, non-retried `pc,a1` snapshot on 2026-08-31 then
+returned `pc=0x420129E4` and `a1=0x3FCDB550`. The PC lies inside the audited
+local ELF's concrete `main` range and maps through inlined delay code to
+`src/bin/main.rs:87`, making `0x3FCDB5F0` a current-frame arithmetic candidate
+for that ELF. The register operation did not attest that ELF as the running
+image or read the candidate memory, so it still does not verify a watchpoint
+address or authorize a hit. Physical validation remains pending and requires
+adequate firmware-identity provenance, two new matching plans, and a fresh
+exact confirmation digest.
 
 ## References
 

@@ -113,7 +113,10 @@ it does not authorize ELF/symbol loading, memory/stack access, breakpoints,
 execution control, flash, monitor commands, arbitrary MI/Tcl, CPU1, or another
 target. ESP32-S3 CPU0 has passed one exact `pc/a0/a1/ps` acceptance run with
 fallback restoration and UART recovery; do not generalize it beyond that
-target and selection.
+target and selection. A second exact, non-retried `pc,a1` run under digest
+`a817ed1453fb2ff0e4f23d83ba07bf02c7d0fdeccba37c13913cbc939d188ba0`
+returned `0x420129e4/0x3fcdb550`, used fallback restoration, and recovered eight
+heartbeats. It does not authorize derived-memory access or a watchpoint.
 
 For explicit OpenOCD memory inspection, use the independent
 `openocd memory plan/test` workflow. Require an exact `--address` and 1..=4096
@@ -306,8 +309,12 @@ does not establish the current frame base or runtime firmware identity. Never
 add a static offset to a historical stack-pointer snapshot and present the sum
 as a current address. The audited ESP32-S3 demo ELF places `heartbeat` at
 `DW_OP_fbreg: 160` with frame base register `a1`; `a1 + 128` is only a compiler
-temporary in that build. A new physical hit plan needs separately reviewed
-current runtime evidence and a fresh digest.
+temporary in that build. A separately confirmed current `pc,a1` snapshot now
+places PC `0x420129e4` inside that local ELF's `main` range and yields arithmetic
+candidate `0x3fcdb5f0` from `a1=0x3fcdb550`. Runtime ELF identity and candidate
+memory remain unverified. Treat the value only as conditional current-frame
+evidence, not a verified watchpoint address; a physical hit still needs adequate
+firmware-identity provenance, two new matching plans, and a fresh digest.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

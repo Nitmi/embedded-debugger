@@ -207,8 +207,13 @@ All notable changes to this project will be documented in this file.
   cleanup. Tokenless success and timeout fixtures plus matching, nonmatching,
   competing, and signal-shape regressions pass. A follow-up ELF/DWARF audit
   identifies the demo's `heartbeat` as frame base `a1 + 160`; `a1 + 128` is a
-  compiler temporary. The available `a1` value is historical, so no corrected
-  physical address or new standing authorization is claimed.
+  compiler temporary. A separately confirmed, non-retried current-frame
+  snapshot returned `pc=0x420129e4` inside the local ELF's `main` range and
+  `a1=0x3fcdb550`, yielding conditional arithmetic candidate `0x3fcdb5f0`.
+  It restored final running, cleaned both processes and ports, and recovered
+  eight UART heartbeats. Runtime ELF identity and candidate memory remain
+  unverified, so no watchpoint address acceptance or standing hit authorization
+  is claimed.
 - Confirmed `openocd resume plan/test` for one selected-target resume-only
   recovery. Its independent R2 digest binds exact OpenOCD/config identities,
   the selected current-target name, fixed catch-wrapped Tcl protocol,

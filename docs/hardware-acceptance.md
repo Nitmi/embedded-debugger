@@ -1577,3 +1577,62 @@ another recovery or hit attempt.
   runtime frame evidence, adequate firmware-identity provenance, two identical
   post-commit plans, and a fresh exact digest. The connected board and every
   historical digest remain insufficient authority.
+
+## Confirmed OpenOCD current-frame register snapshot acceptance (2026-08-31)
+
+- The user independently returned exact digest
+  `a817ed1453fb2ff0e4f23d83ba07bf02c7d0fdeccba37c13913cbc939d188ba0`.
+  A fresh post-confirmation plan matched it exactly. Preflight found a clean
+  worktree at `8818f3093d910d39c81be9c7ef6eef0fd9f6f43a`, the unchanged
+  32,726,016-byte binary SHA-256
+  `b944962aaa07d3405397b62bed49b2a904fb330038404b79daba766d4b70879b`,
+  and no related process. Serial, PnP, and probe-rs independently resolved the
+  one accessible EspJtag as `303a:1001:E0:72:A1:D4:1F:DC` on `COM3`.
+- One and only one `openocd registers test` invocation requested ordered
+  `pc,a1` from `esp32s3.cpu0`; no automatic or manual retry ran. The fixed
+  six-command exchange enumerated 270 registers and returned
+  `pc=0x420129e4` as register 0 and `a1=0x3fcdb550` as register 213. No ELF,
+  symbols, explicit memory read, breakpoint/watchpoint, flash, reset, monitor
+  command, arbitrary MI/Tcl, or CPU1 operation was requested.
+- CPU0 was `running` before GDB attached. After successful detach it was still
+  observed `halted`, so the confirmed fixed Tcl fallback sent one resume and
+  proved `esp32s3.cpu0=running` 3 ms later. GDB and OpenOCD both exited
+  gracefully with code 0, their managed process trees were completely cleaned,
+  and dynamic Tcl/GDB ports 1950/1951 were immediately rebindable.
+- OpenOCD selected and successfully examined CPU0, but CPU1 examination again
+  failed with `OCD_ID=00000000`; CPU1 remains unaccepted. Attach handlers also
+  queried flash mappings, as disclosed by the R2 plan, despite no explicit
+  flash command. Transitive configuration semantics and runtime adapter
+  identity remain outside the digest boundary.
+- Against the unchanged local 2,221,600-byte ELF SHA-256
+  `676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`,
+  the point-in-time PC lies inside `main`'s half-open
+  `[0x42010aa4,0x42012dbb)` range and resolves through inlined delay code to
+  `src/bin/main.rs:87`. Combining the current `a1` with the audited
+  `DW_OP_fbreg: 160` relation yields arithmetic candidate `0x3fcdb5f0`.
+  This is current-frame evidence conditional on that local ELF; the operation
+  did not attest the runtime image or read the candidate address. It therefore
+  does not verify a watchpoint address or authorize a watchpoint-hit run.
+- A five-second pre-monitor and eight-second post-monitor used baud 0.1.0 at
+  115200 with DTR/RTS false and zero transmitted bytes. The pre-monitor was
+  silent. The post-monitor received eight complete consecutive heartbeats
+  `152480..152487` with the expected green/blue/red cycle, plus one 13-byte
+  partial prefix, proving observable firmware liveness after restoration.
+  Serial and probe identities remained unchanged and accessible, and no
+  related process remained.
+- Evidence is retained under
+  `target/hardware-acceptance/2026-08-31-openocd-current-frame-registers`.
+  The 21,505-byte structured result SHA-256 is
+  `960620cc35062c31f27eafef6d8415ed9e53676d8bc01204cc6121e22b47bfa8`.
+  The 6,649-byte acceptance summary SHA-256 is
+  `2c40a5bd1ddbd58ecd3263a47114d6a8e7ea1ee2ca77bffb9d3da1d2c410d242`.
+  The 3,080-byte environment audit SHA-256 is
+  `daee08da11664cc59e6c719f81081a1baf7de61761395eee7ea9319369a41ebc`.
+  Its 4,404-byte manifest SHA-256 is
+  `35d9444cae3ab0c8696a31e21d632b6c5b91ef779ccab3a1170b59d529d71afa`;
+  all 26 registered artifacts rehashed without size or digest drift.
+
+This accepts only the exact point-in-time `pc,a1` selection and cleanup for the
+confirmed CPU0/tool/profile/configuration plan. The one-run authority is spent.
+Any memory read, firmware attestation, watchpoint installation or hit, retry,
+or other target control requires its own reviewed plan and fresh authority.

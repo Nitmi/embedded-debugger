@@ -71,6 +71,22 @@ attachment.
   target/tool/profile combination still needs a deterministic plan, independent
   confirmation, and one acceptance run.
 
+## Physical validation
+
+ESP32-S3 CPU0 first passed one exact `pc/a0/a1/ps` snapshot on 2026-08-24.
+On 2026-08-31, a second independently confirmed, non-retried run under digest
+`a817ed1453fb2ff0e4f23d83ba07bf02c7d0fdeccba37c13913cbc939d188ba0`
+returned ordered `pc=0x420129e4` and `a1=0x3fcdb550`. CPU0 started running,
+the fixed fallback restored it from the post-detach halted observation to
+running, both process trees exited gracefully, the dynamic ports were reusable,
+and eight consecutive zero-transmit UART heartbeats followed. CPU1 examination
+failed and remains outside acceptance.
+
+The second selection supplies point-in-time frame evidence only. A local ELF
+maps that PC inside `main` and gives the static `a1 + 160` relation, but runtime
+ELF identity, the resulting memory address and contents, and all watchpoint
+operations remain unverified and unauthorized.
+
 ## References
 
 - [GDB/MI data manipulation commands](https://sourceware.org/gdb/current/onlinedocs/gdb.html/GDB_002fMI-Data-Manipulation.html)

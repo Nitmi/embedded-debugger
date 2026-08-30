@@ -188,7 +188,10 @@ execution-control command, flash, monitor input, or arbitrary MI/Tcl. Do not
 retry a failed confirmed test automatically. Controlled process and parser
 regressions pass. ESP32-S3 CPU0 has also passed one separately confirmed
 `pc/a0/a1/ps` physical snapshot with verified fallback restoration and UART
-recovery; that acceptance does not extend to CPU1 or another target.
+recovery. A second exact, non-retried `pc,a1` snapshot returned
+`0x420129e4/0x3fcdb550`, restored final running, and recovered eight consecutive
+heartbeats. These acceptances do not extend to CPU1, another target, memory at a
+derived address, or any watchpoint operation.
 
 Bounded OpenOCD memory inspection is another independent checkpoint:
 
@@ -537,7 +540,11 @@ offset, and obtain a current frame base through a separately reviewed runtime
 operation. Never combine a historical stack-pointer snapshot with a static
 offset. In the ESP32-S3 demo evidence, DWARF identifies `heartbeat` as frame
 base `a1 + 160`; the previously considered `a1 + 128` slot is a compiler
-temporary. Neither relation attests the firmware currently executing.
+temporary. A separately confirmed current snapshot returned
+`pc=0x420129e4`, inside the local ELF's `main` range, and `a1=0x3fcdb550`,
+yielding arithmetic candidate `0x3fcdb5f0`. The snapshot does not attest that
+ELF as the running image or read the candidate memory, so this is not a verified
+watchpoint address or standing hit authorization.
 
 Selected-target resume-only recovery is an independent confirmed checkpoint:
 
