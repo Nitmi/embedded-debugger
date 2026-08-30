@@ -1,6 +1,6 @@
 # ADR-0018: Confirm one bounded OpenOCD hardware-watchpoint hit
 
-- Status: accepted
+- Status: accepted; physical validation failed and protocol amendment pending
 - Date: 2026-08-29
 
 ## Context
@@ -83,6 +83,23 @@ stop-before-result ordering, repeated running notifications, wrong reason or PC,
 timeout interruption, fixed cleanup, deterministic digests, stale confirmation,
 and preflight rejection before any hardware process starts. Physical target
 acceptance is recorded only after a separately confirmed, non-retried run.
+
+The first separately confirmed physical attempt on 2026-08-30 was not accepted.
+It timed out because the confirmed address came from an `a1` register snapshot,
+while local disassembly placed the incremented loop value at `a1 + 128`. The run
+also showed that Espressif GDB 17.1 emits a tokenless asynchronous SIGINT stop
+after `-exec-interrupt --all`. The fixtures had emitted token 8 on asynchronous
+stops, so they did not model this real behavior.
+
+Before another physical attempt, items 5 and 8 require a bounded amendment:
+correlate a tokenless stop, or the matching token if one is present, only while
+the one continue is outstanding; retain the complete hit tuple/reason/PC checks
+on the success path and the fixed post-interrupt SIGINT check on the cleanup
+path; and reject competing stops or nonmatching tokens. The watched address must
+also be re-derived without treating the stack pointer as the variable address.
+Implementation, fixtures,
+plans, and digest must all be revised before fresh confirmation. Recovery of the
+point-in-time halted target remains separately authorized.
 
 ## References
 

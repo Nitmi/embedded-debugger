@@ -1337,10 +1337,57 @@ execution.
   Runtime adapter identity, RAM semantics, physical comparator state, and the
   runtime firmware identity therefore remain unbound or unverified.
 
-The next physical step is limited to one non-retried ESP32-S3 CPU0
-`openocd watchpoint hit test` only after the user independently returns the
-exact new digest above. It will intentionally run target firmware once with the
-watchpoint installed and may trigger arbitrary firmware-defined I/O. Any
-failure ends the attempt and may require separately authorized recovery. The
-connected board, old classification acceptance, and every historical digest
-are not standing authorization.
+## Non-accepted OpenOCD hardware-watchpoint-hit attempt (2026-08-30)
+
+- The user independently returned exact digest
+  `8c6e2c0384da4aed8f495601ce61dc3d1bace8eaf537df3eca94b4803ea828fb`.
+  A fresh plan matched it, all 19 machine preflight checks passed, and exactly
+  one ESP32-S3 CPU0 physical command ran. It exited 5 with non-retryable
+  `TIMEOUT`; no automatic or manual retry ran. This is failure evidence, not a
+  physical acceptance.
+- GDB inserted and classified the exact access watchpoint as number 1 with
+  `times=0`, accepted exactly one `8-exec-continue --all`, and reported no hit
+  during the 10000 ms bound. The timeout cleanup sent exactly one interrupt.
+  Espressif GDB 17.1 returned `19^done` followed by a tokenless asynchronous
+  SIGINT stop at `0x420129E4`, while the implementation expected stop token 8
+  and therefore conservatively marked cleanup incomplete.
+- The remainder of cleanup still completed: token 20 deleted watchpoint 1,
+  token 21 proved a zero-row GDB table, token 22 detached, token 13 exited GDB,
+  and both GDB and OpenOCD shut down gracefully with exit code 0. No related
+  process remained and dynamic ports 1170 and 1171 were immediately
+  rebindable. Physical comparator cleanup was not independently read back.
+- The failure path deliberately sent no Tcl resume. OpenOCD's final
+  point-in-time observation was `esp32s3.cpu0` halted at `0x420129E4`.
+  A zero-transmit UART check with DTR and RTS disabled received 0 bytes after a
+  pre-run baseline of 215 bytes and five consecutive heartbeats. Serial, PnP,
+  and probe identities remained unchanged and the probe remained accessible.
+  These observations are consistent with CPU0 still being halted; recovery was
+  not attempted because it requires separate authority.
+- Host-only provenance review found the primary planning error. The earlier
+  register snapshot established `a1=0x3FCDB550`; it did not establish that
+  `0x3FCDB550` held `heartbeat`. The confirmed disassembly reads and writes the
+  loop-local value at `a1 + 128`, so `0x3FCDB5D0` is a candidate only if that
+  prior stack pointer still applies. The candidate is not runtime-bound or
+  verified. The timed-out run therefore does not demonstrate a comparator or
+  target defect.
+- The run also invalidated the synthetic fixture assumption that a GDB/MI
+  asynchronous stop will carry the continue token. Before another physical
+  attempt, hit and cleanup correlation must accept a tokenless stop only in the
+  state with the single continue outstanding, while still allowing the matching
+  token if one is present. It must retain strict reason/tuple/PC or
+  post-interrupt SIGINT checks, reject competing stops and nonmatching tokens,
+  and receive host-only regression coverage. That change will produce a new
+  confirmation digest.
+- Evidence is retained under
+  `target/hardware-acceptance/2026-08-30-openocd-hardware-watchpoint-hit`.
+  The 26-check post-run audit is 2,832 bytes with SHA-256
+  `05c2952c2fa445d29dee31c3b789b1fbb7fe06e278e36af66e8d7f021b671eb4`.
+  The non-acceptance summary is 5,945 bytes with SHA-256
+  `d25f1c026967fcb9fe1d8628707e52a792cf6630823978c4ba64bc32f3d39445`;
+  all 11 artifacts it lists were rehashed with no size or digest drift.
+
+The confirmed one-run authority is spent. Any target recovery or power-state
+change requires separate authorization. Any later watchpoint-hit execution also
+requires the host fixes above, two identical new plans, and fresh exact
+confirmation of their new digest; the connected board and this historical
+digest are not standing authorization.
