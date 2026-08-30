@@ -476,6 +476,58 @@ both processes and ports, and recovered stable UART heartbeats. That exact
 acceptance does not qualify `read`, hit execution, physical comparator
 allocation/cleanup, another range/target/tool plan, or a later physical run.
 
+A real temporary hardware-watchpoint hit is a stronger, independent confirmed
+checkpoint:
+
+```console
+cargo run -- openocd watchpoint hit plan \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --address 0x3FCDB550 \
+  --length 4 \
+  --region-start 0x3FC88000 \
+  --region-length 425984 \
+  --region-kind ram \
+  --mode access \
+  --expected-pc-start 0x420128C5 \
+  --expected-pc-length 11 \
+  --hit-timeout-ms 10000 \
+  --json
+
+cargo run -- openocd watchpoint hit test \
+  <the-identical-options> \
+  --confirm <fresh-confirm_digest> \
+  --json
+```
+
+The hit plan reuses all classification checks, then binds asynchronous MI,
+all-stop mode, one `-exec-continue --all`, a 100..=60000 ms hit deadline, and
+one user-confirmed nonempty expected-PC half-open interval of at most 1 MiB.
+The interval is runtime provenance only: neither its executable semantics nor
+the identity of the firmware running on the target is verified. While the
+watchpoint is active, target firmware executes and may perform arbitrary I/O.
+
+Success requires `^running` and exactly one continue-token-correlated
+mode-specific `*stopped` record, number 1, the exact expression and value-tuple
+shape, a top-frame PC inside the confirmed interval, `times=1`, deletion, an
+exact empty table, final running restoration, and complete process cleanup.
+Result and stop ordering may vary, and repeated running notifications are
+accepted. An unrelated stop, wrong token/reason/tuple/PC, unsupported field,
+timeout, or malformed record fails closed.
+
+If execution may still be running after failure, cleanup attempts exactly one
+`-exec-interrupt --all`, then fixed delete/list/detach and bounded exit. It
+sends no additional OpenOCD Tcl resume after a GDB failure. Cleanup handlers
+may nevertheless resume the target, and incomplete cleanup can leave state
+indeterminate. The tool never retries the continue, interrupt, or physical
+operation automatically. Generate two identical host-only plans and obtain a
+fresh exact digest before every physical `test`; classification acceptance and
+all historical digests are insufficient authority.
+
 Direct OpenOCD halt/run qualification is a separate confirmed checkpoint:
 
 ```console
@@ -974,12 +1026,16 @@ independently confirmed, non-retried ESP32-S3 CPU0 `access` run over
 `0x3FCDB550 + 4` proved the exact GDB hardware classification, deletion, empty
 table, final running state, graceful cleanup, reusable ports, and UART
 recovery. `read` mode, comparator allocation, width/capacity support, hit
-behavior, and physical cleanup remain unqualified. GDB-loaded symbols,
+behavior, and physical cleanup remain unqualified. A separate bounded
+hardware-watchpoint-hit workflow now adds asynchronous all-stop execution,
+strict token/reason/value/PC attribution, one-hit table verification, bounded
+interrupt cleanup, deterministic confirmation, and controlled host coverage.
+Its physical ESP32-S3 acceptance remains pending. GDB-loaded symbols,
 trusted runtime symbolization, argument/local/value
 inspection, general ELF/HEX loading, RTT, memory writes, Generic/MMIO or
 undeclared-region reads, register writes, software/symbolic/conditional
 breakpoints, persistent OpenOCD breakpoints, breakpoint-hit execution,
-write-only or persistent watchpoints, watchpoint-hit execution,
+write-only or persistent watchpoints,
 asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,
 and non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD

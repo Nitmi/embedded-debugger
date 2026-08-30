@@ -53,7 +53,7 @@ pub struct OpenOcdHardwareWatchpointPlan {
     pub confirmation_boundary: OpenOcdHardwareWatchpointConfirmationBoundary,
     pub confirm_digest: String,
     #[serde(skip)]
-    openocd_execution_plan: OpenOcdServerPlan,
+    pub(super) openocd_execution_plan: OpenOcdServerPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

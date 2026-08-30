@@ -9,10 +9,10 @@ use crate::{
         DebugBackend,
         openocd::{
             self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
-            OpenOcdHardwareBreakpointOptions, OpenOcdHardwareWatchpointMode,
-            OpenOcdHardwareWatchpointOptions, OpenOcdInspectOptions, OpenOcdMemorySnapshotOptions,
-            OpenOcdRegisterSnapshotOptions, OpenOcdServerOptions, OpenOcdStackElfOptions,
-            OpenOcdStackSnapshotOptions, OpenOcdTargetOptions,
+            OpenOcdHardwareBreakpointOptions, OpenOcdHardwareWatchpointHitOptions,
+            OpenOcdHardwareWatchpointMode, OpenOcdHardwareWatchpointOptions, OpenOcdInspectOptions,
+            OpenOcdMemorySnapshotOptions, OpenOcdRegisterSnapshotOptions, OpenOcdServerOptions,
+            OpenOcdStackElfOptions, OpenOcdStackSnapshotOptions, OpenOcdTargetOptions,
         },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
@@ -182,6 +182,16 @@ pub struct OpenOcdBreakpointTestSelection {
 pub enum OpenOcdWatchpointCommand {
     Plan(OpenOcdWatchpointSelection),
     Test(OpenOcdWatchpointTestSelection),
+    Hit {
+        #[command(subcommand)]
+        command: OpenOcdWatchpointHitCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdWatchpointHitCommand {
+    Plan(OpenOcdWatchpointHitSelection),
+    Test(OpenOcdWatchpointHitTestSelection),
 }
 
 #[derive(Debug, Args)]
@@ -235,6 +245,48 @@ pub struct OpenOcdWatchpointTestSelection {
     #[arg(
         long,
         help = "exact confirm_digest returned by openocd watchpoint plan"
+    )]
+    pub confirm: String,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdWatchpointHitSelection {
+    #[command(flatten)]
+    pub watchpoint: OpenOcdWatchpointSelection,
+
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        value_parser = parse_address,
+        help = "confirmed start of the half-open PC interval allowed to attribute the hit"
+    )]
+    pub expected_pc_start: Address,
+
+    #[arg(
+        long,
+        value_name = "LENGTH",
+        value_parser = parse_length,
+        help = "non-zero expected PC interval length, at most 1 MiB"
+    )]
+    pub expected_pc_length: u64,
+
+    #[arg(
+        long,
+        default_value_t = openocd::DEFAULT_OPENOCD_WATCHPOINT_HIT_TIMEOUT_MS,
+        value_name = "MILLISECONDS",
+        help = "bounded wait for one correlated hardware-watchpoint stop"
+    )]
+    pub hit_timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdWatchpointHitTestSelection {
+    #[command(flatten)]
+    pub hit: OpenOcdWatchpointHitSelection,
+
+    #[arg(
+        long,
+        help = "exact confirm_digest returned by openocd watchpoint hit plan"
     )]
     pub confirm: String,
 }
@@ -1045,6 +1097,24 @@ impl Cli {
             } => "openocd.watchpoint.test",
             Command::Openocd {
                 command:
+                    OpenOcdCommand::Watchpoint {
+                        command:
+                            OpenOcdWatchpointCommand::Hit {
+                                command: OpenOcdWatchpointHitCommand::Plan(_),
+                            },
+                    },
+            } => "openocd.watchpoint.hit.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::Watchpoint {
+                        command:
+                            OpenOcdWatchpointCommand::Hit {
+                                command: OpenOcdWatchpointHitCommand::Test(_),
+                            },
+                    },
+            } => "openocd.watchpoint.hit.test",
+            Command::Openocd {
+                command:
                     OpenOcdCommand::Gdb {
                         command: OpenOcdGdbCommand::Inspect(_),
                     },
@@ -1542,6 +1612,73 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                         .table_before_delete
                         .watchpoint
                         .breakpoint_type,
+                    report.exchange.roundtrip.table_after_delete.reported_rows,
+                    report.target_restoration.initial.state,
+                    report
+                        .target_restoration
+                        .final_observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Watchpoint {
+                    command:
+                        OpenOcdWatchpointCommand::Hit {
+                            command: OpenOcdWatchpointHitCommand::Plan(selection),
+                        },
+                },
+        } => {
+            let report =
+                openocd::plan_hardware_watchpoint_hit(&openocd_watchpoint_hit_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.watchpoint.hit.plan",
+                &report,
+                format!(
+                    "OpenOCD bounded hardware-watchpoint hit plan ready\nRisk: {}\nTarget: {}\nMode: {:?}\nWatch range: {} + {} bytes\nExpected PC: {}..{}\nHit timeout: {} ms\nExactly one continue: true\nAutomatic retry: false\nConfirm digest: {}",
+                    report.risk,
+                    report.target_state_policy.expected_current_target,
+                    report.watchpoint_policy.mode,
+                    report.watchpoint_policy.requested_address,
+                    report.watchpoint_policy.requested_length_bytes,
+                    report.hit_policy.expected_pc_start,
+                    report.hit_policy.expected_pc_end_exclusive,
+                    report.hit_policy.hit_timeout_ms,
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::Watchpoint {
+                    command:
+                        OpenOcdWatchpointCommand::Hit {
+                            command: OpenOcdWatchpointHitCommand::Test(selection),
+                        },
+                },
+        } => {
+            let report = openocd::test_hardware_watchpoint_hit(
+                &openocd_watchpoint_hit_options(&selection.hit),
+                &selection.confirm,
+            )?;
+            Ok(CommandResult::serializable(
+                "openocd.watchpoint.hit.test",
+                &report,
+                format!(
+                    "OpenOCD bounded hardware-watchpoint hit complete\nTarget: {}\nMode: {:?}\nExpression: {}\nStop reason: {}\nFrame PC: {}\nPost-hit count: {}\nBreakpoint table rows after delete: {}\nTarget state: {} -> {}\nShutdown: graceful",
+                    report.target_restoration.initial.target_name,
+                    report.watchpoint_policy.mode,
+                    report.watchpoint_policy.expression,
+                    report.exchange.roundtrip.hit.stop_reason,
+                    report.exchange.roundtrip.hit.frame_address,
+                    report
+                        .exchange
+                        .roundtrip
+                        .table_after_hit
+                        .watchpoint
+                        .hit_count,
                     report.exchange.roundtrip.table_after_delete.reported_rows,
                     report.target_restoration.initial.state,
                     report
@@ -2569,6 +2706,17 @@ fn openocd_watchpoint_options(
         region_length_bytes: selection.region_length,
         region_kind: selection.region_kind.into(),
         mode: selection.mode.into(),
+    }
+}
+
+fn openocd_watchpoint_hit_options(
+    selection: &OpenOcdWatchpointHitSelection,
+) -> OpenOcdHardwareWatchpointHitOptions {
+    OpenOcdHardwareWatchpointHitOptions {
+        watchpoint: openocd_watchpoint_options(&selection.watchpoint),
+        expected_pc_start: selection.expected_pc_start,
+        expected_pc_length_bytes: selection.expected_pc_length,
+        hit_timeout_ms: selection.hit_timeout_ms,
     }
 }
 

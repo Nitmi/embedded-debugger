@@ -248,6 +248,34 @@ CPU0, tools, profile, and configuration. It does not qualify `read`, comparator
 allocation/cleanup, width/capacity, hit execution, CPU1, or any later physical
 plan, and is not standing authorization.
 
+For a real OpenOCD hardware-watchpoint hit, switch to the independent
+`openocd watchpoint hit plan/test` workflow. Keep every base watchpoint input
+identical and additionally require an explicit `--expected-pc-start`, nonzero
+`--expected-pc-length` at most 1 MiB, and bounded `--hit-timeout-ms`. Derive the
+half-open PC interval from inspected firmware code, then state that its meaning
+is user-confirmed: the tool does not load that ELF or attest the firmware
+currently running on the target. Never widen the interval merely to make a
+failed stop pass.
+
+Before any physical `hit test`, generate the complete plan twice, compare the
+two `confirm_digest` values and stable contract fields, stop, and ask the user
+to return the fresh exact digest. Old watchpoint classification, breakpoint,
+hit, or other operation digests never authorize this execution. Surface that
+the target will run once while the watchpoint is installed and may perform
+arbitrary firmware-defined I/O. There is no automatic retry under any failure
+condition; a second attempt requires a new plan review and a new confirmation.
+
+Accept success only when token 8 yields `^running` plus one correlated
+mode-specific `*stopped`, the exact watchpoint number/expression/value shape,
+a top-frame PC inside the confirmed interval, a canonical post-hit row with
+`times=1`, deletion, exact empty-table proof, final running, and complete
+process cleanup. Result/stop ordering may vary and repeated running notices are
+allowed. On timeout or malformed/unrelated stop, the tool may attempt exactly
+one interrupt followed by fixed delete/list/detach/exit; it sends no additional
+Tcl resume after GDB failure. Treat incomplete cleanup as indeterminate,
+perform recovery only with fresh authority, and never present controlled host
+fixtures as physical target acceptance.
+
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state
 observation, and restoration. It does not authorize ELF or symbol loading,

@@ -185,6 +185,20 @@ All notable changes to this project will be documented in this file.
   ports reusable, and recovered eight consecutive UART heartbeats. `read`
   mode, physical comparator allocation/cleanup, width/capacity, hit behavior,
   CPU1, and any later plan remain unqualified.
+- Confirmed `openocd watchpoint hit plan/test` for one bounded real
+  hardware-watchpoint event. The independent R2 digest reuses the exact
+  classification plan and additionally binds asynchronous MI, all-stop mode,
+  one `-exec-continue --all`, a 100..=60000 ms deadline, a user-confirmed
+  half-open PC interval no larger than 1 MiB, strict token/reason/tuple/value/
+  frame parsing, a required post-hit count of one, fixed cleanup, restoration,
+  and a no-retry policy. Result and stop ordering may vary; repeated running
+  notifications are accepted, but unrelated or malformed stops fail closed.
+  Timeout or indeterminate execution attempts one fixed interrupt, then
+  delete/list/detach/exit without any additional Tcl resume. Controlled
+  fixtures cover immediate stop-before-result, timeout cleanup, deterministic
+  plans, stale confirmation, and complete managed-process cleanup. The PC
+  interval does not attest runtime firmware identity, and physical ESP32-S3
+  acceptance remains pending.
 - Confirmed `openocd target plan/test` for one fixed direct-Tcl
   `running -> halted -> running` roundtrip. The digest binds exact OpenOCD and
   top-level config identities, ordered search paths, the expected current
@@ -360,8 +374,8 @@ All notable changes to this project will be documented in this file.
   discovery/control, configurable reset, non-selected target restoration, GDB
   symbol loading, persistent/software/symbolic/conditional breakpoints,
   breakpoint-hit execution, write-only/persistent watchpoints, read-mode
-  physical watchpoint acceptance, watchpoint-hit execution, and flashing are
-  not exposed or remain unqualified. The MCP adapter
+  physical watchpoint acceptance, physical acceptance of the bounded
+  watchpoint-hit workflow, and flashing remain unqualified. The MCP adapter
   currently exposes only the probe-rs/Replay persistent session contract;
   OpenOCD and flash planning/execution remain CLI operations.
 - Native raw BIN requires an explicit base address; Replay uses the fixture

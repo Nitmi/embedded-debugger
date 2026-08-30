@@ -652,6 +652,90 @@ roundtrip. It does not independently prove physical comparator allocation or
 cleanup, target width/capacity, RAM semantics, hit behavior, `read` mode, CPU1,
 another plan, or standing authority for a later run.
 
+## Confirmed OpenOCD bounded hardware-watchpoint hit
+
+`openocd watchpoint hit plan/test` is independent from the classification-only
+workflow above. It reuses the same exact address, 1/2/4/8-byte alignment and
+RAM-containment checks, generated C expression, and hardware-only
+`read|access` modes. It additionally requires `--expected-pc-start`, a nonzero
+`--expected-pc-length` no greater than 1 MiB, and `--hit-timeout-ms` in
+100..=60000 ms. PC overflow and all scalar errors fail before host-file or tool
+inspection.
+
+The expected PC range is half-open and user-confirmed. It binds the runtime
+location allowed to attribute the hit, but the tool does not verify executable
+memory semantics, load an ELF, or attest that the target is running the local
+firmware used to derive that interval. Target RAM semantics, runtime adapter
+identity, dynamic ports, transitive OpenOCD sources, and physical comparator
+register state also remain unbound.
+
+The independent `R2_DEVICE_WRITE` digest binds the complete base watchpoint
+plan plus the exact PC interval, timeout, asynchronous/all-stop policy, strict
+stop parser, success and failure protocols, one-continue/no-retry policy,
+effects, restoration policy, tool/config/profile identities, target name, and
+lifecycle deadlines. Every physical execution requires two identical current
+host-only plans and a fresh exact digest; a classification digest or any prior
+acceptance is stale for this command.
+
+A confirmed success permits only this fixed MI sequence:
+
+```text
+1-gdb-version                                      -> 1^done
+2-gdb-set mi-async on                              -> 2^done
+3-gdb-set non-stop off                             -> 3^done
+4-target-select remote 127.0.0.1:<dynamic-port>   -> 4^connected
+5-gdb-set language c                               -> 5^done
+6-break-watch -r|-a <generated-expression>         -> 6^done
+7-break-list                                       -> 7^done, times=0
+8-exec-continue --all                              -> 8^running + 8*stopped
+9-break-list                                       -> 9^done, times=1
+10-break-delete 1                                  -> 10^done
+11-break-list                                      -> 11^done, empty table
+12-target-detach                                   -> 12^done
+13-gdb-exit                                        -> 13^exit
+```
+
+The result and asynchronous stop may arrive in either order, and bounded
+repeated `*running,thread-id="all"` notifications are accepted. Exactly one
+accepted stop must carry continue token 8, the mode-specific
+`read-watchpoint-trigger`/`hw-rwpt` or
+`access-watchpoint-trigger`/`hw-awpt`, number 1, the exact expression, and an
+allowed value tuple. Read mode requires only `value`; access mode permits only
+`new` or `old` plus `new`. Its top-frame address must lie inside the confirmed
+PC interval. If `stopped-threads` is reported it must be `all`. Unrelated
+signals/exits/scope loss, missing or extra fields, wrong tokens, duplicate
+stops, unsupported frame shapes, or out-of-range PCs are `PROTOCOL_ERROR`.
+
+After the accepted stop, the canonical one-row table must match the original
+watchpoint with `times=1`. Deletion is complete only after token 11 proves the
+exact empty six-column table. The normal path then detaches, verifies the
+selected target running, permits the one existing fixed Tcl resume fallback
+only after the hit and cleanup are proven, and closes both process trees.
+Success proves one GDB-attributed physical watchpoint event for the exact run;
+it still does not independently read comparator registers or prove firmware
+identity.
+
+If execution is running or indeterminate after a protocol error or timeout,
+the GDB owner attempts this separate bounded cleanup exactly once:
+
+```text
+19-exec-interrupt --all   -> 19^done and token-8 *stopped when running
+20-break-delete 1        -> done or error, followed by verification
+21-break-list            -> exact empty table
+22-target-detach         -> done
+13-gdb-exit              -> exit
+```
+
+An already observed stop skips the interrupt. No failure path repeats the
+continue, hit, interrupt, cleanup, or physical test, and no GDB failure path
+sends an additional OpenOCD Tcl resume. Detach, exit, or configuration handlers
+may nevertheless resume the target. A failed interrupt/delete/detach leaves
+the target potentially indeterminate and requires separately authorized manual
+recovery. Controlled fixtures cover immediate stop-before-result ordering,
+repeated running notifications, strict hit parsing, timeout interruption,
+fixed cleanup, deterministic plans, stale digests, and preflight rejection.
+Physical target acceptance is separate and remains pending.
+
 ## Confirmed OpenOCD target state roundtrip
 
 `openocd target plan` accepts one exact OpenOCD executable, at least one
