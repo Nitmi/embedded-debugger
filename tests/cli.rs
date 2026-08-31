@@ -3269,6 +3269,129 @@ fn openocd_memory_validates_range_before_filesystem_inputs() {
 }
 
 #[test]
+fn openocd_esp_app_identity_plan_binds_elf_descriptor_and_nvm_read() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    let elf = directory.path().join("app.elf");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+    fs::write(&elf, support::minimal_esp32s3_idf_elf()).unwrap();
+
+    let make_plan = || {
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .arg("openocd")
+            .arg("esp-app-identity")
+            .arg("plan")
+            .arg("--openocd-executable")
+            .arg(&openocd)
+            .arg("--gdb-executable")
+            .arg(&gdb)
+            .arg("--expected-target")
+            .arg("esp32s3.cpu0")
+            .arg("--config")
+            .arg(&config)
+            .arg("--search")
+            .arg(directory.path())
+            .arg("--elf")
+            .arg(&elf)
+            .arg("--region-start")
+            .arg("0x3c000000")
+            .arg("--region-length")
+            .arg("0x10000")
+            .arg("--region-kind")
+            .arg("nvm")
+            .arg("--json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Value>(&output).unwrap()
+    };
+    let first = make_plan();
+    let second = make_plan();
+
+    assert_eq!(first["operation"], "openocd.esp_app_identity.plan");
+    assert_eq!(first["data"]["operation"], "openocd.esp_app_identity.test");
+    assert_eq!(first["data"]["risk"], "R2_DEVICE_WRITE");
+    assert_eq!(first["data"]["elf"]["architecture"], "xtensa");
+    assert_eq!(first["data"]["elf"]["section_address"], "0x3C000020");
+    assert_eq!(first["data"]["elf"]["section_length_bytes"], 256);
+    assert_eq!(
+        first["data"]["elf"]["expected_descriptor"]["app_elf_sha256"],
+        first["data"]["elf"]["sha256"]
+    );
+    assert_eq!(
+        first["data"]["memory"]["protocol"]["commands"][2]["command"],
+        "-data-read-memory-bytes 0x3c000020 256"
+    );
+    assert_eq!(
+        first["data"]["memory"]["memory_policy"]["declared_region"]["kind"],
+        "nvm"
+    );
+    assert_eq!(
+        first["data"]["identity_policy"]["cryptographic_authenticity_claimed"],
+        false
+    );
+    assert_eq!(
+        first["data"]["confirm_digest"],
+        second["data"]["confirm_digest"]
+    );
+}
+
+#[test]
+fn openocd_esp_app_identity_rejects_stale_digest_before_tcl_execution() {
+    let directory = tempdir().unwrap();
+    let openocd = write_fake_openocd(directory.path());
+    let gdb = write_fake_gdb(directory.path());
+    let config = directory.path().join("board.cfg");
+    let elf = directory.path().join("app.elf");
+    fs::write(&config, b"adapter speed 1000\n").unwrap();
+    fs::write(&elf, support::minimal_esp32s3_idf_elf()).unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .arg("openocd")
+        .arg("esp-app-identity")
+        .arg("test")
+        .arg("--openocd-executable")
+        .arg(&openocd)
+        .arg("--gdb-executable")
+        .arg(&gdb)
+        .arg("--expected-target")
+        .arg("esp32s3.cpu0")
+        .arg("--config")
+        .arg(&config)
+        .arg("--elf")
+        .arg(&elf)
+        .arg("--region-start")
+        .arg("0x3c000000")
+        .arg("--region-length")
+        .arg("0x10000")
+        .arg("--region-kind")
+        .arg("nvm")
+        .arg("--confirm")
+        .arg("00".repeat(32))
+        .arg("--json")
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "openocd.esp_app_identity.test");
+    assert_eq!(result["error"]["code"], "CONFIRMATION_MISMATCH");
+    assert_eq!(
+        result["error"]["suggested_actions"][0]["action"],
+        "review_openocd_esp_app_identity_plan"
+    );
+    assert!(result["error"]["details"]["openocd_readiness"].is_null());
+}
+
+#[test]
 fn openocd_reset_plan_binds_global_reset_and_selected_target_recovery() {
     let directory = tempdir().unwrap();
     let openocd = write_fake_openocd(directory.path());

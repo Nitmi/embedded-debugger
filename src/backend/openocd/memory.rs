@@ -668,7 +668,7 @@ fn duration_ms(duration: Duration) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         fs,
         io::{Read, Write},
@@ -873,7 +873,7 @@ mod tests {
         }
     }
 
-    fn test_options(directory: &Path) -> OpenOcdMemorySnapshotOptions {
+    pub(crate) fn test_options(directory: &Path) -> OpenOcdMemorySnapshotOptions {
         let openocd = write_fake_openocd(directory);
         let gdb = write_fake_memory_gdb(directory);
         let config = directory.join("board.cfg");

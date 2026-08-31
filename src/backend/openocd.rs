@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{DebugError, ErrorCode, Result, SuggestedAction};
 
 mod breakpoint;
+mod esp_app_identity;
 mod gdb;
 mod memory;
 mod registers;
@@ -36,6 +37,15 @@ pub use breakpoint::{
     OpenOcdHardwareBreakpointOptions, OpenOcdHardwareBreakpointPlan,
     OpenOcdHardwareBreakpointPolicy, OpenOcdHardwareBreakpointTestReport, plan_hardware_breakpoint,
     test_hardware_breakpoint,
+};
+pub use esp_app_identity::{
+    ESP_APP_DESCRIPTOR_BYTES, ESP_APP_DESCRIPTOR_ELF_SHA256_LENGTH,
+    ESP_APP_DESCRIPTOR_ELF_SHA256_OFFSET, OpenOcdEspAppDescriptor,
+    OpenOcdEspAppIdentityCapabilities, OpenOcdEspAppIdentityComparison,
+    OpenOcdEspAppIdentityConfirmationBoundary, OpenOcdEspAppIdentityEffects,
+    OpenOcdEspAppIdentityElfInspection, OpenOcdEspAppIdentityOptions, OpenOcdEspAppIdentityPlan,
+    OpenOcdEspAppIdentityPolicy, OpenOcdEspAppIdentityTestReport, plan_esp_app_identity,
+    test_esp_app_identity,
 };
 pub use gdb::{
     DEFAULT_GDB_MI_COMMAND_TIMEOUT_MS, DEFAULT_GDB_MI_SHUTDOWN_TIMEOUT_MS,

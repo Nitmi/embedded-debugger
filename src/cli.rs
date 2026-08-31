@@ -8,12 +8,12 @@ use crate::{
     backend::{
         DebugBackend,
         openocd::{
-            self, GdbInspectOptions, GdbMiTestOptions, OpenOcdGdbSessionOptions,
-            OpenOcdHardwareBreakpointOptions, OpenOcdHardwareWatchpointHitOptions,
-            OpenOcdHardwareWatchpointMode, OpenOcdHardwareWatchpointOptions, OpenOcdInspectOptions,
-            OpenOcdMemorySnapshotOptions, OpenOcdRegisterSnapshotOptions, OpenOcdResumeOptions,
-            OpenOcdServerOptions, OpenOcdStackElfOptions, OpenOcdStackSnapshotOptions,
-            OpenOcdTargetOptions,
+            self, GdbInspectOptions, GdbMiTestOptions, OpenOcdEspAppIdentityOptions,
+            OpenOcdGdbSessionOptions, OpenOcdHardwareBreakpointOptions,
+            OpenOcdHardwareWatchpointHitOptions, OpenOcdHardwareWatchpointMode,
+            OpenOcdHardwareWatchpointOptions, OpenOcdInspectOptions, OpenOcdMemorySnapshotOptions,
+            OpenOcdRegisterSnapshotOptions, OpenOcdResumeOptions, OpenOcdServerOptions,
+            OpenOcdStackElfOptions, OpenOcdStackSnapshotOptions, OpenOcdTargetOptions,
         },
         probe_rs::{self, ProbeRsBackend},
         replay::{ReplayBackend, ReplayFixture},
@@ -132,6 +132,10 @@ pub enum OpenOcdCommand {
     Memory {
         #[command(subcommand)]
         command: OpenOcdMemoryCommand,
+    },
+    EspAppIdentity {
+        #[command(subcommand)]
+        command: OpenOcdEspAppIdentityCommand,
     },
     Registers {
         #[command(subcommand)]
@@ -591,6 +595,60 @@ pub struct OpenOcdStackTestSelection {
 pub enum OpenOcdMemoryCommand {
     Plan(OpenOcdMemorySelection),
     Test(OpenOcdMemoryTestSelection),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenOcdEspAppIdentityCommand {
+    Plan(OpenOcdEspAppIdentitySelection),
+    Test(OpenOcdEspAppIdentityTestSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdEspAppIdentitySelection {
+    #[command(flatten)]
+    pub session: OpenOcdSessionSelection,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "exact ESP-IDF executable ELF whose .flash.appdesc identifies the running image"
+    )]
+    pub elf: PathBuf,
+
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        value_parser = parse_address,
+        help = "start of the explicitly confirmed containing NVM-mapped region"
+    )]
+    pub region_start: Address,
+
+    #[arg(
+        long,
+        value_name = "LENGTH",
+        value_parser = parse_length,
+        help = "length of the explicitly confirmed containing NVM-mapped region"
+    )]
+    pub region_length: u64,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "confirmed region type; this operation accepts only nvm"
+    )]
+    pub region_kind: OpenOcdMemoryRegionKindArg,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenOcdEspAppIdentityTestSelection {
+    #[command(flatten)]
+    pub identity: OpenOcdEspAppIdentitySelection,
+
+    #[arg(
+        long,
+        help = "exact confirm_digest returned by openocd esp-app-identity plan"
+    )]
+    pub confirm: String,
 }
 
 #[derive(Debug, Args)]
@@ -1225,6 +1283,18 @@ impl Cli {
                         command: OpenOcdMemoryCommand::Test(_),
                     },
             } => "openocd.memory.test",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::EspAppIdentity {
+                        command: OpenOcdEspAppIdentityCommand::Plan(_),
+                    },
+            } => "openocd.esp_app_identity.plan",
+            Command::Openocd {
+                command:
+                    OpenOcdCommand::EspAppIdentity {
+                        command: OpenOcdEspAppIdentityCommand::Test(_),
+                    },
+            } => "openocd.esp_app_identity.test",
             Command::Openocd {
                 command:
                     OpenOcdCommand::Registers {
@@ -1959,6 +2029,67 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                     report.memory_policy.declared_region.start,
                     report.memory_policy.declared_region.length_bytes,
                     report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::EspAppIdentity {
+                    command: OpenOcdEspAppIdentityCommand::Plan(selection),
+                },
+        } => {
+            let report =
+                openocd::plan_esp_app_identity(&openocd_esp_app_identity_options(selection))?;
+            Ok(CommandResult::serializable(
+                "openocd.esp_app_identity.plan",
+                &report,
+                format!(
+                    "OpenOCD ESP app identity plan ready\nRisk: {}\nTarget: {}\nELF SHA-256: {}\nDescriptor: {} + {} byte(s)\nDeclared region: NVM {} + {} byte(s)\nConfirm digest: {}",
+                    report.risk,
+                    report.memory.target_state_policy.expected_current_target,
+                    report.elf.sha256,
+                    report.elf.section_address,
+                    report.elf.section_length_bytes,
+                    report.memory.memory_policy.declared_region.start,
+                    report.memory.memory_policy.declared_region.length_bytes,
+                    report.confirm_digest,
+                ),
+            ))
+        }
+        Command::Openocd {
+            command:
+                OpenOcdCommand::EspAppIdentity {
+                    command: OpenOcdEspAppIdentityCommand::Test(selection),
+                },
+        } => {
+            let report = openocd::test_esp_app_identity(
+                &openocd_esp_app_identity_options(&selection.identity),
+                &selection.confirm,
+            )?;
+            Ok(CommandResult::serializable(
+                "openocd.esp_app_identity.test",
+                &report,
+                format!(
+                    "OpenOCD ESP app identity verified\nTarget: {}\nProject: {}\nVersion: {}\nELF SHA-256: {}\nRuntime firmware identity: verified\nCryptographic authenticity: not verified\nSecure boot: not verified\nTarget state: {} -> {}\nShutdown: graceful",
+                    report.memory.target_restoration.initial.target_name,
+                    report
+                        .comparison
+                        .target_descriptor
+                        .as_ref()
+                        .map_or("", |descriptor| descriptor.project_name.as_str()),
+                    report
+                        .comparison
+                        .target_descriptor
+                        .as_ref()
+                        .map_or("", |descriptor| descriptor.version.as_str()),
+                    report.elf.sha256,
+                    report.memory.target_restoration.initial.state,
+                    report
+                        .memory
+                        .target_restoration
+                        .final_observation
+                        .as_ref()
+                        .map_or("missing", |observation| observation.state.as_str()),
                 ),
             ))
         }
@@ -2837,6 +2968,18 @@ fn openocd_memory_options(selection: &OpenOcdMemorySelection) -> OpenOcdMemorySn
         session: openocd_session_options(&selection.session),
         address: selection.address,
         length_bytes: selection.length,
+        region_start: selection.region_start,
+        region_length_bytes: selection.region_length,
+        region_kind: selection.region_kind.into(),
+    }
+}
+
+fn openocd_esp_app_identity_options(
+    selection: &OpenOcdEspAppIdentitySelection,
+) -> OpenOcdEspAppIdentityOptions {
+    OpenOcdEspAppIdentityOptions {
+        session: openocd_session_options(&selection.session),
+        elf: selection.elf.clone(),
         region_start: selection.region_start,
         region_length_bytes: selection.region_length,
         region_kind: selection.region_kind.into(),

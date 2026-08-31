@@ -336,6 +336,44 @@ register/stack commands, memory writes, breakpoints/watchpoints, general
 execution control, flash, monitor input, arbitrary MI/Tcl, and unverified
 region inference remain unavailable.
 
+## Confirmed ESP app runtime firmware identity
+
+`openocd esp-app-identity plan` reuses the exact OpenOCD/GDB/session inputs and
+requires `--elf`, `--region-start`, `--region-length`, and
+`--region-kind nvm`. Region kind, non-emptiness, overflow, and later descriptor
+containment are validated before target access. RAM, MMIO, and unknown
+declarations are rejected.
+
+The host preflight canonicalizes and reads one regular, nonempty ELF of at most
+64 MiB. It requires executable kind, little endianness, Xtensa or RISC-V 32-bit
+architecture, and exactly one allocated, read-only, nonzero, four-byte-aligned
+`.flash.appdesc` section of exactly 256 bytes. The descriptor magic must be
+`0xABCD5432`; fixed metadata fields must be printable ASCII with zero padding;
+and source bytes `0x90..0xB0` must be zero.
+
+The expected runtime descriptor copies the exact source section and replaces
+only `0x90..0xB0` with SHA-256 of the complete ELF, matching the pinned
+`espflash 4.5.0` IDF image rule. The outer confirmation digest binds the nested
+memory digest, canonical ELF path and complete bytes/hash, section address and
+layout, source and expected descriptor hashes, complete expected descriptor
+bytes, explicit NVM declaration, fixed parser/derivation policy, effects, and
+trust boundary.
+
+`openocd esp-app-identity test` recomputes the outer plan and rejects a stale
+digest before Tcl execution. Its nested target protocol is the bounded memory
+protocol above, fixed to one `-data-read-memory-bytes <section-address> 256`.
+No symbol or executable file is passed to GDB. Success requires complete
+coverage, strict target descriptor parsing, and exact equality of all 256
+bytes. The report returns both descriptors, hashes, parsed metadata, and
+`runtime_firmware_identity_verified=true`.
+
+A mismatch is `VERIFICATION_FAILED` after the nested operation has detached,
+restored the selected target to `running`, exited GDB, and shut down OpenOCD;
+the error retains that evidence and records that no retry occurred. The result
+is non-adversarial build identity, not a chain of trust. It always keeps
+`cryptographic_authenticity_verified=false`, `secure_boot_verified=false`, and
+`target_memory_map_semantics_verified=false`.
+
 ## Confirmed OpenOCD bounded stack snapshot
 
 `openocd stack plan` reuses the exact OpenOCD/GDB/session inputs and requires

@@ -241,6 +241,54 @@ heartbeats recovered. This acceptance does not independently verify the
 declared NVM semantics and does not extend to CPU1, another range, or another
 target/tool plan.
 
+ESP runtime firmware identity is a separate, descriptor-specific checkpoint:
+
+```console
+cargo run -- openocd esp-app-identity plan \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --elf path/to/firmware.elf \
+  --region-start 0x3c000000 --region-length 0x10000 \
+  --region-kind nvm \
+  --json
+
+cargo run -- openocd esp-app-identity test \
+  --openocd-executable path/to/openocd \
+  --gdb-executable path/to/gdb \
+  --gdb-xtensa-config path/to/xtensa_target.so \
+  --expected-target <exact-openocd-target-name> \
+  --config path/to/board.cfg \
+  --search path/to/openocd/scripts \
+  --elf path/to/firmware.elf \
+  --region-start 0x3c000000 --region-length 0x10000 \
+  --region-kind nvm \
+  --confirm <confirm_digest> \
+  --json
+```
+
+Planning accepts only a little-endian executable Xtensa or RISC-V ELF of at
+most 64 MiB with exactly one allocated, read-only, 256-byte
+`.flash.appdesc`. It strictly parses the ESP app descriptor, requires the
+source `app_elf_sha256` slot at bytes `0x90..0xB0` to be zero, hashes the
+complete ELF, and derives the expected image descriptor by replacing only that
+slot according to the pinned `espflash 4.5.0` rule. The outer digest binds the
+complete nested memory plan, exact ELF and expected descriptor bytes, section
+address/layout, explicit containing NVM region, parser policy, and effects.
+
+The test sends the same fixed five-command memory protocol and reads only the
+ELF-declared 256-byte descriptor. Success requires exact byte-for-byte equality
+and returns `runtime_firmware_identity_verified=true`. A mismatch is reported
+only after detach, final-running restoration, and process cleanup, with no
+automatic retry. This is strong non-adversarial build identity evidence, not
+signed attestation: `cryptographic_authenticity_verified`,
+`secure_boot_verified`, and `target_memory_map_semantics_verified` remain
+false. Controlled parser and two-process tests pass; physical ESP32-S3
+acceptance is still pending a fresh two-plan review and user confirmation.
+
 Bounded OpenOCD stack inspection is an independent confirmed checkpoint:
 
 ```console
@@ -1018,8 +1066,10 @@ See [docs/contracts.md](docs/contracts.md),
 [ADR-0014](docs/decisions/0014-offline-elf-stack-annotations.md),
 [ADR-0015](docs/decisions/0015-bounded-zero-size-symbol-inference.md),
 [ADR-0016](docs/decisions/0016-confirmed-openocd-hardware-breakpoint-roundtrip.md),
-[ADR-0017](docs/decisions/0017-confirmed-openocd-hardware-watchpoint-roundtrip.md), and
-[ADR-0018](docs/decisions/0018-confirmed-openocd-hardware-watchpoint-hit.md).
+[ADR-0017](docs/decisions/0017-confirmed-openocd-hardware-watchpoint-roundtrip.md),
+[ADR-0018](docs/decisions/0018-confirmed-openocd-hardware-watchpoint-hit.md),
+[ADR-0019](docs/decisions/0019-confirmed-openocd-selected-target-resume.md), and
+[ADR-0020](docs/decisions/0020-confirmed-esp-app-runtime-identity.md).
 
 ## Current status
 

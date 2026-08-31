@@ -1,6 +1,6 @@
 ---
 name: embedded-debugger
-description: Use embedded-debugger for structured embedded flashing and debugging through probe-rs or Replay, plus confirmed OpenOCD/GDB lifecycles and temporary hardware-breakpoint/watchpoint qualification. Trigger when work needs exact probe selection, bounded target control, cleanup evidence, or verified debug-tool integration.
+description: Use embedded-debugger for structured embedded flashing and debugging through probe-rs or Replay, plus confirmed OpenOCD/GDB lifecycles, ESP runtime firmware identity, and temporary hardware-breakpoint/watchpoint qualification. Trigger when work needs exact probe selection, bounded target control, cleanup evidence, or verified debug-tool integration.
 ---
 
 # Embedded Debugger
@@ -146,6 +146,34 @@ coverage, a SHA-256 matching the prior probe-rs snapshot, fallback restoration,
 process cleanup, and UART recovery. Treat that qualification as exact to the
 confirmed target, range, tools, and configuration; the NVM declaration remains
 user-confirmed rather than independently verified from OpenOCD's memory map.
+
+For an ESP-IDF executable, use the independent
+`openocd esp-app-identity plan/test` workflow before treating ELF-derived
+addresses as belonging to the running image. Require the same exact session
+inputs, `--elf <FILE>`, a containing `--region-start`/`--region-length`, and
+explicit `--region-kind nvm`. Do not accept RAM, infer the region from the
+section address, or reuse a memory/stack digest.
+
+Planning must finish before hardware access. Surface the canonical ELF path and
+complete SHA-256, the exact `.flash.appdesc` address and 256-byte length, source
+and expected descriptor hashes, expected descriptor bytes, the nested memory
+digest, and the outer digest. The ELF must be a little-endian executable Xtensa
+or RISC-V image with exactly one allocated read-only descriptor section. Its
+source ELF hash slot must be zero; the expected target bytes are derived by
+copying the complete ELF SHA-256 into descriptor bytes `0x90..0xB0` and changing
+nothing else. Require the exact fresh outer digest before `test`.
+
+The test performs one exact 256-byte target read through the fixed memory
+protocol and requires all bytes to match. It does not load the ELF or symbols
+into GDB. On mismatch, inspect the returned detach, final-running restoration,
+GDB exit, and OpenOCD cleanup evidence and never retry automatically. Success
+permits `runtime_firmware_identity_verified=true` only as point-in-time,
+non-adversarial build identity. Always preserve
+`cryptographic_authenticity_verified=false`, `secure_boot_verified=false`, and
+`target_memory_map_semantics_verified=false`; target-controlled descriptor
+bytes are not signed attestation. The result does not itself authorize a later
+watchpoint or prove that firmware cannot change between operations. Generate
+and confirm every later physical plan separately.
 
 For OpenOCD stack inspection, use only the independent
 `openocd stack plan/test` workflow with an explicit `--max-frames` in 1..=32.
