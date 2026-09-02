@@ -1852,3 +1852,82 @@ operational evidence to become input to a newly reviewed watchpoint-hit plan,
 but the one-run memory authority is spent. No watchpoint was installed or hit,
 and any hit test, retry, or other target control requires two fresh matching
 plans and a new exact authorization digest.
+
+## Confirmed heartbeat hardware-watchpoint hit acceptance (2026-09-02)
+
+- Two host-only plans from commit
+  `acece4621ccabdae52c4d5a12be9a80e1564c16c` bound `esp32s3.cpu0`, exact
+  access watchpoint `0x3FCDB5F0 + 4`, declared RAM
+  `[0x3FC88000,0x3FCF0000)`, expression
+  `*((char*)0x3fcdb5f0)@4`, expected PC
+  `[0x420128CD,0x420128D3)`, one `8-exec-continue --all`, and a 10000 ms
+  deadline. Both plans were complete and normalized identically after removing
+  only operation IDs and elapsed times. They returned digest
+  `29421b87617f0067d037773f4596e967989a86bb313676608a77132cda6556d0`,
+  which the user returned exactly.
+- Offline ELF audit used the unchanged 2,221,600-byte heartbeat ELF SHA-256
+  `676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`.
+  It placed the exact `s32i a8, a1, 160` store at `0x420128CD`, with the
+  immediate successor at `0x420128D0` and first excluded instruction at
+  `0x420128D3`. The interval semantics were confirmed input, not runtime
+  attestation. Earlier exact memory evidence had read `0x3FCDB5F0` as
+  little-endian heartbeat `2797`, bracketed by UART sequences.
+- Final preflight rehashed every plan artifact and the 17,647,104-byte release
+  binary SHA-256
+  `b90d3c4a1945254323e002bef2cf8dea35419b2bb321419e6665e6f64eff9c55`,
+  confirmed the exact Git head and clean worktree, and found no related process.
+  Exactly one accessible EspJtag and COM3 both resolved to serial
+  `E0:72:A1:D4:1F:DC`. OpenOCD and top-level board configuration identities
+  matched the plan. A five-second 115200-baud baseline with DTR/RTS false and
+  zero transmission received complete consecutive heartbeats `8465..8469`.
+- One and only one `openocd watchpoint hit test` invocation ran; no automatic
+  or manual retry occurred. Operation `op_70e9896feb994e33986113f74e67569b`
+  inserted exact `hw-awpt` number 1, classified one canonical
+  `acc watchpoint` row with `times=0`, and accepted exactly one token-8
+  continue. Within 107 ms, OpenOCD reported target halt PC `0x420128CD`; GDB
+  emitted one tokenless correlated `access-watchpoint-trigger` at frame PC
+  `0x420128D0`, inside the confirmed interval, with exact expression and an
+  old/new value tuple. The post-hit table reported `times=1`.
+- Token 10 deleted watchpoint 1 and token 11 proved the exact canonical
+  six-column table empty. Token 12 detached and token 13 exited GDB. No failure
+  interrupt or retry path ran. GDB and OpenOCD both shut down gracefully with
+  complete process-tree cleanup. Detach left CPU0 halted, so the fixed successful
+  fallback requested one selected-target resume and proved final
+  `esp32s3.cpu0=running`. Dynamic Tcl/GDB ports 6919/6920 were independently
+  free afterward, no related process remained, and probe/COM3 identities stayed
+  unchanged and accessible.
+- OpenOCD observed adapter serial `E0:72:A1:D4:1F:DC`, successfully examined
+  CPU0, and again failed CPU1 examination with `OCD_ID=00000000`; CPU1 remains
+  excluded. Attach handlers performed the disclosed flash-map discovery. The
+  runtime map contained the watched address in a read/write entry, but runtime
+  adapter identity, transitive configuration semantics, target RAM semantics,
+  and runtime firmware identity remain outside the confirmation boundary.
+- A seven-second post-run UART monitor used 115200 baud, DTR/RTS false, and zero
+  transmission. It retained malformed boundary fragments caused by the short
+  debug interruption, then received complete consecutive heartbeats
+  `8543..8545`, proving observable firmware liveness after restoration.
+- Evidence is retained under
+  `target/hardware-acceptance/2026-09-02-openocd-heartbeat-watchpoint-hit`.
+  The 29,329-byte structured result SHA-256 is
+  `060977f1678345945b68c7dc64c8c923da7312d13f80859baad49f8a7b311f3b`;
+  complete 10,436-byte stderr SHA-256 is
+  `6105ea416cbde09b17c64f25803a390d3d67aa25392fe92b48167520fdaf7f36`.
+  Baseline UART JSONL/log SHA-256 values are
+  `68759169f74b9c0bf21a200d4889d2066a800d3f9d3e7321d3ba73326e8be5d9`
+  and `9e3bec89296306373f355255e74b4a003278f43d5258dd675dc4f0279e6dc929`;
+  post-run values are
+  `389f7165bac8a940e466299888e77f6d674385f8e65b778f8723fcc91877009d`
+  and `d87ec3072fffa351b9a68e1148a79d748164602fcb8405331fd614c1cdef67a9`.
+  The 4,338-byte acceptance summary SHA-256 is
+  `b17dba07a5e4e614be1492cc4486807fd084250b5ad64ac1cd15d4b66ef63c1c`.
+  The 1,347-byte artifact manifest SHA-256 is
+  `0004c4314fe71a21b73d116ba3be4335816b535a4dbc16ea4603989db4057db5`;
+  all seven registered artifacts rehashed without size or digest drift.
+
+This accepts one exact GDB-attributed physical access-watchpoint hit, bounded
+execution, deletion/empty-table proof, restoration, and cleanup for the
+confirmed CPU0/tool/profile/configuration/range/PC plan. It does not independently
+read physical comparator registers, prove runtime firmware identity or
+continuity, verify the declared RAM semantics, qualify CPU1, or authorize
+another hit, retry, address, mode, interval, or target operation. The one-run
+authority is spent.

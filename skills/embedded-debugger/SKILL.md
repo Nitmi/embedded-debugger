@@ -373,12 +373,19 @@ the audited `main` range and yields the same arithmetic candidate. Candidate
 memory was then read once under separate digest
 `38c60e31837633806c9ff44e654e776f55d4e6b0be5aed7679201b3c61e9a8a2` and
 returned `ed0a0000` (little-endian `2797`), strictly between complete UART
-heartbeat sequences `2744..2748` and `2867..2871`. This completes the
-operational address-evidence prerequisite for a new hit plan on this fixture,
-but the separate operations remain non-atomic and do not prove firmware
-continuity, runtime attestation, or target RAM semantics. Before any physical
-hit, derive the expected PC interval from the exact audited store instruction,
-generate two fresh matching hit plans, and require their exact new digest.
+heartbeat sequences `2744..2748` and `2867..2871`. This completed the
+operational address-evidence prerequisite. Two fresh matching hit plans then
+bound `0x3fcdb5f0 + 4`, access mode, PC interval
+`[0x420128cd,0x420128d3)`, and a 10-second deadline. The separately confirmed,
+non-retried physical run under digest `29421b87...56d0` stopped once at
+`0x420128d0` with exact `access-watchpoint-trigger`/`hw-awpt` evidence,
+proved `times=1`, deleted the watchpoint, proved the table empty, restored CPU0
+running, completed process/port cleanup, and recovered UART heartbeats. Treat
+this as exact point-in-time GDB-attributed hit acceptance only. It does not
+independently read comparator state, prove firmware continuity or identity,
+verify target RAM semantics, qualify CPU1 or another address/mode/interval, or
+provide standing authority. Every later physical hit still requires two fresh
+matching plans and their exact newly returned digest.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

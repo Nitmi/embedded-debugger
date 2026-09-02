@@ -618,12 +618,17 @@ time. A new separately authorized register snapshot then returned
 candidate was then read once under a separate exact confirmed memory plan. It
 returned `ed0a0000`, little-endian `2797`, strictly between complete UART
 heartbeat sequences `2744..2748` before and `2867..2871` after the operation.
-That closes the operational address-evidence prerequisite for planning a
-watchpoint hit on this fixture. The operations remain separate and non-atomic,
-so they do not prove firmware continuity, cryptographic identity, or target RAM
-semantics. The read also installed no watchpoint and grants no standing hit
-authorization: generate two fresh matching hit plans and obtain their exact new
-digest before any physical hit test.
+That closed the operational address-evidence prerequisite. Two fresh matching
+hit plans then bound exact address `0x3fcdb5f0 + 4`, access mode, expected PC
+`[0x420128cd,0x420128d3)`, and one 10-second continue. Under separately
+returned digest `29421b87...56d0`, one non-retried physical run produced an
+`access-watchpoint-trigger` at `0x420128d0`, changed the canonical hit count
+from zero to one, deleted the watchpoint, proved the GDB table empty, restored
+CPU0 running, cleaned both process trees and ports, and recovered UART
+heartbeats. This exact acceptance proves one GDB-attributed comparator event,
+not independent comparator-register state, firmware continuity or identity,
+target RAM semantics, CPU1, another address/mode/PC interval, or authorization
+for a later physical run.
 
 Selected-target resume-only recovery is an independent confirmed checkpoint:
 
