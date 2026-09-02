@@ -149,7 +149,15 @@ CPU0 has passed one exact `0x42000000 + 32` acceptance run with complete
 coverage, a SHA-256 matching the prior probe-rs snapshot, fallback restoration,
 process cleanup, and UART recovery. Treat that qualification as exact to the
 confirmed target, range, tools, and configuration; the NVM declaration remains
-user-confirmed rather than independently verified from OpenOCD's memory map.
+user-confirmed rather than independently verified from OpenOCD's memory map. A
+separate 2026-09-02 CPU0 acceptance read exact RAM candidate
+`0x3FCDB5F0 + 4` as `ed0a0000` (little-endian `2797`), bracketed by complete
+zero-transmit UART heartbeat sequences `2744..2748` and `2867..2871`. Fallback
+restoration returned CPU0 to running and both process trees and dynamic ports
+cleaned up. Treat this only as point-in-time operational watch-address evidence:
+the ELF, register, and memory operations were not atomic, firmware continuity
+and target RAM semantics remain unverified, and the read authorizes no
+watchpoint installation or hit.
 
 For an ESP-IDF executable, use the independent
 `openocd esp-app-identity plan/test` workflow before treating ELF-derived
@@ -362,10 +370,15 @@ verified that same ELF only at its own point in time; it does not retroactively
 bind the historical frame or prove continuity between operations. A subsequent
 fresh `pc,a1` snapshot returned `0x42012a6c/0x3fcdb550`; that PC is also inside
 the audited `main` range and yields the same arithmetic candidate. Candidate
-memory remains unread and the separate operations are not atomic. Treat the
-value only as conditional current-frame evidence, not a verified watchpoint
-address. Read the exact candidate under a separately confirmed bounded plan,
-then require two new matching hit plans and a fresh digest.
+memory was then read once under separate digest
+`38c60e31837633806c9ff44e654e776f55d4e6b0be5aed7679201b3c61e9a8a2` and
+returned `ed0a0000` (little-endian `2797`), strictly between complete UART
+heartbeat sequences `2744..2748` and `2867..2871`. This completes the
+operational address-evidence prerequisite for a new hit plan on this fixture,
+but the separate operations remain non-atomic and do not prove firmware
+continuity, runtime attestation, or target RAM semantics. Before any physical
+hit, derive the expected PC interval from the exact audited store instruction,
+generate two fresh matching hit plans, and require their exact new digest.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

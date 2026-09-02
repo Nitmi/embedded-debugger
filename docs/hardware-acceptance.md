@@ -1779,3 +1779,76 @@ for the confirmed CPU0/tool/profile/configuration plan. The new one-run
 authority is spent. Candidate-memory access, firmware re-attestation,
 watchpoint installation or hit, retry, or other target control requires its own
 reviewed plan and fresh authority.
+
+## Confirmed heartbeat candidate memory snapshot acceptance (2026-09-02)
+
+- Two host-only plans from commit
+  `34a2636d62f8a0ee0cb4cd15a1928a0eb2fbd6be` bound `esp32s3.cpu0`, exact
+  address `0x3FCDB5F0 + 4`, declared RAM
+  `[0x3FC88000,0x3FCF0000)`, the fixed command
+  `3-data-read-memory-bytes 0x3fcdb5f0 4`, and the complete-coverage and cleanup
+  policies. They normalized identically and returned digest
+  `38c60e31837633806c9ff44e654e776f55d4e6b0be5aed7679201b3c61e9a8a2`,
+  which the user returned exactly. The declaration was confirmation input;
+  `target_memory_map_semantics_verified=false`.
+- Preflight rehashed both plans and the 17,647,104-byte release binary SHA-256
+  `b90d3c4a1945254323e002bef2cf8dea35419b2bb321419e6665e6f64eff9c55`,
+  found a clean worktree and no related process, and resolved exactly one
+  accessible EspJtag plus COM3 to serial `E0:72:A1:D4:1F:DC`. A five-second
+  115200-baud baseline used DTR/RTS false and transmitted no bytes; it received
+  complete consecutive heartbeats `2744..2748`.
+- One and only one `openocd memory test` invocation ran; no automatic or manual
+  retry occurred. Operation `op_5ceb1f49cbe14c9896b0bc7b81e8c5f6` returned
+  one exact block `[0x3FCDB5F0,0x3FCDB5F4)` with complete coverage and bytes
+  `ed0a0000`, SHA-256
+  `b21ab1f16140ece032cd994c6ee66b6461f32b697a46c1a1a0879815b0e4b06b`.
+  Interpreted as a little-endian `u32`, the value is `2797`. No memory write,
+  register command, ELF or symbol load, breakpoint/watchpoint, explicit flash,
+  reset, monitor, arbitrary MI/Tcl, or CPU1 command was requested.
+- The audited demo source initializes `heartbeat` at `src/bin/main.rs:63`,
+  increments it at line 85, logs it at line 86, and delays one second at line
+  87. The memory value `2797` is strictly between the complete pre-run
+  heartbeat maximum `2748` and post-run minimum `2867`. This strongly supports
+  `0x3FCDB5F0` as the point-in-time runtime `heartbeat` location for this run.
+  It does not make the separate ELF identity, register snapshot, memory read,
+  and UART observations atomic or prove firmware continuity between them.
+- CPU0 was initially running. GDB detached successfully but left it halted, so
+  the fixed fallback requested one resume and proved final
+  `esp32s3.cpu0=running`. GDB and OpenOCD exited gracefully with complete
+  process-tree cleanup. Dynamic Tcl/GDB ports 2320/2321 passed independent bind
+  checks, no related process remained, and the exact probe/COM3 identities were
+  unchanged and accessible.
+- OpenOCD observed adapter serial `E0:72:A1:D4:1F:DC`, successfully examined
+  CPU0, and again failed CPU1 examination with `OCD_ID=00000000`; CPU1 remains
+  excluded. Attach handlers performed the disclosed flash-map discovery. The
+  runtime map contained the address in a read/write entry beginning at
+  `0x3c003000`, but runtime adapter identity, transitive configuration semantics,
+  and target RAM semantics remain outside the confirmation boundary.
+- A seven-second post-run UART monitor again used 115200 baud, DTR/RTS false,
+  and zero transmission. After one leading partial boundary line it received
+  complete consecutive heartbeats `2867..2871`, proving observable firmware
+  liveness after target restoration.
+- Evidence is retained under
+  `target/hardware-acceptance/2026-09-02-openocd-heartbeat-candidate-memory`.
+  The 19,813-byte structured result SHA-256 is
+  `ddd73ca49fc7f337234e006cd317922a8135a993c37c0c635edb6516bc22484f`;
+  complete 7,391-byte stderr SHA-256 is
+  `218c34d6327cbbc198f973c7ecaa14346d023c2c799879820072b11ea90eb183`.
+  Baseline UART JSONL/log SHA-256 values are
+  `291ef3562b76315ba4899dc777b22db9eb6f6707a21877c799112877a0decbde`
+  and `d356431bff9aa41d58b2c4a92f24e71cfe8c67a068eb7a8ba3d6452ae34317bc`;
+  post-run values are
+  `ac52ae65beb09f7994d79b951465eeb01dd15938343e6718db5ee1c444ac8271`
+  and `7cf6ffcf32103e229070ca398bdae867bfa87d9772fbb6d9919743d9b4a926bc`.
+  The 4,197-byte acceptance summary SHA-256 is
+  `b3e4516e4704a499c20c891f03d55e18e2692b35a9703e23360fdac5e3d013c1`.
+  The 1,341-byte artifact manifest SHA-256 is
+  `87864d04e998bafce8e0a163e0c06ada71251e870c56bea7fdab4b70346afef5`;
+  all seven registered artifacts rehashed without size or digest drift.
+
+This accepts only the exact point-in-time candidate bytes and cleanup for the
+confirmed CPU0/tool/profile/configuration plan. The address has sufficient
+operational evidence to become input to a newly reviewed watchpoint-hit plan,
+but the one-run memory authority is spent. No watchpoint was installed or hit,
+and any hit test, retry, or other target control requires two fresh matching
+plans and a new exact authorization digest.

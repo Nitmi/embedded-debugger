@@ -241,7 +241,16 @@ with the same SHA-256 as the prior probe-rs snapshot, the fixed fallback
 restored CPU0 to running, both process trees and ports were released, and UART
 heartbeats recovered. This acceptance does not independently verify the
 declared NVM semantics and does not extend to CPU1, another range, or another
-target/tool plan.
+target/tool plan. A later separately confirmed, non-retried CPU0 RAM snapshot
+read exact candidate `0x3FCDB5F0 + 4` as `ed0a0000` (little-endian `2797`).
+That value was strictly between complete zero-transmit UART heartbeat sequences
+`2744..2748` before and `2867..2871` after the operation, consistent with the
+audited firmware's once-per-second `heartbeat` update. The fixed fallback
+restored CPU0 to running, both process trees and dynamic ports were released,
+and UART liveness recovered. This is point-in-time operational watch-address
+evidence only: separate ELF/register/read operations are not atomic, firmware
+continuity and target RAM semantics remain unproven, and no watchpoint
+installation or hit is authorized.
 
 ESP runtime firmware identity is a separate, descriptor-specific checkpoint:
 
@@ -606,10 +615,15 @@ descriptor read verified the same local ELF only at that operation's point in
 time. A new separately authorized register snapshot then returned
 `pc=0x42012a6c`, again inside that ELF's audited `main` range, with unchanged
 `a1=0x3fcdb550`, yielding current arithmetic candidate `0x3fcdb5f0`. The
-operations are not atomic and do not prove firmware continuity; the candidate
-memory also remains unread. A separately confirmed exact candidate read is
-therefore still required before treating it as a verified watchpoint address;
-no standing hit authorization exists.
+candidate was then read once under a separate exact confirmed memory plan. It
+returned `ed0a0000`, little-endian `2797`, strictly between complete UART
+heartbeat sequences `2744..2748` before and `2867..2871` after the operation.
+That closes the operational address-evidence prerequisite for planning a
+watchpoint hit on this fixture. The operations remain separate and non-atomic,
+so they do not prove firmware continuity, cryptographic identity, or target RAM
+semantics. The read also installed no watchpoint and grants no standing hit
+authorization: generate two fresh matching hit plans and obtain their exact new
+digest before any physical hit test.
 
 Selected-target resume-only recovery is an independent confirmed checkpoint:
 
