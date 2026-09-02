@@ -116,7 +116,11 @@ fallback restoration and UART recovery; do not generalize it beyond that
 target and selection. A second exact, non-retried `pc,a1` run under digest
 `a817ed1453fb2ff0e4f23d83ba07bf02c7d0fdeccba37c13913cbc939d188ba0`
 returned `0x420129e4/0x3fcdb550`, used fallback restoration, and recovered eight
-heartbeats. It does not authorize derived-memory access or a watchpoint.
+heartbeats. A later fresh authorization of the same deterministic digest
+returned `0x42012a6c/0x3fcdb550`, again used fallback restoration, completed
+process/port cleanup, and recovered six complete heartbeats after one partial
+serial boundary line. Treat both authorizations as spent. Neither run
+authorizes derived-memory access or a watchpoint.
 
 For explicit OpenOCD memory inspection, use the independent
 `openocd memory plan/test` workflow. Require an exact `--address` and 1..=4096
@@ -355,11 +359,13 @@ temporary in that build. A separately confirmed 2026-08-31 `pc,a1` snapshot
 placed PC `0x420129e4` inside that local ELF's `main` range and yielded arithmetic
 candidate `0x3fcdb5f0` from `a1=0x3fcdb550`. A later 2026-09-02 descriptor read
 verified that same ELF only at its own point in time; it does not retroactively
-bind the historical frame or prove continuity between operations. Candidate
-memory remains unread. Treat the value only as conditional historical evidence,
-not a verified watchpoint address. Obtain a fresh current `pc,a1` snapshot, read
-the exact candidate under a separately confirmed bounded plan, then require two
-new matching hit plans and a fresh digest.
+bind the historical frame or prove continuity between operations. A subsequent
+fresh `pc,a1` snapshot returned `0x42012a6c/0x3fcdb550`; that PC is also inside
+the audited `main` range and yields the same arithmetic candidate. Candidate
+memory remains unread and the separate operations are not atomic. Treat the
+value only as conditional current-frame evidence, not a verified watchpoint
+address. Read the exact candidate under a separately confirmed bounded plan,
+then require two new matching hit plans and a fresh digest.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

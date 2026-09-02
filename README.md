@@ -188,10 +188,12 @@ execution-control command, flash, monitor input, or arbitrary MI/Tcl. Do not
 retry a failed confirmed test automatically. Controlled process and parser
 regressions pass. ESP32-S3 CPU0 has also passed one separately confirmed
 `pc/a0/a1/ps` physical snapshot with verified fallback restoration and UART
-recovery. A second exact, non-retried `pc,a1` snapshot returned
-`0x420129e4/0x3fcdb550`, restored final running, and recovered eight consecutive
-heartbeats. These acceptances do not extend to CPU1, another target, memory at a
-derived address, or any watchpoint operation.
+recovery. Two later, separately authorized, non-retried `pc,a1` snapshots used
+the same deterministic plan digest. They returned
+`0x420129e4/0x3fcdb550` and then `0x42012a6c/0x3fcdb550`; both restored final
+running and recovered consecutive UART heartbeats. These acceptances do not
+extend to CPU1, another target, memory at a derived address, or any watchpoint
+operation.
 
 Bounded OpenOCD memory inspection is another independent checkpoint:
 
@@ -599,14 +601,15 @@ operation. Never combine a historical stack-pointer snapshot with a static
 offset. In the ESP32-S3 demo evidence, DWARF identifies `heartbeat` as frame
 base `a1 + 160`; the previously considered `a1 + 128` slot is a compiler
 temporary. A separately confirmed current snapshot returned
-`pc=0x420129e4`, inside the local ELF's `main` range, and `a1=0x3fcdb550`,
-yielding arithmetic candidate `0x3fcdb5f0`. A later, separately confirmed
-2026-09-02 descriptor read verified that same ELF as the running build only at
-that later point in time. It does not retroactively bind the 2026-08-31 frame,
-prove the firmware stayed unchanged between operations, or read the candidate
-memory. A fresh current-frame operation and candidate read are therefore still
-required before treating the value as a verified watchpoint address; no
-standing hit authorization exists.
+`pc=0x420129e4` and `a1=0x3fcdb550`. A later, separately confirmed 2026-09-02
+descriptor read verified the same local ELF only at that operation's point in
+time. A new separately authorized register snapshot then returned
+`pc=0x42012a6c`, again inside that ELF's audited `main` range, with unchanged
+`a1=0x3fcdb550`, yielding current arithmetic candidate `0x3fcdb5f0`. The
+operations are not atomic and do not prove firmware continuity; the candidate
+memory also remains unread. A separately confirmed exact candidate read is
+therefore still required before treating it as a verified watchpoint address;
+no standing hit authorization exists.
 
 Selected-target resume-only recovery is an independent confirmed checkpoint:
 

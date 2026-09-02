@@ -1713,3 +1713,69 @@ confirmed CPU0/tool/profile/configuration/ELF plan. The one-run authority is
 spent. Any register or memory read, firmware re-attestation, watchpoint
 installation or hit, retry, or other target control requires its own reviewed
 plan and fresh authority.
+
+## Confirmed fresh current-frame register snapshot acceptance (2026-09-02)
+
+- Two fresh host-only plans from commit
+  `bf6c2dfaf43320eaee43044a3164975d485d1b21` requested ordered `pc,a1` from
+  `esp32s3.cpu0`. Both were complete, normalized identically, and returned
+  digest `a817ed1453fb2ff0e4f23d83ba07bf02c7d0fdeccba37c13913cbc939d188ba0`.
+  This value matched a spent 2026-08-31 digest because every confirmation input
+  was unchanged. The user explicitly returned it again after reviewing this
+  new pair; historical authorization was not reused.
+- Preflight rehashed both plan artifacts and the 17,647,104-byte planner binary
+  SHA-256
+  `b90d3c4a1945254323e002bef2cf8dea35419b2bb321419e6665e6f64eff9c55`,
+  found a clean worktree and no related process, and resolved exactly one
+  accessible EspJtag plus COM3 to serial `E0:72:A1:D4:1F:DC`. The OpenOCD
+  executable and top-level configuration identities remained unchanged. A
+  five-second, zero-transmit UART baseline with DTR/RTS false received complete
+  heartbeats 1655 through 1659.
+- One and only one `openocd registers test` invocation ran; no automatic or
+  manual retry occurred. Operation `op_2909e26f76bb4261b7c115bf2bf7da5c`
+  enumerated 270 structured register names and issued
+  `4-data-list-register-values --skip-unavailable x 0 213`. It returned
+  `pc[0]=0x42012a6c` and `a1[213]=0x3fcdb550`. No explicit memory command, ELF
+  or symbol load, breakpoint/watchpoint, flash, reset, monitor, arbitrary MI/Tcl,
+  or CPU1 operation was requested.
+- CPU0 was running before GDB attached. Detach returned `done`, but the target
+  was then observed halted, so the fixed fallback requested one resume and
+  proved final `esp32s3.cpu0=running` four milliseconds later. GDB and OpenOCD
+  both shut down gracefully with exit code 0 and complete process-tree cleanup.
+  Dynamic Tcl/GDB ports 4391/4392 passed immediate independent bind tests, and
+  no related process remained.
+- OpenOCD observed adapter serial `E0:72:A1:D4:1F:DC`, successfully examined
+  CPU0, and again failed CPU1 examination with `OCD_ID=00000000`; CPU1 remains
+  excluded. Attach handlers performed the disclosed flash-map discovery. The
+  adapter identity and transitive configuration semantics remain outside the
+  confirmation digest.
+- The unchanged 2,221,600-byte local ELF SHA-256
+  `676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`
+  places the point-in-time PC inside audited `main` range
+  `[0x42010aa4,0x42012dbb)`. Combining current `a1` with the audited
+  `heartbeat` relation `DW_OP_fbreg: 160` yields arithmetic candidate
+  `0x3fcdb5f0`. The earlier descriptor identity and this register snapshot are
+  separate operations, so they do not prove atomic firmware continuity. This
+  operation also did not read the candidate memory and therefore does not
+  verify a watchpoint address or authorize a watchpoint hit.
+- A seven-second post-run monitor again used 115200 baud, DTR/RTS false, and
+  zero transmission. It received one leading partial boundary line followed by
+  six complete consecutive heartbeats 1771 through 1776. Probe and serial
+  identities remained unchanged and accessible after the run.
+- Evidence is retained under
+  `target/hardware-acceptance/2026-09-02-openocd-current-frame-registers`.
+  The 21,506-byte structured result SHA-256 is
+  `948a3cde676d1cf94f45bb36d72441fdbb82908a100b100755d4096832a9eaab`;
+  complete 9,010-byte stderr SHA-256 is
+  `aade5d8a4f34bb19ce906b5f3badbc7d93a19ec962e12f46216fe14ed67daadb`.
+  The 5,672-byte acceptance summary SHA-256 is
+  `dbf5654ff1173c61670cf4cdb30b35b54e3cb2b00e54de01b5716f8d1f103f31`.
+  The 1,341-byte manifest SHA-256 is
+  `8f1c065db34153bb23de74c7076ab8bcdf4410ca9cf83c86d3c4025459d60d0b`;
+  all seven registered artifacts rehashed without size or digest drift.
+
+This accepts only the exact point-in-time ordered register values and cleanup
+for the confirmed CPU0/tool/profile/configuration plan. The new one-run
+authority is spent. Candidate-memory access, firmware re-attestation,
+watchpoint installation or hit, retry, or other target control requires its own
+reviewed plan and fresh authority.
