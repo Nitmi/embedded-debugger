@@ -175,6 +175,20 @@ bytes are not signed attestation. The result does not itself authorize a later
 watchpoint or prove that firmware cannot change between operations. Generate
 and confirm every later physical plan separately.
 
+The 2026-09-02 ESP32-S3 CPU0 acceptance used outer digest
+`2491f5efdc10dbf5b2a6b607d040880e1aa4be014766b9d4c81a3f31d1bcda98`
+for one non-retried read of `.flash.appdesc` at `0x3c000020 + 256`. The target
+descriptor exactly matched expected SHA-256
+`65d77b4a7a7507112ab899dc7d08167dba8ea19d3afb6cfa1c555fb5cc5d5621`
+for ELF SHA-256
+`676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`;
+CPU0 returned to running, cleanup completed, and UART heartbeats continued.
+Treat this qualification as exact and point-in-time. The confirmed 64 KiB NVM
+declaration was wider than OpenOCD's observed `0x3000`-byte FLASH mapping,
+although the exact descriptor read was contained in that mapping. Do not infer
+the rest of the declaration, bind the observed adapter retroactively, include
+CPU1, or reuse this spent authorization.
+
 For OpenOCD stack inspection, use only the independent
 `openocd stack plan/test` workflow with an explicit `--max-frames` in 1..=32.
 Surface the fixed zero-based inclusive range, disabled frame filters, no
@@ -337,12 +351,15 @@ does not establish the current frame base or runtime firmware identity. Never
 add a static offset to a historical stack-pointer snapshot and present the sum
 as a current address. The audited ESP32-S3 demo ELF places `heartbeat` at
 `DW_OP_fbreg: 160` with frame base register `a1`; `a1 + 128` is only a compiler
-temporary in that build. A separately confirmed current `pc,a1` snapshot now
-places PC `0x420129e4` inside that local ELF's `main` range and yields arithmetic
-candidate `0x3fcdb5f0` from `a1=0x3fcdb550`. Runtime ELF identity and candidate
-memory remain unverified. Treat the value only as conditional current-frame
-evidence, not a verified watchpoint address; a physical hit still needs adequate
-firmware-identity provenance, two new matching plans, and a fresh digest.
+temporary in that build. A separately confirmed 2026-08-31 `pc,a1` snapshot
+placed PC `0x420129e4` inside that local ELF's `main` range and yielded arithmetic
+candidate `0x3fcdb5f0` from `a1=0x3fcdb550`. A later 2026-09-02 descriptor read
+verified that same ELF only at its own point in time; it does not retroactively
+bind the historical frame or prove continuity between operations. Candidate
+memory remains unread. Treat the value only as conditional historical evidence,
+not a verified watchpoint address. Obtain a fresh current `pc,a1` snapshot, read
+the exact candidate under a separately confirmed bounded plan, then require two
+new matching hit plans and a fresh digest.
 
 A complete combined test proves only the selected tools' fixed MI2
 version/connect/detach/exit lifecycle, loopback endpoint, target-state

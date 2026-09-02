@@ -286,8 +286,18 @@ only after detach, final-running restoration, and process cleanup, with no
 automatic retry. This is strong non-adversarial build identity evidence, not
 signed attestation: `cryptographic_authenticity_verified`,
 `secure_boot_verified`, and `target_memory_map_semantics_verified` remain
-false. Controlled parser and two-process tests pass; physical ESP32-S3
-acceptance is still pending a fresh two-plan review and user confirmation.
+false. ESP32-S3 CPU0 has passed one separately confirmed, non-retried physical
+identity run for ELF SHA-256
+`676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`:
+the complete target descriptor exactly matched expected SHA-256
+`65d77b4a7a7507112ab899dc7d08167dba8ea19d3afb6cfa1c555fb5cc5d5621`,
+CPU0 was restored to running, both process trees and ports were released, and
+UART heartbeats continued. The confirmed declaration covered 64 KiB from
+`0x3c000000`, while OpenOCD's runtime map identified only the first `0x3000`
+bytes as FLASH; the exact descriptor read at `0x3c000020 + 256` is inside that
+observed range, but the wider declaration and target memory-map semantics
+remain unverified. Runtime adapter identity was observed but not digest-bound,
+and CPU1 remains outside this acceptance.
 
 Bounded OpenOCD stack inspection is an independent confirmed checkpoint:
 
@@ -590,9 +600,13 @@ offset. In the ESP32-S3 demo evidence, DWARF identifies `heartbeat` as frame
 base `a1 + 160`; the previously considered `a1 + 128` slot is a compiler
 temporary. A separately confirmed current snapshot returned
 `pc=0x420129e4`, inside the local ELF's `main` range, and `a1=0x3fcdb550`,
-yielding arithmetic candidate `0x3fcdb5f0`. The snapshot does not attest that
-ELF as the running image or read the candidate memory, so this is not a verified
-watchpoint address or standing hit authorization.
+yielding arithmetic candidate `0x3fcdb5f0`. A later, separately confirmed
+2026-09-02 descriptor read verified that same ELF as the running build only at
+that later point in time. It does not retroactively bind the 2026-08-31 frame,
+prove the firmware stayed unchanged between operations, or read the candidate
+memory. A fresh current-frame operation and candidate read are therefore still
+required before treating the value as a verified watchpoint address; no
+standing hit authorization exists.
 
 Selected-target resume-only recovery is an independent confirmed checkpoint:
 
@@ -1141,7 +1155,16 @@ independently confirmed, non-retried ESP32-S3 CPU0 `access` run over
 table, final running state, graceful cleanup, reusable ports, and UART
 recovery. `read` mode, comparator allocation, width/capacity support, hit
 behavior, and physical cleanup remain unqualified. A separate bounded
-hardware-watchpoint-hit workflow now adds asynchronous all-stop execution,
+ESP app-descriptor identity workflow now has strict ELF/descriptor parsing,
+nested memory and outer confirmation digests, exact-byte comparison, and fixed
+detach/restoration/cleanup coverage. One independently confirmed, non-retried
+ESP32-S3 CPU0 run verified the exact local ELF SHA-256 against the 256-byte
+runtime descriptor, restored CPU0 to running, released both process trees and
+dynamic ports, and preserved UART heartbeats. This is point-in-time,
+non-adversarial build identity only: authenticity, secure boot, target
+memory-map semantics, and digest-bound adapter identity remain false. A
+separate bounded hardware-watchpoint-hit workflow now adds asynchronous
+all-stop execution,
 strict token/reason/value/PC attribution, one-hit table verification, bounded
 interrupt cleanup, deterministic confirmation, and controlled host coverage.
 Its physical ESP32-S3 acceptance remains pending. GDB-loaded symbols,

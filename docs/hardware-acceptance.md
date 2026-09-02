@@ -1636,3 +1636,80 @@ This accepts only the exact point-in-time `pc,a1` selection and cleanup for the
 confirmed CPU0/tool/profile/configuration plan. The one-run authority is spent.
 Any memory read, firmware attestation, watchpoint installation or hit, retry,
 or other target control requires its own reviewed plan and fresh authority.
+
+## Confirmed OpenOCD ESP app runtime identity acceptance (2026-09-02)
+
+- The user independently returned exact outer digest
+  `2491f5efdc10dbf5b2a6b607d040880e1aa4be014766b9d4c81a3f31d1bcda98`
+  after two identical host-only plans from commit
+  `515f7f5cab32bf5416661bbac21ace8ae4951ca5`. Both plans bound
+  `esp32s3.cpu0`, the exact OpenOCD/GDB/profile/configuration identities, the
+  2,221,600-byte ELF SHA-256
+  `676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`,
+  `.flash.appdesc` at `0x3c000020 + 256`, its complete expected bytes, and the
+  declared `0x3c000000 + 0x10000` NVM region. The nested memory digest was
+  `5ef9add3edcea6bc9fbf839122d9dd3f9eff94c9740d31808bd022983f4de287`.
+- Preflight found exactly one accessible EspJtag probe,
+  `303a:1001:E0:72:A1:D4:1F:DC`, and exactly one matching serial port, COM3.
+  No related OpenOCD or GDB process was running. A five-second 115200-baud
+  baseline monitor used DTR/RTS false and transmitted no bytes; it received 236
+  bytes containing complete heartbeats 97 through 102.
+- One and only one `openocd esp-app-identity test` invocation ran; no automatic
+  or manual retry occurred. Operation
+  `op_5b97179e2ddd4d29afbbf5b9b785acaa` sent the fixed memory command
+  `3-data-read-memory-bytes 0x3c000020 256` and received one block with complete
+  coverage. It sent no memory write, symbol load, breakpoint/watchpoint, flash,
+  reset, monitor, arbitrary MI/Tcl, or CPU1 command.
+- The complete target descriptor exactly matched expected SHA-256
+  `65d77b4a7a7507112ab899dc7d08167dba8ea19d3afb6cfa1c555fb5cc5d5621`.
+  The descriptor parsed as magic `0xABCD5432`, project
+  `yd-esp32-s3-rust-demo`, version `0.1.0`, build date `2026-08-12`, build time
+  `05:38:59`, IDF version `0.0.0`, and embedded ELF SHA-256
+  `676a89d78556f07500fcbe50a17c046c27d9d6e1e425ed9732c6f257a09f7b20`.
+  Exact expected bytes, source bytes outside the hash slot, and the embedded ELF
+  hash all matched, so `runtime_firmware_identity_verified=true`.
+- CPU0 was initially running. GDB attachment left it halted, so the fixed
+  fallback requested one resume and proved final `esp32s3.cpu0=running`. GDB
+  detached and exited gracefully, OpenOCD shut down gracefully, both managed
+  process trees were completely cleaned, and dynamic Tcl/GDB ports 8461/8462
+  passed independent bind checks. No related process remained and the exact
+  probe/COM3 identities were unchanged and accessible.
+- OpenOCD observed the exact adapter serial `E0:72:A1:D4:1F:DC`, successfully
+  examined CPU0, and failed CPU1 examination with `OCD_ID=00000000`; CPU1 is
+  excluded. Runtime adapter identity was observed but was not part of the
+  confirmation digest. Attach handlers also performed the disclosed flash-map
+  discovery despite no explicit flash command.
+- The runtime map identified FLASH at `0x3c000000 + 0x3000`, followed by R/W
+  memory at `0x3c003000`. The exact read interval
+  `[0x3c000020,0x3c000120)` is contained in the observed FLASH mapping, but the
+  confirmed 64 KiB NVM declaration is wider. This acceptance does not verify
+  the declaration beyond the exact read or elevate
+  `target_memory_map_semantics_verified`, `cryptographic_authenticity_verified`,
+  or `secure_boot_verified`; all remain false.
+- A seven-second post-run UART monitor again used 115200 baud, DTR/RTS false,
+  and zero transmission. It received 280 bytes containing complete consecutive
+  heartbeats 249 through 255, proving observable firmware liveness after target
+  restoration.
+- Evidence is retained under
+  `target/hardware-acceptance/2026-09-02-openocd-esp-app-identity`. The
+  27,724-byte structured result SHA-256 is
+  `90318b81e411bef4789bc2eaf3d4ac9a1ee12389346585a01854005d3f5da92b`;
+  complete 8,017-byte stderr SHA-256 is
+  `2a0d4023e133fb008fb9694b1a549c5bcaa0940d7fba2f1b04a22f054097f838`.
+  Baseline UART JSONL/log SHA-256 values are
+  `19de48dd26ce14d2593c9880a49a42c835d320c8b8955ced32b0ab4e4be21f6a`
+  and `0589ed5b15fe931ff7b4278f29065657b46e80e159332b8df602cfbf2ded1be0`;
+  post-run values are
+  `576fc9fb649ed571f7c4b95185f5f8c6ae6292af92d1147452dff4700e4e987d`
+  and `fb8080038b1b93d5de37da8927249561cf4c0976570ea92e39c57cc81f674cb6`.
+  The 5,888-byte acceptance summary SHA-256 is
+  `a4536a29e26a3785d9f74b6710671ba4a74efc797006cf289e34295a5fbdada1`.
+  The 1,343-byte artifact manifest SHA-256 is
+  `414ce2fde3dfcf7e2d0bdd59c4d113139842d034b42266d635464ef15a8ca056`;
+  all seven registered artifacts rehashed without size or digest drift.
+
+This accepts only the exact point-in-time descriptor read and cleanup for the
+confirmed CPU0/tool/profile/configuration/ELF plan. The one-run authority is
+spent. Any register or memory read, firmware re-attestation, watchpoint
+installation or hit, retry, or other target control requires its own reviewed
+plan and fresh authority.
