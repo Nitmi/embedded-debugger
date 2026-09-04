@@ -87,10 +87,12 @@ if ($probesExit -ne 0 -or $probe.Count -ne 1) {
 $baudListRaw = & $baudCommand.Source list --json
 $baudListExit = $LASTEXITCODE
 $baudList = ($baudListRaw | Out-String | ConvertFrom-Json)
+$expectedVid = [Convert]::ToInt32([string]$confirmation.serial.vid, 16)
+$expectedPid = [Convert]::ToInt32([string]$confirmation.serial.pid, 16)
 $serial = @($baudList.ports | Where-Object {
         $_.device -eq [string]$confirmation.serial.port -and
-        [int]$_.vid -eq [int]$confirmation.serial.vid -and
-        [int]$_.pid -eq [int]$confirmation.serial.pid -and
+        [int]$_.vid -eq $expectedVid -and
+        [int]$_.pid -eq $expectedPid -and
         [string]$_.serial_number -eq [string]$confirmation.serial.serial_number
     })
 if ($baudListExit -ne 0 -or $serial.Count -ne 1) {
