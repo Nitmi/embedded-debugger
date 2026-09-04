@@ -4089,6 +4089,91 @@ fn replay_reset_capture_reports_per_core_reset_policy() {
 }
 
 #[test]
+fn runtime_accept_rejects_non_exact_usb_ids_during_cli_parsing() {
+    let stderr = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "runtime",
+            "accept",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--port",
+            "COM11",
+            "--vid",
+            "136",
+            "--pid",
+            "1061",
+            "--serial-number",
+            "001050275757",
+            "--ready-line",
+            "READY v1",
+            "--heartbeat-line",
+            "HEARTBEAT",
+            "--evidence",
+            "runtime.evidence.json",
+        ])
+        .assert()
+        .code(2)
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        String::from_utf8_lossy(&stderr)
+            .contains("USB VID/PID must be exactly four hexadecimal digits")
+    );
+}
+
+#[test]
+fn runtime_accept_rejects_unbounded_duration_before_starting_baud() {
+    let directory = tempdir().unwrap();
+    let evidence = directory.path().join("runtime.evidence.json");
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "runtime",
+            "accept",
+            "--baud-executable",
+            "definitely-missing-baud",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--port",
+            "COM11",
+            "--vid",
+            "1366",
+            "--pid",
+            "1061",
+            "--serial-number",
+            "001050275757",
+            "--duration",
+            "121",
+            "--ready-line",
+            "READY v1",
+            "--heartbeat-line",
+            "HEARTBEAT",
+            "--evidence",
+            evidence.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["operation"], "runtime.accept");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["duration_seconds"], 121);
+    assert!(!evidence.exists());
+}
+
+#[test]
 fn replay_register_read_reports_metadata_and_restored_state() {
     let output = Command::cargo_bin("embedded-debugger")
         .unwrap()

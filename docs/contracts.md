@@ -1063,6 +1063,51 @@ captures every available core while halted, restores each core to its explicit
 memory write. CPU0 is expected to run after the workflow. Secondary cores retain
 the running or halted state observed immediately after the target reset sequence.
 
+## Joint runtime acceptance
+
+`runtime accept` composes the existing `snapshot reset-capture` contract with
+the external `baud` structured serial contract. It is an
+`R1_REVERSIBLE_CONTROL` operation and requires an exact probe selector, target,
+serial port, four-digit hexadecimal USB VID/PID, USB serial number, ready line,
+heartbeat line, and new evidence path. An exact build-identity line is optional;
+when supplied it becomes mandatory. Duration is 1..=120 seconds, monitor startup
+delay is 0..=5000 ms, and at least one heartbeat is always required.
+
+Before target control, the command verifies one accessible exact probe and asks
+`baud list --json` for one port matching all four serial identity fields. It
+requires the selected executable's version output to begin with `baud `. It then
+starts exactly one `baud monitor --json` with the selected baud rate, DTR/RTS
+values, identity guards, duration, zero transmitted bytes, and a private artifact
+directory. A Windows Job Object or Unix process group owns the monitor process
+tree; failure and timeout paths request termination and never start a replacement.
+
+After the bounded startup delay, an already exited monitor prevents target
+control. Otherwise the command performs exactly one reset-capture through the
+selected backend. It waits for the original monitor, validates its process and
+JSON exit codes, requires its reported port and baud rate to match, and reads only
+JSONL artifacts canonically contained by the reserved artifact directory. JSONL
+input is limited to 8 MiB. Receive-event text is concatenated in event order so a
+line split across events can be reconstructed; only newline-terminated, exact,
+case-sensitive lines satisfy assertions. A partial tail is reported and never
+counts.
+
+Success requires monitor completion, reset-capture completion, at least one
+exact ready line, the exact build line when configured, and the requested number
+of exact heartbeats. The result contains the complete reset report, selected
+probe and serial records, assertion counts, fixed effects, ordered operations,
+the retained artifact directory, and SHA-256 references for baud stdout, stderr,
+JSONL, log, and the final evidence file. `serial_transmit_requested`, `flash_operation_requested`,
+`erase_requested`, `recover_requested`, and `non_boot_nvm_access_requested` are
+always false. Automatic retries are fixed at zero.
+
+An assertion failure publishes the complete report first, then returns
+`VERIFICATION_FAILED` with exit code 3 and the evidence reference. Existing
+evidence or artifact paths are rejected before hardware access. A failure before
+the serial monitor starts performs no reset; once target control begins, the
+reset-capture result or structured error and all available serial artifacts are
+preserved. This command does not perform or authorize the separately guarded
+flash that must precede a runtime test.
+
 R1 debug control is not equivalent to side-effect-free target inspection.
 `probes test`, `core status|halt|run|continue|continue-until-halt|step`,
 `breakpoints.*`,

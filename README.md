@@ -1088,6 +1088,31 @@ manifest beneath the ignored `target/firmware/nrf52840-dk-smoke` directory. The
 checked-in `test-contract.json` keeps flashing separately confirmation-gated and
 requires an exact zero-transmit serial identity before runtime observation.
 
+After a separately confirmed flash, close the runtime loop with the native
+cross-component acceptance command:
+
+```console
+embedded-debugger --backend probe-rs runtime accept \
+  --probe 1366:1061:001050275757 --target nRF52840_xxAA \
+  --port COM11 --vid 1366 --pid 1061 --serial-number 001050275757 \
+  --baud 115200 --dtr true --rts false --duration 15 \
+  --ready-line "EAT_NRF52840_DK_READY v1" \
+  --build-id-line "EAT_NRF52840_DK_BUILD_ID v1 <source-revision>" \
+  --heartbeat-line "EAT_NRF52840_DK_HEARTBEAT" --minimum-heartbeats 3 \
+  --evidence runtime.evidence.json --json
+```
+
+`runtime accept` delegates serial ownership to the installed `baud` CLI. It
+first verifies the exact port name, VID, PID, and USB serial from `baud list`,
+starts one bounded zero-transmit monitor, performs the existing
+`snapshot reset-capture`, evaluates only complete exact lines from the JSONL
+receive events, restores the target's declared post-reset state, and disconnects.
+The command never flashes, erases, recovers, accesses UICR, or retries. Its
+Windows Job Object / Unix process group bounds the serial child, and its evidence
+file plus sibling artifact directory are never overwritten. A missing ready,
+build-identity, or heartbeat assertion returns exit code 3 after publishing the
+complete failed report.
+
 ## ESP-IDF physical image planning
 
 An ESP-IDF application ELF can be normalized into its physical bootloader,

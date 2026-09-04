@@ -17,6 +17,23 @@ OpenOCD shell parsing.
 3. For native operations, surface the returned capability matrix and `effects` before taking an R1 action. Replay is the safe path for contract tests and offline analysis.
 4. When a serial console is relevant, use the `baud` skill for port identity and read-only monitoring. Keep DTR/RTS false unless the board protocol explicitly requires otherwise.
 
+## Runtime acceptance
+
+After a separately planned, confirmed, and completed flash, prefer
+`runtime accept` when firmware readiness must be correlated with one exact
+reset-capture. Supply the complete probe and target identities plus the exact
+serial port, VID, PID, USB serial number, ready line, heartbeat line, and a new
+evidence path. Add `--build-id-line` when the firmware exposes a stable runtime
+build identity. Use the board-documented DTR/RTS values; the command transmits no
+serial bytes.
+
+Accept the run only when `data.report.accepted=true` and the complete-line counts
+satisfy every configured assertion. A `VERIFICATION_FAILED` result still points
+to complete evidence; inspect it and do not retry automatically. The command
+performs one R1 reset-capture but never flashes, erases, recovers, accesses UICR,
+or creates a second monitor. Treat source-revision telemetry as source identity,
+not as cryptographic attestation of the final firmware artifact.
+
 ## OpenOCD and GDB host checks
 
 Use `openocd inspect` before any OpenOCD configuration execution. Configuration

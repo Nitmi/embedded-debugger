@@ -26,6 +26,10 @@ use crate::{
         DEFAULT_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS, DEFAULT_CONTINUE_UNTIL_HALT_TIMEOUT_MS,
         FlashRange, MemoryRegionKind,
     },
+    runtime::{
+        self, BaudCliDriver, DEFAULT_MINIMUM_HEARTBEATS, DEFAULT_RUNTIME_DURATION_SECONDS,
+        DEFAULT_RUNTIME_MONITOR_STARTUP_DELAY_MS, RuntimeAcceptanceOptions,
+    },
     service::{DebugService, inspect_evidence},
     session, supervisor,
 };
@@ -71,6 +75,10 @@ pub enum Command {
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
+    },
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommand,
     },
     Registers {
         #[command(subcommand)]
@@ -992,6 +1000,74 @@ pub enum SnapshotCommand {
     Inspect { evidence: PathBuf },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum RuntimeCommand {
+    Accept(RuntimeAcceptSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct RuntimeAcceptSelection {
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "baud",
+        help = "baud CLI executable used for structured serial discovery and monitoring"
+    )]
+    pub baud_executable: PathBuf,
+
+    #[arg(long, help = "exact probe selector from probes list")]
+    pub probe: String,
+
+    #[arg(long, help = "exact target name")]
+    pub target: String,
+
+    #[arg(long, help = "exact serial port name from baud list")]
+    pub port: String,
+
+    #[arg(long, value_parser = runtime::parse_usb_id, help = "exact four-digit hexadecimal USB VID")]
+    pub vid: u16,
+
+    #[arg(long, value_parser = runtime::parse_usb_id, help = "exact four-digit hexadecimal USB PID")]
+    pub pid: u16,
+
+    #[arg(long, help = "exact USB serial number from baud list")]
+    pub serial_number: String,
+
+    #[arg(long, default_value_t = 115_200)]
+    pub baud: u32,
+
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub dtr: bool,
+
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub rts: bool,
+
+    #[arg(long, default_value_t = DEFAULT_RUNTIME_DURATION_SECONDS)]
+    pub duration: u64,
+
+    #[arg(
+        long,
+        default_value_t = DEFAULT_RUNTIME_MONITOR_STARTUP_DELAY_MS,
+        help = "bounded delay between serial monitor launch and reset-capture"
+    )]
+    pub monitor_startup_delay_ms: u64,
+
+    #[arg(long, help = "exact complete ready line required after reset")]
+    pub ready_line: String,
+
+    #[arg(long, help = "optional exact complete runtime build-identity line")]
+    pub build_id_line: Option<String>,
+
+    #[arg(long, help = "exact complete heartbeat line")]
+    pub heartbeat_line: String,
+
+    #[arg(long, default_value_t = DEFAULT_MINIMUM_HEARTBEATS)]
+    pub minimum_heartbeats: u32,
+
+    #[arg(long, value_name = "FILE")]
+    pub evidence: PathBuf,
+}
+
 #[derive(Debug, Args)]
 pub struct SnapshotSelection {
     #[arg(long, help = "exact probe selector from probes list")]
@@ -1141,6 +1217,9 @@ impl Cli {
             Command::Snapshot {
                 command: SnapshotCommand::Inspect { .. },
             } => "snapshot.inspect",
+            Command::Runtime {
+                command: RuntimeCommand::Accept(_),
+            } => "runtime.accept",
             Command::Registers {
                 command: RegisterCommand::Read(_),
             } => "registers.read",
@@ -2272,6 +2351,9 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
         Command::Snapshot {
             command: SnapshotCommand::ResetCapture(selection),
         } => capture_reset_snapshot(cli, selection),
+        Command::Runtime {
+            command: RuntimeCommand::Accept(selection),
+        } => accept_runtime(cli, selection),
         Command::Registers {
             command: RegisterCommand::Read(selection),
         } => read_registers(cli, selection),
@@ -2599,6 +2681,67 @@ fn capture_reset_snapshot(cli: &Cli, selection: &SnapshotSelection) -> Result<Co
     Ok(CommandResult::serializable(
         "snapshot.reset_capture",
         &report,
+        human,
+    ))
+}
+
+fn accept_runtime(cli: &Cli, selection: &RuntimeAcceptSelection) -> Result<CommandResult> {
+    let options = RuntimeAcceptanceOptions {
+        probe: selection.probe.clone(),
+        target: selection.target.clone(),
+        port: selection.port.clone(),
+        vendor_id: selection.vid,
+        product_id: selection.pid,
+        serial_number: selection.serial_number.clone(),
+        baudrate: selection.baud,
+        dtr: selection.dtr,
+        rts: selection.rts,
+        duration_seconds: selection.duration,
+        monitor_startup_delay_ms: selection.monitor_startup_delay_ms,
+        ready_line: selection.ready_line.clone(),
+        build_id_line: selection.build_id_line.clone(),
+        heartbeat_line: selection.heartbeat_line.clone(),
+        minimum_heartbeats: selection.minimum_heartbeats,
+        evidence: selection.evidence.clone(),
+    };
+    let driver = BaudCliDriver::new(selection.baud_executable.clone());
+    let execution = match cli.backend {
+        BackendArg::Replay => runtime::run_runtime_acceptance(
+            ReplayBackend::from_path(replay_fixture_path(cli)?)?,
+            &driver,
+            &options,
+        )?,
+        BackendArg::ProbeRs => runtime::run_runtime_acceptance(
+            ProbeRsBackend::new(&selection.target)?,
+            &driver,
+            &options,
+        )?,
+        BackendArg::Openocd => return Err(unsupported_openocd("runtime_acceptance")),
+    };
+    if !execution.report.accepted {
+        return Err(DebugError::verification(
+            "runtime acceptance assertions failed; no automatic retry was attempted",
+            json!({
+                "evidence": execution.evidence,
+                "assertions": execution.report.assertions,
+                "serial_error": execution.report.serial_error,
+                "reset_capture_error": execution.report.reset_capture_error,
+                "automatic_retries": 0,
+            }),
+        ));
+    }
+    let human = format!(
+        "Runtime acceptance passed on {} through {}\nready={} build_identity={} heartbeats={}\nReset capture: complete; serial transmit: 0 bytes; automatic retries: 0\nEvidence: {}",
+        execution.report.target,
+        execution.report.serial_selection.port,
+        execution.report.assertions.ready.observed,
+        execution.report.assertions.build_identity.observed,
+        execution.report.assertions.heartbeat.observed,
+        execution.evidence.path,
+    );
+    Ok(CommandResult::serializable(
+        "runtime.accept",
+        &execution,
         human,
     ))
 }

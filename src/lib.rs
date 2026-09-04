@@ -5,6 +5,7 @@ pub mod envelope;
 pub mod error;
 pub mod firmware;
 pub mod model;
+pub mod runtime;
 pub mod service;
 pub mod session;
 pub mod supervisor;

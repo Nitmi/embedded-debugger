@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Native `runtime accept` orchestration across the exact probe-rs target and the
+  exact `baud` port identity. The fixed R1 workflow starts one bounded
+  zero-transmit serial monitor, performs one existing reset-capture, evaluates
+  complete exact READY/build/heartbeat lines, restores and disconnects the
+  target, and publishes non-overwriting evidence plus hashed baud artifacts.
+  Serial process trees are bounded with a Windows Job Object or Unix process
+  group; assertion failure remains a nonzero structured result with preserved
+  evidence, and automatic retries, flash, erase, recover, UICR access, and serial
+  transmission are disabled. The release implementation passed one physical
+  nRF52840 DK run through J-Link and COM11, capturing the exact READY and
+  source-build identity lines plus 31 complete heartbeats while restoring the
+  core to running and disconnecting.
 - Strict Intel HEX planning with `.hex`/`.ihex` auto-detection, checksum and record
   validation, sparse normalized segment manifests, overlap and address-overflow
   rejection, nRF52840 UICR labeling, readable non-boot NVM erase planning, and

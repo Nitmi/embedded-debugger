@@ -2016,3 +2016,41 @@ read physical comparator registers, prove runtime firmware identity or
 continuity, verify the declared RAM semantics, qualify CPU1, or authorize
 another hit, retry, address, mode, interval, or target operation. The one-run
 authority is spent.
+
+## Native nRF52840 DK joint runtime acceptance (2026-09-04)
+
+- The official nRF52840 DK onboard target was selected through J-Link
+  `1366:1061:001050275757` with target `nRF52840_xxAA`. `baud 0.1.0` selected
+  exact `COM11` with USB VID/PID `1366:1061` and serial `001050275757`.
+  Earlier Windows PnP evidence identified this port as `MI_00`; the native
+  command itself bound the exact COM name and USB triple exposed by `baud`.
+- The pre-existing confirmed flash contained the DK smoke firmware whose HEX
+  SHA-256 was
+  `5cf20f3632670abaa04f087cc9353a204cfff35c1798af5edd09ea2629911ad9`.
+  Its runtime source-build identity was
+  `b7d4f3608a63dadac5a0bae5a29276ce15771487`. The build line is source-revision
+  evidence, not a self-hash or authenticity proof for the final HEX bytes.
+- Release executable SHA-256
+  `99326c9c10c9ee4cde263d2d730cbf4713b5ac921e425069adc818abd8bd6fc7`
+  ran one `runtime accept` command. It opened COM11 at 115200 baud with
+  DTR=true, RTS=false and zero transmitted bytes, then performed exactly one
+  `snapshot reset-capture`. No automatic or manual retry occurred.
+- Runtime assertions accepted one exact `EAT_NRF52840_DK_READY v1`, one exact
+  build-identity line containing source revision
+  `b7d4f3608a63dadac5a0bae5a29276ce15771487`, and 31 complete exact
+  `EAT_NRF52840_DK_HEARTBEAT` lines. There was no partial tail. Both the baud
+  process and structured result exited successfully.
+- The reset snapshot captured the single Armv7E-M core halted at
+  `PC=0x00000100`, `SP=0x20040000`, and `LR=0xFFFFFFFF`, restored its expected
+  final state to `running`, and disconnected the probe. Structured effects
+  reported reset=true and flash, erase, recover, non-boot NVM access, serial
+  transmit, and automatic retries all false.
+- Complete 8,046-byte evidence is retained under
+  `target/hardware-acceptance/2026-09-04-nrf52840-dk-smoke/native-runtime-accept-2`.
+  Its SHA-256 is
+  `b5456b4c33a362cca2670154f56d714d44edb96fdf00983b1a2c22fd1ccaa080`.
+  The baud result, empty stderr, JSONL, and text log are independently hashed in
+  the report. This accepts the native command's exact probe/serial/reset/assert/
+  cleanup path on this DK. It does not authorize another flash, prove the
+  physical RESET button routing, or turn source revision telemetry into signed
+  firmware attestation.
