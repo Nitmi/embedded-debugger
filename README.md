@@ -1085,33 +1085,38 @@ DK LED1 and emits one `EAT_NRF52840_DK_READY v1` line followed by repeated
 `EAT_NRF52840_DK_HEARTBEAT` lines through the DK virtual COM port at 115200 baud.
 Its PowerShell build produces an ELF, Intel HEX, and machine-readable artifact
 manifest beneath the ignored `target/firmware/nrf52840-dk-smoke` directory. The
-checked-in `test-contract.json` keeps flashing separately confirmation-gated and
-requires an exact zero-transmit serial identity before runtime observation.
+checked-in `test-contract.json` keeps flashing separately confirmation-gated,
+binds the qualified DK probe and serial identities, and requires exact
+zero-transmit serial observation. It is a fixture-specific acceptance contract:
+update every physical identity and runtime build line before using it with a
+different board or a newly flashed build.
 
 After a separately confirmed flash, close the runtime loop with the native
 cross-component acceptance command:
 
 ```console
 embedded-debugger --backend probe-rs runtime accept \
-  --probe 1366:1061:001050275757 --target nRF52840_xxAA \
-  --port COM11 --vid 1366 --pid 1061 --serial-number 001050275757 \
-  --baud 115200 --dtr true --rts false --duration 15 \
-  --ready-line "EAT_NRF52840_DK_READY v1" \
-  --build-id-line "EAT_NRF52840_DK_BUILD_ID v1 <source-revision>" \
-  --heartbeat-line "EAT_NRF52840_DK_HEARTBEAT" --minimum-heartbeats 3 \
+  --contract examples/nrf52840-dk-smoke/test-contract.json \
   --evidence runtime.evidence.json --json
 ```
 
+Contract mode uses strict JSON and rejects direct acceptance fields on the same
+command, so a caller cannot silently override reviewed probe, target, serial, or
+assertion values. The exact contract bytes are copied into the evidence artifact
+directory and SHA-256 recorded before hardware control. The explicit CLI fields
+remain available for one-off runs; repeat `--forbid-line <LINE>` to add exact
+complete lines that must have zero observations.
+
 `runtime accept` delegates serial ownership to the installed `baud` CLI. It
-first verifies the exact port name, VID, PID, and USB serial from `baud list`,
-starts one bounded zero-transmit monitor, performs the existing
-`snapshot reset-capture`, evaluates only complete exact lines from the JSONL
-receive events, restores the target's declared post-reset state, and disconnects.
-The command never flashes, erases, recovers, accesses UICR, or retries. Its
-Windows Job Object / Unix process group bounds the serial child, and its evidence
-file plus sibling artifact directory are never overwritten. A missing ready,
-build-identity, or heartbeat assertion returns exit code 3 after publishing the
-complete failed report.
+first verifies the exact port name, VID, PID, USB serial, and optional interface
+identity from `baud list`, starts one bounded zero-transmit monitor, performs the
+existing `snapshot reset-capture`, evaluates only complete exact lines from the
+JSONL receive events, restores the target's declared post-reset state, and
+disconnects. The command never flashes, erases, recovers, accesses UICR, or
+retries. Its Windows Job Object / Unix process group bounds the serial child,
+and its evidence file plus sibling artifact directory are never overwritten. A
+missing ready, build-identity, or heartbeat assertion, or an observed forbidden
+complete line, returns exit code 3 after publishing the complete failed report.
 
 ## ESP-IDF physical image planning
 

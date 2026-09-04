@@ -1015,54 +1015,70 @@ pub struct RuntimeAcceptSelection {
     )]
     pub baud_executable: PathBuf,
 
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "strict reusable hardware-test contract; cannot be mixed with direct acceptance fields"
+    )]
+    pub contract: Option<PathBuf>,
+
     #[arg(long, help = "exact probe selector from probes list")]
-    pub probe: String,
+    pub probe: Option<String>,
 
     #[arg(long, help = "exact target name")]
-    pub target: String,
+    pub target: Option<String>,
 
     #[arg(long, help = "exact serial port name from baud list")]
-    pub port: String,
+    pub port: Option<String>,
 
     #[arg(long, value_parser = runtime::parse_usb_id, help = "exact four-digit hexadecimal USB VID")]
-    pub vid: u16,
+    pub vid: Option<u16>,
 
     #[arg(long, value_parser = runtime::parse_usb_id, help = "exact four-digit hexadecimal USB PID")]
-    pub pid: u16,
+    pub pid: Option<u16>,
 
     #[arg(long, help = "exact USB serial number from baud list")]
-    pub serial_number: String,
+    pub serial_number: Option<String>,
 
-    #[arg(long, default_value_t = 115_200)]
-    pub baud: u32,
+    #[arg(long, help = "optional exact USB interface identity from baud list")]
+    pub interface: Option<String>,
 
-    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
-    pub dtr: bool,
+    #[arg(long)]
+    pub baud: Option<u32>,
 
-    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
-    pub rts: bool,
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub dtr: Option<bool>,
 
-    #[arg(long, default_value_t = DEFAULT_RUNTIME_DURATION_SECONDS)]
-    pub duration: u64,
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub rts: Option<bool>,
+
+    #[arg(long)]
+    pub duration: Option<u64>,
 
     #[arg(
         long,
-        default_value_t = DEFAULT_RUNTIME_MONITOR_STARTUP_DELAY_MS,
         help = "bounded delay between serial monitor launch and reset-capture"
     )]
-    pub monitor_startup_delay_ms: u64,
+    pub monitor_startup_delay_ms: Option<u64>,
 
     #[arg(long, help = "exact complete ready line required after reset")]
-    pub ready_line: String,
+    pub ready_line: Option<String>,
 
     #[arg(long, help = "optional exact complete runtime build-identity line")]
     pub build_id_line: Option<String>,
 
     #[arg(long, help = "exact complete heartbeat line")]
-    pub heartbeat_line: String,
+    pub heartbeat_line: Option<String>,
 
-    #[arg(long, default_value_t = DEFAULT_MINIMUM_HEARTBEATS)]
-    pub minimum_heartbeats: u32,
+    #[arg(long)]
+    pub minimum_heartbeats: Option<u32>,
+
+    #[arg(
+        long = "forbid-line",
+        value_name = "LINE",
+        help = "repeatable exact complete line that must not appear"
+    )]
+    pub forbidden_lines: Vec<String>,
 
     #[arg(long, value_name = "FILE")]
     pub evidence: PathBuf,
@@ -2686,24 +2702,7 @@ fn capture_reset_snapshot(cli: &Cli, selection: &SnapshotSelection) -> Result<Co
 }
 
 fn accept_runtime(cli: &Cli, selection: &RuntimeAcceptSelection) -> Result<CommandResult> {
-    let options = RuntimeAcceptanceOptions {
-        probe: selection.probe.clone(),
-        target: selection.target.clone(),
-        port: selection.port.clone(),
-        vendor_id: selection.vid,
-        product_id: selection.pid,
-        serial_number: selection.serial_number.clone(),
-        baudrate: selection.baud,
-        dtr: selection.dtr,
-        rts: selection.rts,
-        duration_seconds: selection.duration,
-        monitor_startup_delay_ms: selection.monitor_startup_delay_ms,
-        ready_line: selection.ready_line.clone(),
-        build_id_line: selection.build_id_line.clone(),
-        heartbeat_line: selection.heartbeat_line.clone(),
-        minimum_heartbeats: selection.minimum_heartbeats,
-        evidence: selection.evidence.clone(),
-    };
+    let options = runtime_acceptance_options(selection)?;
     let driver = BaudCliDriver::new(selection.baud_executable.clone());
     let execution = match cli.backend {
         BackendArg::Replay => runtime::run_runtime_acceptance(
@@ -2712,7 +2711,7 @@ fn accept_runtime(cli: &Cli, selection: &RuntimeAcceptSelection) -> Result<Comma
             &options,
         )?,
         BackendArg::ProbeRs => runtime::run_runtime_acceptance(
-            ProbeRsBackend::new(&selection.target)?,
+            ProbeRsBackend::new(&options.target)?,
             &driver,
             &options,
         )?,
@@ -2744,6 +2743,87 @@ fn accept_runtime(cli: &Cli, selection: &RuntimeAcceptSelection) -> Result<Comma
         &execution,
         human,
     ))
+}
+
+fn runtime_acceptance_options(
+    selection: &RuntimeAcceptSelection,
+) -> Result<RuntimeAcceptanceOptions> {
+    if let Some(contract) = &selection.contract {
+        let mut conflicts = Vec::new();
+        for (name, present) in [
+            ("--probe", selection.probe.is_some()),
+            ("--target", selection.target.is_some()),
+            ("--port", selection.port.is_some()),
+            ("--vid", selection.vid.is_some()),
+            ("--pid", selection.pid.is_some()),
+            ("--serial-number", selection.serial_number.is_some()),
+            ("--interface", selection.interface.is_some()),
+            ("--baud", selection.baud.is_some()),
+            ("--dtr", selection.dtr.is_some()),
+            ("--rts", selection.rts.is_some()),
+            ("--duration", selection.duration.is_some()),
+            (
+                "--monitor-startup-delay-ms",
+                selection.monitor_startup_delay_ms.is_some(),
+            ),
+            ("--ready-line", selection.ready_line.is_some()),
+            ("--build-id-line", selection.build_id_line.is_some()),
+            ("--heartbeat-line", selection.heartbeat_line.is_some()),
+            (
+                "--minimum-heartbeats",
+                selection.minimum_heartbeats.is_some(),
+            ),
+            ("--forbid-line", !selection.forbidden_lines.is_empty()),
+        ] {
+            if present {
+                conflicts.push(name);
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(DebugError::config(
+                "--contract cannot be mixed with direct runtime acceptance fields",
+                json!({"contract": contract, "conflicts": conflicts}),
+            ));
+        }
+        return runtime::load_runtime_acceptance_contract(contract, selection.evidence.clone());
+    }
+
+    Ok(RuntimeAcceptanceOptions {
+        probe: required_runtime_field("--probe", &selection.probe)?,
+        target: required_runtime_field("--target", &selection.target)?,
+        port: required_runtime_field("--port", &selection.port)?,
+        vendor_id: required_runtime_field("--vid", &selection.vid)?,
+        product_id: required_runtime_field("--pid", &selection.pid)?,
+        serial_number: required_runtime_field("--serial-number", &selection.serial_number)?,
+        interface: selection.interface.clone(),
+        baudrate: selection.baud.unwrap_or(115_200),
+        dtr: selection.dtr.unwrap_or(false),
+        rts: selection.rts.unwrap_or(false),
+        duration_seconds: selection
+            .duration
+            .unwrap_or(DEFAULT_RUNTIME_DURATION_SECONDS),
+        monitor_startup_delay_ms: selection
+            .monitor_startup_delay_ms
+            .unwrap_or(DEFAULT_RUNTIME_MONITOR_STARTUP_DELAY_MS),
+        ready_line: required_runtime_field("--ready-line", &selection.ready_line)?,
+        build_id_line: selection.build_id_line.clone(),
+        heartbeat_line: required_runtime_field("--heartbeat-line", &selection.heartbeat_line)?,
+        minimum_heartbeats: selection
+            .minimum_heartbeats
+            .unwrap_or(DEFAULT_MINIMUM_HEARTBEATS),
+        forbidden_lines: selection.forbidden_lines.clone(),
+        evidence: selection.evidence.clone(),
+        contract: None,
+    })
+}
+
+fn required_runtime_field<T: Clone>(name: &str, value: &Option<T>) -> Result<T> {
+    value.clone().ok_or_else(|| {
+        DebugError::config(
+            format!("runtime accept requires {name} when --contract is not used"),
+            json!({"missing": name}),
+        )
+    })
 }
 
 fn read_registers(cli: &Cli, selection: &RegisterReadSelection) -> Result<CommandResult> {

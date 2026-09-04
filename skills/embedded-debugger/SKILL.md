@@ -21,15 +21,20 @@ OpenOCD shell parsing.
 
 After a separately planned, confirmed, and completed flash, prefer
 `runtime accept` when firmware readiness must be correlated with one exact
-reset-capture. Supply the complete probe and target identities plus the exact
-serial port, VID, PID, USB serial number, ready line, heartbeat line, and a new
-evidence path. Add `--build-id-line` when the firmware exposes a stable runtime
-build identity. Use the board-documented DTR/RTS values; the command transmits no
-serial bytes.
+reset-capture. Prefer `--contract <test-contract.json>` plus a new evidence path
+for a repeatable board test. The strict contract must bind the complete probe,
+target, serial port, VID, PID, USB serial number, optional interface identity,
+ready line, optional build-identity line, heartbeat line, and any forbidden
+complete lines. Contract mode rejects direct acceptance fields and captures the
+exact contract bytes and SHA-256 in the evidence package. For a one-off direct
+run, supply those identities explicitly and repeat `--forbid-line` for every
+exact complete line that must not occur. Use the board-documented DTR/RTS values;
+the command transmits no serial bytes.
 
 Accept the run only when `data.report.accepted=true` and the complete-line counts
-satisfy every configured assertion. A `VERIFICATION_FAILED` result still points
-to complete evidence; inspect it and do not retry automatically. The command
+satisfy every configured assertion, including zero observations for every
+forbidden complete line. A `VERIFICATION_FAILED` result still points to complete
+evidence; inspect it and do not retry automatically. The command
 performs one R1 reset-capture but never flashes, erases, recovers, accesses UICR,
 or creates a second monitor. Treat source-revision telemetry as source identity,
 not as cryptographic attestation of the final firmware artifact.

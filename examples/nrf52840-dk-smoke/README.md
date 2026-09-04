@@ -42,11 +42,26 @@ also writes a machine-readable artifact `manifest.json`. Flashing is a separate
 guarded operation: generate a fresh `embedded-debugger flash plan`, review every
 range and effect, and provide the exact confirmation digest before execution.
 
-`test-contract.json` records the bounded hardware-test contract. In particular,
-the serial stage must bind an exact COM-port USB identity, assert DTR, keep RTS
-false, transmit zero bytes, observe for eight seconds, find the READY line, and
-find at least three complete HEARTBEAT lines. Any target mutation defaults to
-zero automatic retries.
+`test-contract.json` records the bounded hardware-test contract qualified on the
+repository owner's DK fixture. In particular, it binds the exact J-Link, target,
+COM-port USB identity, and runtime build line; asserts DTR; keeps RTS false;
+transmits zero bytes; observes for 15 seconds; finds the READY line and at least
+three complete HEARTBEAT lines; and rejects configured fault or panic lines.
+Any target mutation defaults to zero automatic retries. Replace every physical
+identity and the build line before reusing the contract for another board or
+newly flashed firmware.
+
+Run the combined post-flash acceptance with only the reviewed contract and a
+fresh evidence path:
+
+```powershell
+embedded-debugger --backend probe-rs runtime accept `
+  --contract .\test-contract.json `
+  --evidence .\runtime.evidence.json --json
+```
+
+The command captures the exact contract bytes and hash alongside the serial and
+reset evidence. Contract mode cannot be mixed with direct acceptance options.
 
 Pin assignments follow the official nRF52840 DK hardware guide. UART register
 addresses and values follow the nRF52840 product specification.

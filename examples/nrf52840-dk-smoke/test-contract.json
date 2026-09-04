@@ -3,6 +3,11 @@
   "name": "nrf52840-dk-smoke",
   "board": "Nordic nRF52840 DK",
   "target": "nRF52840_xxAA",
+  "debug": {
+    "probe": "1366:1061:001050275757",
+    "operation": "snapshot.reset-capture",
+    "automatic_retries": 0
+  },
   "firmware": {
     "build_script": "build.ps1",
     "format": "hex",
@@ -30,6 +35,11 @@
   },
   "serial": {
     "exact_port_identity_required": true,
+    "port": "COM11",
+    "usb_vendor_id": "1366",
+    "usb_product_id": "1061",
+    "usb_serial_number": "001050275757",
+    "usb_interface": null,
     "baud": 115200,
     "data_bits": 8,
     "parity": "none",
@@ -38,10 +48,16 @@
     "dtr": true,
     "rts": false,
     "transmit_bytes": 0,
-    "observe_duration_seconds": 8,
+    "observe_duration_seconds": 15,
+    "monitor_startup_delay_ms": 400,
     "ready_line": "EAT_NRF52840_DK_READY v1",
+    "build_id_line": "EAT_NRF52840_DK_BUILD_ID v1 b7d4f3608a63dadac5a0bae5a29276ce15771487",
     "heartbeat_line": "EAT_NRF52840_DK_HEARTBEAT",
-    "minimum_complete_heartbeats": 3
+    "minimum_complete_heartbeats": 3,
+    "forbidden_complete_lines": [
+      "EAT_NRF52840_DK_FAULT",
+      "EAT_NRF52840_DK_PANIC"
+    ]
   },
   "visual": {
     "led": "LED1",

@@ -4174,6 +4174,61 @@ fn runtime_accept_rejects_unbounded_duration_before_starting_baud() {
 }
 
 #[test]
+fn runtime_accept_rejects_contract_and_direct_field_mixing() {
+    let directory = tempdir().unwrap();
+    let evidence = directory.path().join("runtime.evidence.json");
+    let missing_contract = directory.path().join("missing-contract.json");
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "runtime",
+            "accept",
+            "--contract",
+            missing_contract.to_str().unwrap(),
+            "--probe",
+            "unexpected-override",
+            "--evidence",
+            evidence.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["conflicts"][0], "--probe");
+    assert!(!evidence.exists());
+}
+
+#[test]
+fn runtime_accept_requires_direct_identity_without_a_contract() {
+    let directory = tempdir().unwrap();
+    let evidence = directory.path().join("runtime.evidence.json");
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "runtime",
+            "accept",
+            "--evidence",
+            evidence.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(result["error"]["details"]["missing"], "--probe");
+    assert!(!evidence.exists());
+}
+
+#[test]
 fn replay_register_read_reports_metadata_and_restored_state() {
     let output = Command::cargo_bin("embedded-debugger")
         .unwrap()
