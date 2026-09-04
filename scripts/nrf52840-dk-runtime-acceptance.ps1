@@ -16,7 +16,9 @@ function Write-JsonFile {
         [Parameter(Mandatory = $true)][string]$Path
     )
 
-    $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Path -Encoding utf8NoBOM
+    $json = $Value | ConvertTo-Json -Depth 20
+    $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+    [System.IO.File]::WriteAllText($Path, $json, $utf8NoBom)
 }
 
 function Fail {
