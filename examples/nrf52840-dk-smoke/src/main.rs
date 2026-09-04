@@ -66,6 +66,12 @@ const PIN_DISCONNECTED: u32 = 0xFFFF_FFFF;
 const UART_BAUD_115200: u32 = 0x01D7_E000;
 
 const READY: &[u8] = b"EAT_NRF52840_DK_READY v1\r\n";
+const BUILD_ID: &[u8] = concat!(
+    "EAT_NRF52840_DK_BUILD_ID v1 ",
+    env!("NRF_SMOKE_BUILD_ID"),
+    "\r\n"
+)
+.as_bytes();
 const HEARTBEAT: &[u8] = b"EAT_NRF52840_DK_HEARTBEAT\r\n";
 
 #[unsafe(no_mangle)]
@@ -74,6 +80,7 @@ pub extern "C" fn rust_main() -> ! {
         led_init();
         uart_init();
         uart_write(READY);
+        uart_write(BUILD_ID);
     }
 
     let mut led_on = false;

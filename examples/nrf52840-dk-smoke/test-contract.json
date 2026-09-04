@@ -6,6 +6,11 @@
   "firmware": {
     "build_script": "build.ps1",
     "format": "hex",
+    "runtime_identity": {
+      "line_prefix": "EAT_NRF52840_DK_BUILD_ID v1 ",
+      "source_revision_bound": true,
+      "artifact_sha256_attestation": false
+    },
     "allowed_code_flash": {
       "start": "0x00000000",
       "end_exclusive": "0x00100000"

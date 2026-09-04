@@ -7,9 +7,30 @@ $outputDir = Join-Path $repoRoot 'target\firmware\nrf52840-dk-smoke'
 
 Push-Location $crateRoot
 try {
-    & cargo build --release
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo build failed with exit code $LASTEXITCODE"
+    $gitCommit = (& git -C $crateRoot rev-parse --verify HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $gitCommit -notmatch '^[0-9a-f]{40}$') {
+        throw "unable to resolve the smoke firmware source commit"
+    }
+    $dirtyTracked = (& git -C $crateRoot status --porcelain --untracked-files=no).Trim()
+    $buildId = if ([string]::IsNullOrWhiteSpace($dirtyTracked)) {
+        $gitCommit
+    } else {
+        "$gitCommit-dirty"
+    }
+
+    $previousBuildId = $env:NRF_SMOKE_BUILD_ID
+    $env:NRF_SMOKE_BUILD_ID = $buildId
+    try {
+        & cargo build --release
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        if ($null -eq $previousBuildId) {
+            Remove-Item Env:NRF_SMOKE_BUILD_ID -ErrorAction SilentlyContinue
+        } else {
+            $env:NRF_SMOKE_BUILD_ID = $previousBuildId
+        }
     }
 
     $sysroot = (& rustc --print sysroot).Trim()
@@ -48,6 +69,7 @@ try {
         schema_version = '1.0'
         board = 'Nordic nRF52840 DK'
         target = 'nRF52840_xxAA'
+        build_id = $buildId
         target_triple = $targetTriple
         uart = [ordered]@{
             baud = 115200
