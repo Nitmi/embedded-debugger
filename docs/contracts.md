@@ -1103,8 +1103,16 @@ inlines at most 4096 bytes as lowercase hexadecimal and includes its SHA-256.
 
 The native accepted contract currently executes raw `.bin` firmware. A
 probe-rs BIN plan requires an explicit `--base-address`; Replay takes its
-address and erase impact from the fixture. The target-gated ESP-IDF path
-requires an explicit
+address and erase impact from the fixture. Intel `.hex` and `.ihex` files are
+auto-detected and may also be selected with `--format hex`. Intel HEX control
+records, checksums, EOF placement, 32-bit address bounds, and overlap are
+validated before probe enumeration. Parsed data is normalized into contiguous,
+non-overlapping physical segments; sparse ranges remain separate. nRF52840
+segments wholly inside `0x10001000..0x10002000` are identified as `uicr`.
+Planning accepts readable nonvolatile target regions, including non-boot NVM
+such as UICR, and reports all affected erase sectors. Intel HEX execution
+remains blocked with `INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED` pending
+target-specific acceptance. The target-gated ESP-IDF path requires an explicit
 `--format idf --flash-size <SIZE>` and rejects `--base-address`. An `.elf`
 extension is intentionally ambiguous and is never interpreted as ESP-IDF
 without that format selection.

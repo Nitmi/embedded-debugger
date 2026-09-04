@@ -368,13 +368,12 @@ impl DebugBackend for ProbeRsBackend {
                 .filter_map(|region| region.as_nvm_region())
                 .find(|region| {
                     region.is_readable()
-                        && region.is_boot_memory()
                         && region.range.start <= range.start.0
                         && end <= region.range.end
                 })
                 .ok_or_else(|| {
                     DebugError::config(
-                        "firmware segment is not fully contained in readable boot flash",
+                        "firmware segment is not fully contained in readable nonvolatile memory",
                         json!({
                             "target": self.target_info.name,
                             "range": range,
@@ -2482,6 +2481,30 @@ mod tests {
         assert_eq!(layout.erase_ranges.len(), 1);
         assert_eq!(layout.erase_ranges[0].start, Address(0));
         assert_eq!(layout.erase_ranges[0].length, 0x2_0000);
+    }
+
+    #[test]
+    fn segmented_plan_accepts_nrf52840_uicr_non_boot_nvm() {
+        let backend = ProbeRsBackend::new("nRF52840_xxAA").unwrap();
+        let layout = backend
+            .plan_segmented_flash_ranges(&[
+                FlashRange {
+                    start: Address(0),
+                    length: 0x20,
+                },
+                FlashRange {
+                    start: Address(0x1000_1014),
+                    length: 8,
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(layout.write_ranges.len(), 2);
+        assert_eq!(layout.erase_ranges.len(), 2);
+        assert_eq!(layout.erase_ranges[0].start, Address(0));
+        assert_eq!(layout.erase_ranges[0].length, 0x1000);
+        assert_eq!(layout.erase_ranges[1].start, Address(0x1000_1000));
+        assert_eq!(layout.erase_ranges[1].length, 0x1000);
     }
 
     #[test]

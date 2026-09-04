@@ -18,11 +18,13 @@ use crate::{
 };
 
 const MAX_FIRMWARE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_INTEL_HEX_RECORDS: usize = 262_144;
 const ESP_IDF_GENERATOR: &str = "espflash-4.5.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirmwareFormat {
     Bin,
+    IntelHex,
     EspIdf,
 }
 
@@ -30,6 +32,7 @@ impl FirmwareFormat {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Bin => "bin",
+            Self::IntelHex => "hex",
             Self::EspIdf => "idf",
         }
     }
@@ -109,6 +112,7 @@ pub fn resolve_format(path: &Path, requested: Option<FirmwareFormat>) -> Result<
         .map(str::to_ascii_lowercase);
     match extension.as_deref() {
         Some("bin") => Ok(FirmwareFormat::Bin),
+        Some("hex" | "ihex") => Ok(FirmwareFormat::IntelHex),
         Some("elf") => Err(DebugError::config(
             "ELF firmware is ambiguous; select --format idf for an ESP-IDF application",
             json!({"path": path, "extension": extension}),
@@ -118,7 +122,7 @@ pub fn resolve_format(path: &Path, requested: Option<FirmwareFormat>) -> Result<
             json!({
                 "path": path,
                 "extension": other,
-                "supported_formats": ["bin", "idf"],
+                "supported_formats": ["bin", "hex", "idf"],
             }),
         )),
     }
@@ -148,8 +152,10 @@ pub fn load(
         pending_raw_bytes: Some(source_bytes),
     };
 
-    if format == FirmwareFormat::EspIdf {
-        load_esp_idf(&mut loaded, target_name, options)?;
+    match format {
+        FirmwareFormat::Bin => {}
+        FirmwareFormat::IntelHex => load_intel_hex(&mut loaded, target_name)?,
+        FirmwareFormat::EspIdf => load_esp_idf(&mut loaded, target_name, options)?,
     }
 
     Ok(loaded)
@@ -161,6 +167,17 @@ fn validate_options(format: FirmwareFormat, options: &FirmwareInputOptions) -> R
             if options.flash_size.is_some() || options.chip_revision.is_some() {
                 return Err(DebugError::config(
                     "--flash-size and --chip-revision apply only to --format idf",
+                    json!({"format": format.name()}),
+                ));
+            }
+        }
+        FirmwareFormat::IntelHex => {
+            if options.base_address.is_some()
+                || options.flash_size.is_some()
+                || options.chip_revision.is_some()
+            {
+                return Err(DebugError::config(
+                    "Intel HEX records define their physical addresses; omit --base-address, --flash-size, and --chip-revision",
                     json!({"format": format.name()}),
                 ));
             }
@@ -222,6 +239,287 @@ fn read_source(path: &Path) -> Result<(PathBuf, Vec<u8>)> {
         ));
     }
     Ok((canonical, bytes))
+}
+
+#[derive(Debug)]
+struct IntelHexChunk {
+    start: u64,
+    data: Vec<u8>,
+    first_line: usize,
+    last_line: usize,
+}
+
+fn load_intel_hex(loaded: &mut LoadedFirmware, target_name: &str) -> Result<()> {
+    let source_bytes = loaded
+        .pending_raw_bytes
+        .take()
+        .expect("firmware source is available during Intel HEX parsing");
+    let source = std::str::from_utf8(&source_bytes).map_err(|error| {
+        DebugError::config(
+            "Intel HEX firmware must be UTF-8 compatible ASCII text",
+            json!({
+                "path": loaded.info.path,
+                "valid_up_to": error.valid_up_to(),
+            }),
+        )
+    })?;
+
+    let mut address_base = 0_u64;
+    let mut chunks = Vec::new();
+    let mut record_count = 0_usize;
+    let mut saw_eof = false;
+
+    for (line_index, line) in source.lines().enumerate() {
+        let line_number = line_index + 1;
+        if line.is_empty() {
+            continue;
+        }
+        if saw_eof {
+            return Err(DebugError::config(
+                "Intel HEX contains a record after the EOF record",
+                json!({"path": loaded.info.path, "line": line_number}),
+            ));
+        }
+        record_count += 1;
+        if record_count > MAX_INTEL_HEX_RECORDS {
+            return Err(DebugError::config(
+                "Intel HEX contains too many records",
+                json!({
+                    "path": loaded.info.path,
+                    "line": line_number,
+                    "maximum": MAX_INTEL_HEX_RECORDS,
+                }),
+            ));
+        }
+        if !line.starts_with(':') {
+            return Err(DebugError::config(
+                "Intel HEX record must begin with ':'",
+                json!({"path": loaded.info.path, "line": line_number}),
+            ));
+        }
+        if line.len() > 521 {
+            return Err(DebugError::config(
+                "Intel HEX record exceeds the maximum encoded length",
+                json!({"path": loaded.info.path, "line": line_number, "length": line.len()}),
+            ));
+        }
+
+        let encoded = &line[1..];
+        if encoded.len() % 2 != 0 {
+            return Err(DebugError::config(
+                "Intel HEX record has an odd number of hexadecimal digits",
+                json!({"path": loaded.info.path, "line": line_number}),
+            ));
+        }
+        let record = hex::decode(encoded).map_err(|error| {
+            DebugError::config(
+                "Intel HEX record contains invalid hexadecimal data",
+                json!({
+                    "path": loaded.info.path,
+                    "line": line_number,
+                    "cause": error.to_string(),
+                }),
+            )
+        })?;
+        if record.len() < 5 {
+            return Err(DebugError::config(
+                "Intel HEX record is shorter than its required header and checksum",
+                json!({"path": loaded.info.path, "line": line_number}),
+            ));
+        }
+
+        let declared_length = usize::from(record[0]);
+        if record.len() != declared_length + 5 {
+            return Err(DebugError::config(
+                "Intel HEX byte count does not match the record length",
+                json!({
+                    "path": loaded.info.path,
+                    "line": line_number,
+                    "declared_data_length": declared_length,
+                    "actual_record_length": record.len(),
+                }),
+            ));
+        }
+        if record.iter().copied().fold(0_u8, u8::wrapping_add) != 0 {
+            return Err(DebugError::config(
+                "Intel HEX record checksum is invalid",
+                json!({"path": loaded.info.path, "line": line_number}),
+            ));
+        }
+
+        let record_address = u64::from(u16::from_be_bytes([record[1], record[2]]));
+        let record_type = record[3];
+        let data = &record[4..4 + declared_length];
+        match record_type {
+            0x00 => {
+                if data.is_empty() {
+                    continue;
+                }
+                let start = address_base.checked_add(record_address).ok_or_else(|| {
+                    DebugError::config(
+                        "Intel HEX data address overflowed",
+                        json!({"path": loaded.info.path, "line": line_number}),
+                    )
+                })?;
+                let end = start.checked_add(data.len() as u64).ok_or_else(|| {
+                    DebugError::config(
+                        "Intel HEX data range overflowed",
+                        json!({"path": loaded.info.path, "line": line_number, "start": Address(start)}),
+                    )
+                })?;
+                if end > u64::from(u32::MAX) + 1 {
+                    return Err(DebugError::config(
+                        "Intel HEX data range exceeds the 32-bit address space",
+                        json!({
+                            "path": loaded.info.path,
+                            "line": line_number,
+                            "start": Address(start),
+                            "length": data.len(),
+                        }),
+                    ));
+                }
+                chunks.push(IntelHexChunk {
+                    start,
+                    data: data.to_vec(),
+                    first_line: line_number,
+                    last_line: line_number,
+                });
+            }
+            0x01 => {
+                require_intel_hex_record_shape(loaded, line_number, record_address, data, 0)?;
+                saw_eof = true;
+            }
+            0x02 => {
+                require_intel_hex_record_shape(loaded, line_number, record_address, data, 2)?;
+                address_base = u64::from(u16::from_be_bytes([data[0], data[1]])) << 4;
+            }
+            0x03 => {
+                require_intel_hex_record_shape(loaded, line_number, record_address, data, 4)?;
+            }
+            0x04 => {
+                require_intel_hex_record_shape(loaded, line_number, record_address, data, 2)?;
+                address_base = u64::from(u16::from_be_bytes([data[0], data[1]])) << 16;
+            }
+            0x05 => {
+                require_intel_hex_record_shape(loaded, line_number, record_address, data, 4)?;
+            }
+            _ => {
+                return Err(DebugError::config(
+                    "Intel HEX contains an unsupported record type",
+                    json!({
+                        "path": loaded.info.path,
+                        "line": line_number,
+                        "record_type": format!("0x{record_type:02X}"),
+                    }),
+                ));
+            }
+        }
+    }
+
+    if !saw_eof {
+        return Err(DebugError::config(
+            "Intel HEX is missing its EOF record",
+            json!({"path": loaded.info.path}),
+        ));
+    }
+    if chunks.is_empty() {
+        return Err(DebugError::config(
+            "Intel HEX does not contain any data bytes",
+            json!({"path": loaded.info.path}),
+        ));
+    }
+
+    chunks.sort_by_key(|chunk| chunk.start);
+    let mut merged: Vec<IntelHexChunk> = Vec::new();
+    for chunk in chunks {
+        if let Some(previous) = merged.last_mut() {
+            let previous_end = previous.start + previous.data.len() as u64;
+            if chunk.start < previous_end {
+                return Err(DebugError::config(
+                    "Intel HEX contains overlapping data records",
+                    json!({
+                        "path": loaded.info.path,
+                        "overlap_address": Address(chunk.start),
+                        "previous_first_line": previous.first_line,
+                        "previous_last_line": previous.last_line,
+                        "current_line": chunk.first_line,
+                    }),
+                ));
+            }
+            if chunk.start == previous_end {
+                previous.data.extend_from_slice(&chunk.data);
+                previous.last_line = chunk.last_line;
+                continue;
+            }
+        }
+        merged.push(chunk);
+    }
+
+    let program_size = merged.iter().try_fold(0_u64, |total, chunk| {
+        total
+            .checked_add(chunk.data.len() as u64)
+            .filter(|size| *size <= MAX_FIRMWARE_BYTES)
+            .ok_or_else(|| {
+                DebugError::config(
+                    "Intel HEX programmed data exceeds the allowed size",
+                    json!({"path": loaded.info.path, "maximum": MAX_FIRMWARE_BYTES}),
+                )
+            })
+    })?;
+    let segments = merged
+        .into_iter()
+        .map(|chunk| {
+            let end = chunk.start + chunk.data.len() as u64;
+            let kind = if target_name.eq_ignore_ascii_case("nRF52840_xxAA")
+                && chunk.start >= 0x1000_1000
+                && end <= 0x1000_2000
+            {
+                "uicr"
+            } else {
+                "data"
+            };
+            FirmwareSegment {
+                info: FirmwareSegmentInfo {
+                    kind: kind.to_string(),
+                    start: Address(chunk.start),
+                    length: chunk.data.len() as u64,
+                    sha256: sha256_bytes(&chunk.data),
+                },
+                data: chunk.data,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    loaded.info.base_address = segments.first().map(|segment| segment.info.start);
+    loaded.info.program_size = program_size;
+    loaded.info.segments = segments
+        .iter()
+        .map(|segment| segment.info.clone())
+        .collect();
+    loaded.segments = segments;
+    Ok(())
+}
+
+fn require_intel_hex_record_shape(
+    loaded: &LoadedFirmware,
+    line: usize,
+    address: u64,
+    data: &[u8],
+    expected_length: usize,
+) -> Result<()> {
+    if address != 0 || data.len() != expected_length {
+        return Err(DebugError::config(
+            "Intel HEX control record has an invalid address or byte count",
+            json!({
+                "path": loaded.info.path,
+                "line": line,
+                "address": Address(address),
+                "expected_data_length": expected_length,
+                "actual_data_length": data.len(),
+            }),
+        ));
+    }
+    Ok(())
 }
 
 fn load_esp_idf(
@@ -425,6 +723,69 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn hex_extension_is_inferred() {
+        assert_eq!(
+            resolve_format(Path::new("firmware.hex"), None).unwrap(),
+            FirmwareFormat::IntelHex
+        );
+    }
+
+    #[test]
+    fn intel_hex_loads_sparse_segments_and_marks_nrf52840_uicr() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("firmware.hex");
+        let records = [
+            intel_hex_record(0, 0x04, &[0x00, 0x00]),
+            intel_hex_record(0x1000, 0x00, &[1, 2, 3, 4]),
+            intel_hex_record(0x1004, 0x00, &[5, 6]),
+            intel_hex_record(0, 0x04, &[0x10, 0x00]),
+            intel_hex_record(0x1014, 0x00, &[0x00, 0x80, 0x0f, 0x00]),
+            intel_hex_record(0, 0x01, &[]),
+        ];
+        fs::write(&path, records.join("\n")).unwrap();
+
+        let loaded = load(&path, "nRF52840_xxAA", &FirmwareInputOptions::default()).unwrap();
+
+        assert_eq!(loaded.info.format, "hex");
+        assert_eq!(loaded.info.program_size, 10);
+        assert_eq!(loaded.info.segments.len(), 2);
+        assert_eq!(loaded.info.segments[0].start, Address(0x1000));
+        assert_eq!(loaded.info.segments[0].length, 6);
+        assert_eq!(loaded.info.segments[0].kind, "data");
+        assert_eq!(loaded.info.segments[1].start, Address(0x1000_1014));
+        assert_eq!(loaded.info.segments[1].kind, "uicr");
+    }
+
+    #[test]
+    fn intel_hex_rejects_bad_checksum() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("bad.hex");
+        fs::write(&path, ":0400000001020304F3\n:00000001FF\n").unwrap();
+
+        let error = load(&path, "nRF52840_xxAA", &FirmwareInputOptions::default()).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert!(error.message.contains("checksum"));
+    }
+
+    #[test]
+    fn intel_hex_rejects_overlapping_data_records() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("overlap.hex");
+        let records = [
+            intel_hex_record(0x1000, 0x00, &[1, 2, 3, 4]),
+            intel_hex_record(0x1002, 0x00, &[3, 4, 5, 6]),
+            intel_hex_record(0, 0x01, &[]),
+        ];
+        fs::write(&path, records.join("\n")).unwrap();
+
+        let error = load(&path, "nRF52840_xxAA", &FirmwareInputOptions::default()).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert!(error.message.contains("overlapping"));
+    }
+
+    #[test]
     fn idf_requires_explicit_flash_size_before_reading_the_file() {
         let error = load(
             Path::new("missing.elf"),
@@ -538,6 +899,17 @@ pub(crate) mod tests {
         put_u32(&mut bytes, strings + 20, names.len() as u32);
         put_u32(&mut bytes, strings + 32, 1);
         bytes
+    }
+
+    fn intel_hex_record(address: u16, record_type: u8, data: &[u8]) -> String {
+        let mut bytes = Vec::with_capacity(data.len() + 5);
+        bytes.push(data.len() as u8);
+        bytes.extend_from_slice(&address.to_be_bytes());
+        bytes.push(record_type);
+        bytes.extend_from_slice(data);
+        let checksum = 0_u8.wrapping_sub(bytes.iter().copied().fold(0_u8, u8::wrapping_add));
+        bytes.push(checksum);
+        format!(":{}", hex::encode_upper(bytes))
     }
 
     fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {

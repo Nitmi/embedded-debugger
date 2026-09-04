@@ -923,7 +923,7 @@ pub struct FlashSelection {
     #[arg(
         long,
         value_enum,
-        help = "firmware semantics; .elf requires an explicit idf selection"
+        help = "firmware semantics; .hex/.ihex are auto-detected and .elf requires an explicit idf selection"
     )]
     pub format: Option<FirmwareFormatArg>,
 
@@ -954,6 +954,7 @@ pub struct FlashSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FirmwareFormatArg {
     Bin,
+    Hex,
     Idf,
 }
 
@@ -961,6 +962,7 @@ impl From<FirmwareFormatArg> for FirmwareFormat {
     fn from(value: FirmwareFormatArg) -> Self {
         match value {
             FirmwareFormatArg::Bin => Self::Bin,
+            FirmwareFormatArg::Hex => Self::IntelHex,
             FirmwareFormatArg::Idf => Self::EspIdf,
         }
     }

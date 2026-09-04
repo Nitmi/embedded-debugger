@@ -1044,6 +1044,32 @@ then atomically publishes complete evidence. Device-write plans require a probe
 that reports a non-empty hardware serial number, so reconnecting another
 same-model probe cannot silently satisfy an old confirmation digest.
 
+## Intel HEX sparse image planning
+
+Intel HEX files are normalized into ordered physical-address segments without
+attaching to the target. The format is auto-detected from `.hex` and `.ihex`
+filename extensions, or can be selected explicitly with `--format hex`:
+
+```console
+cargo run -- --backend probe-rs flash plan whole.hex \
+  --probe <vid:pid:serial> --target nRF52840_xxAA --json
+```
+
+Parsing fails closed on malformed record lengths, invalid checksums, missing or
+misplaced EOF records, unsupported record types, 32-bit address overflow, and
+overlapping data records. Contiguous records are merged; sparse ranges remain
+separate and each normalized segment receives its own SHA-256. For
+`nRF52840_xxAA`, segments wholly inside `0x10001000..0x10002000` are
+labeled `uicr` in the plan.
+
+probe-rs planning accepts segments in readable nonvolatile regions, including
+nRF52 UICR, and reports the complete affected erase-sector set. The confirmation
+digest binds the original HEX hash and size, normalized segment addresses,
+lengths and hashes, erase impact, exact probe/target identity, policy, and
+execution blockers. Intel HEX execution is deliberately unavailable and reports
+`INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED` until target-specific sparse-flash and
+non-boot-NVM acceptance is completed.
+
 ## ESP-IDF physical image planning
 
 An ESP-IDF application ELF can be normalized into its physical bootloader,

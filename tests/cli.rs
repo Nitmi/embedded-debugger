@@ -4794,6 +4794,82 @@ fn native_unknown_target_is_a_stable_error() {
 }
 
 #[test]
+fn intel_hex_plan_is_normalized_and_execute_remains_blocked() {
+    let directory = tempdir().unwrap();
+    let firmware = directory.path().join("firmware.hex");
+    let evidence = directory.path().join("run.evidence.json");
+    fs::write(
+        &firmware,
+        ":020000040800F2\n:0400000001020304F2\n:00000001FF\n",
+    )
+    .unwrap();
+
+    let plan_output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "flash",
+            "plan",
+            firmware.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+
+    assert_eq!(plan["data"]["firmware"]["format"], "hex");
+    assert_eq!(plan["data"]["firmware"]["program_size"], 4);
+    assert_eq!(plan["data"]["firmware"]["segments"][0]["kind"], "data");
+    assert_eq!(
+        plan["data"]["firmware"]["segments"][0]["start"],
+        "0x08000000"
+    );
+    assert_eq!(plan["data"]["execution"]["supported"], false);
+    assert_eq!(
+        plan["data"]["execution"]["blockers"][0]["code"],
+        "INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED"
+    );
+
+    let confirmation = plan["data"]["confirm_digest"].as_str().unwrap();
+    let execute_output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "flash",
+            "execute",
+            firmware.to_str().unwrap(),
+            "--confirm",
+            confirmation,
+            "--evidence",
+            evidence.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(6)
+        .get_output()
+        .stdout
+        .clone();
+    let execute: Value = serde_json::from_slice(&execute_output).unwrap();
+
+    assert_eq!(execute["error"]["code"], "CAPABILITY_UNAVAILABLE");
+    assert_eq!(
+        execute["error"]["details"]["target_session_attached"],
+        false
+    );
+    assert_eq!(
+        execute["error"]["details"]["flash_operation_requested"],
+        false
+    );
+    assert_eq!(execute["error"]["details"]["reset_requested"], false);
+    assert!(!evidence.exists());
+}
+
+#[test]
 fn idf_plan_exposes_normalized_segments_and_execution_blockers() {
     let directory = tempdir().unwrap();
     let firmware = directory.path().join("firmware.elf");

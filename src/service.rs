@@ -878,7 +878,7 @@ impl<B: DebugBackend> DebugService<B> {
                 .validate_firmware_image_options(image_options)?;
         }
         let capabilities = self.backend.capabilities();
-        let execution = execution_readiness(&firmware.info.format, &target_info, capabilities);
+        let execution = execution_readiness(&firmware.info, &target_info, capabilities);
         if firmware.info.format == FirmwareFormat::Bin.name() {
             require_guarded_flash_capabilities(self.backend.name(), &target_info, capabilities)?;
         } else {
@@ -1301,16 +1301,25 @@ fn require_image_planning_capabilities(
 }
 
 fn execution_readiness(
-    format: &str,
+    firmware: &crate::model::FirmwareInfo,
     target: &crate::model::TargetInfo,
     capabilities: &crate::model::Capabilities,
 ) -> FlashExecutionReadiness {
-    if format != FirmwareFormat::EspIdf.name() {
+    let is_idf = firmware.format == FirmwareFormat::EspIdf.name();
+    let is_intel_hex = firmware.format == FirmwareFormat::IntelHex.name();
+    if !(is_idf || is_intel_hex) {
         return FlashExecutionReadiness::default();
     }
 
     let mut blockers = Vec::new();
-    if !capabilities.segmented_flash {
+    if is_intel_hex {
+        blockers.push(FlashExecutionBlocker {
+            code: "INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED".to_string(),
+            message: "Intel HEX execution remains disabled until target-specific sparse flash and non-boot NVM acceptance is completed"
+                .to_string(),
+        });
+    }
+    if firmware.segments.len() > 1 && !capabilities.segmented_flash {
         blockers.push(FlashExecutionBlocker {
             code: "SEGMENTED_FLASH_ACCEPTANCE_REQUIRED".to_string(),
             message: "the selected backend and target have not passed segmented flash execution acceptance"

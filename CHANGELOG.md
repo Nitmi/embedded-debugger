@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Strict Intel HEX planning with `.hex`/`.ihex` auto-detection, checksum and record
+  validation, sparse normalized segment manifests, overlap and address-overflow
+  rejection, nRF52840 UICR labeling, readable non-boot NVM erase planning, and
+  digest-bound `INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED` blocking until physical
+  execution acceptance is complete.
 - Bounded `openocd inspect` host diagnostics with exact executable resolution,
   OpenOCD identity checking, a 100..=30000 ms version deadline, 64 KiB output
   limits, canonical top-level configuration/search paths, duplicate and `#`
