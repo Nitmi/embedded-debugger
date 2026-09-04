@@ -7,20 +7,47 @@ $outputDir = Join-Path $repoRoot 'target\firmware\nrf52840-dk-smoke'
 
 Push-Location $crateRoot
 try {
-    $gitCommit = (& git -C $crateRoot rev-parse --verify HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or $gitCommit -notmatch '^[0-9a-f]{40}$') {
-        throw "unable to resolve the smoke firmware source commit"
+    $sourceFiles = @(
+        'Cargo.lock'
+        'Cargo.toml'
+        'build.ps1'
+        'build.rs'
+        'memory.x'
+        'src/main.rs'
+    )
+    $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
+    $sourceFileHashes = foreach ($relativePath in $sourceFiles) {
+        $sourcePath = Join-Path $crateRoot $relativePath
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            throw "firmware identity input not found at $sourcePath"
+        }
+        $normalizedText = [IO.File]::ReadAllText($sourcePath).Replace("`r`n", "`n").Replace("`r", "`n")
+        $normalizedBytes = $utf8WithoutBom.GetBytes($normalizedText)
+        $fileHasher = [Security.Cryptography.SHA256]::Create()
+        try {
+            $fileHash = [BitConverter]::ToString(
+                $fileHasher.ComputeHash($normalizedBytes)
+            ).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $fileHasher.Dispose()
+        }
+        [ordered]@{
+            path = $relativePath.Replace('\', '/')
+            normalized_text_sha256 = $fileHash
+        }
     }
-    $dirtyTrackedRaw = & git -C $crateRoot status --porcelain --untracked-files=no
-    $dirtyTracked = if ($null -eq $dirtyTrackedRaw) {
-        ''
-    } else {
-        ($dirtyTrackedRaw -join "`n").Trim()
-    }
-    $buildId = if ([string]::IsNullOrWhiteSpace($dirtyTracked)) {
-        $gitCommit
-    } else {
-        "$gitCommit-dirty"
+
+    $sourceIdentityText = ($sourceFileHashes | ForEach-Object {
+        "$($_.path)=$($_.normalized_text_sha256)"
+    }) -join "`n"
+    $sourceIdentityBytes = [Text.Encoding]::UTF8.GetBytes($sourceIdentityText)
+    $sourceHasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $buildId = [BitConverter]::ToString(
+            $sourceHasher.ComputeHash($sourceIdentityBytes)
+        ).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sourceHasher.Dispose()
     }
 
     $previousBuildId = $env:NRF_SMOKE_BUILD_ID
@@ -75,6 +102,13 @@ try {
         board = 'Nordic nRF52840 DK'
         target = 'nRF52840_xxAA'
         build_id = $buildId
+        runtime_identity = [ordered]@{
+            algorithm = 'sha256'
+            input_normalization = 'utf8-lf'
+            source_manifest_sha256 = $buildId
+            source_files = $sourceFileHashes
+            artifact_sha256_attestation = $false
+        }
         target_triple = $targetTriple
         uart = [ordered]@{
             baud = 115200

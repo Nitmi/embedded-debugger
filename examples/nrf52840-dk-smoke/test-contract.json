@@ -13,20 +13,23 @@
     "format": "hex",
     "runtime_identity": {
       "line_prefix": "EAT_NRF52840_DK_BUILD_ID v1 ",
-      "source_revision_bound": true,
+      "source_manifest_sha256_bound": true,
       "artifact_sha256_attestation": false
     },
     "allowed_code_flash": {
       "start": "0x00000000",
       "end_exclusive": "0x00100000"
     },
-    "forbidden_non_boot_nvm": [
+    "allowed_non_boot_nvm": [
       {
-        "name": "UICR",
-        "start": "0x10001000",
-        "end_exclusive": "0x10002000"
+        "name": "UICR.APPROTECT",
+        "start": "0x10001208",
+        "end_exclusive": "0x1000120C",
+        "value": "0x0000005A",
+        "effect": "development debug access remains enabled"
       }
-    ]
+    ],
+    "preserve_unwritten_uicr_bytes": true
   },
   "flash": {
     "exact_probe_selector_required": true,
@@ -51,7 +54,7 @@
     "observe_duration_seconds": 15,
     "monitor_startup_delay_ms": 400,
     "ready_line": "EAT_NRF52840_DK_READY v1",
-    "build_id_line": "EAT_NRF52840_DK_BUILD_ID v1 b7d4f3608a63dadac5a0bae5a29276ce15771487",
+    "build_id_line": "EAT_NRF52840_DK_BUILD_ID v1 bfb6b26450ddfcd5049a0423f975c384f16ac12264c3a88068c0e04a810db05c",
     "heartbeat_line": "EAT_NRF52840_DK_HEARTBEAT",
     "minimum_complete_heartbeats": 3,
     "forbidden_complete_lines": [
@@ -69,7 +72,8 @@
     "probe identity differs",
     "target differs",
     "firmware hash differs from the reviewed plan",
-    "plan includes UICR or any non-boot NVM",
+    "plan includes a non-boot NVM write other than UICR.APPROTECT=0x0000005A",
+    "plan does not preserve every unwritten UICR byte",
     "serial port identity is ambiguous",
     "any state-changing stage returns an indeterminate result"
   ],

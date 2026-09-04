@@ -60,6 +60,9 @@ const UART_TXD: usize = UART0_BASE + 0x51C;
 const UART_BAUDRATE: usize = UART0_BASE + 0x524;
 const UART_CONFIG: usize = UART0_BASE + 0x56C;
 
+const APPROTECT_DISABLE: usize = 0x4000_0558;
+const APPROTECT_SW_DISABLE: u32 = 0x5A;
+
 const LED1_PIN: u32 = 13;
 const UART_TX_PIN: u32 = 6;
 const PIN_DISCONNECTED: u32 = 0xFFFF_FFFF;
@@ -74,9 +77,16 @@ const BUILD_ID: &[u8] = concat!(
 .as_bytes();
 const HEARTBEAT: &[u8] = b"EAT_NRF52840_DK_HEARTBEAT\r\n";
 
+// nRF52840 Fxx and later need both this UICR value and the runtime write below
+// to keep development debug access available across resets.
+#[used]
+#[unsafe(link_section = ".uicr.approtect")]
+static UICR_APPROTECT_HW_DISABLED: u32 = 0x0000_005A;
+
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main() -> ! {
     unsafe {
+        mmio_write(APPROTECT_DISABLE, APPROTECT_SW_DISABLE);
         led_init();
         uart_init();
         uart_write(READY);

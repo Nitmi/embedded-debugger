@@ -36,7 +36,7 @@ satisfy every configured assertion, including zero observations for every
 forbidden complete line. A `VERIFICATION_FAILED` result still points to complete
 evidence; inspect it and do not retry automatically. The command
 performs one R1 reset-capture but never flashes, erases, recovers, accesses UICR,
-or creates a second monitor. Treat source-revision telemetry as source identity,
+or creates a second monitor. Treat source-manifest telemetry as source identity,
 not as cryptographic attestation of the final firmware artifact.
 
 ## OpenOCD and GDB host checks

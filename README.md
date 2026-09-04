@@ -1083,8 +1083,14 @@ that exact acceptance.
 dependency-free Rust firmware for closing the runtime-readiness gap. It toggles
 DK LED1 and emits one `EAT_NRF52840_DK_READY v1` line followed by repeated
 `EAT_NRF52840_DK_HEARTBEAT` lines through the DK virtual COM port at 115200 baud.
-Its PowerShell build produces an ELF, Intel HEX, and machine-readable artifact
-manifest beneath the ignored `target/firmware/nrf52840-dk-smoke` directory. The
+For development boards using nRF52840 Fxx-or-later silicon, it deliberately
+programs `UICR.APPROTECT=0x0000005A` and writes the matching software-disable
+register at the start of every boot so SWD remains available across resets.
+That debug-open policy is not suitable for production firmware. Its PowerShell
+build produces an ELF, Intel HEX, and machine-readable artifact manifest beneath
+the ignored `target/firmware/nrf52840-dk-smoke` directory. Its runtime build ID
+hashes a deterministic manifest of only the firmware inputs, while the manifest
+independently hashes the final ELF and HEX. The
 checked-in `test-contract.json` keeps flashing separately confirmation-gated,
 binds the qualified DK probe and serial identities, and requires exact
 zero-transmit serial observation. It is a fixture-specific acceptance contract:

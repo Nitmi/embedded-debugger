@@ -4,6 +4,7 @@ MEMORY
 {
   FLASH : ORIGIN = 0x00000000, LENGTH = 1024K
   RAM   : ORIGIN = 0x20000000, LENGTH = 256K
+  UICR  : ORIGIN = 0x10001000, LENGTH = 4K
 }
 
 SECTIONS
@@ -29,6 +30,11 @@ SECTIONS
     *(.bss .bss.*);
     *(COMMON);
   } > RAM
+
+  .uicr ORIGIN(UICR) + 0x208 : ALIGN(4)
+  {
+    KEEP(*(.uicr.approtect));
+  } > UICR
 
   /DISCARD/ :
   {
