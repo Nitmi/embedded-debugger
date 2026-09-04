@@ -410,6 +410,18 @@ use until halted-origin teardown can be guaranteed.
   merged affected erase range is `0x00000000 + 8192`. This planning step only
   enumerated the probe and did not attach, erase, program, reset, or create
   execution evidence.
+- The separately authorized, non-retried execution used that exact release,
+  firmware, selector, target, and digest. It failed during `session.attach` with
+  exit code 6, operation ID `op_e060effafa4d404bb128c72708b192e7`, and
+  `PROTOCOL_ERROR: probe-rs failed to attach target` whose underlying message
+  was `An ARM specific error occurred.` The service had not called its program
+  operation, so no planned sector erase, firmware write, verification, or
+  post-flash reset was performed and no evidence bundle was published.
+- A post-failure read-only enumeration still found J-Link
+  `1366:1061:001050275757` accessible. This proves USB probe visibility only;
+  target routing, target power/reference voltage, SWD continuity, protection
+  state, and onboard-device identity remain unresolved. The failure was not
+  retried and the DK sparse-HEX candidate remains unaccepted.
 
 ## MCP stdio smoke acceptance (2026-08-23)
 
