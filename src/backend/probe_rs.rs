@@ -90,6 +90,7 @@ impl ProbeRsBackend {
         let single_core = target.cores.len() == 1;
         let accepted_esp32s3_post_reset = target.name.eq_ignore_ascii_case("esp32s3");
         let accepted_esp32s3_segmented_flash = target.name.eq_ignore_ascii_case("esp32s3");
+        let nrf52840_code_hex_candidate = target.name.eq_ignore_ascii_case("nRF52840_xxAA");
         let accepted_esp32s3_memory_read = target.name.eq_ignore_ascii_case("esp32s3");
         let accepted_esp32s3_core_control = target.name.eq_ignore_ascii_case("esp32s3");
         let flash = !target.flash_algorithms.is_empty();
@@ -101,7 +102,15 @@ impl ProbeRsBackend {
         let capabilities = Capabilities {
             flash,
             // ESP32-S3 segmented programming passed target-specific acceptance.
-            segmented_flash: accepted_esp32s3_segmented_flash,
+            // nRF52840 enables a code-flash-only candidate so its sparse HEX
+            // path can undergo the same physical acceptance workflow.
+            segmented_flash: accepted_esp32s3_segmented_flash || nrf52840_code_hex_candidate,
+            // nRF52840 candidate execution is limited below to ordinary code
+            // flash; UICR remains under its independent non-boot NVM gate.
+            intel_hex_flash: nrf52840_code_hex_candidate,
+            // Non-boot NVM (for example nRF52 UICR) remains disabled even when
+            // ordinary code-flash acceptance is later enabled.
+            non_boot_nvm_flash: false,
             // ESP32-S3 reset and per-core restoration passed target-specific acceptance.
             multi_core_post_flash: accepted_esp32s3_post_reset,
             verify: flash,
@@ -485,6 +494,20 @@ impl DebugBackend for ProbeRsBackend {
         firmware_sha256: &str,
     ) -> Result<FlashReport> {
         validate_firmware_segments(segments)?;
+        if segments.iter().any(|segment| segment.info.kind == "uicr")
+            && !self.capabilities.non_boot_nvm_flash
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "non-boot NVM execution has not passed target-specific acceptance",
+                6,
+                json!({
+                    "backend": self.name(),
+                    "target": self.target_info.name,
+                    "capability": "non_boot_nvm_flash",
+                }),
+            ));
+        }
         if segments.len() > 1 && !self.capabilities.segmented_flash {
             return Err(DebugError::new(
                 ErrorCode::CapabilityUnavailable,
@@ -2505,6 +2528,17 @@ mod tests {
         assert_eq!(layout.erase_ranges[0].length, 0x1000);
         assert_eq!(layout.erase_ranges[1].start, Address(0x1000_1000));
         assert_eq!(layout.erase_ranges[1].length, 0x1000);
+    }
+
+    #[test]
+    fn nrf52840_candidate_accepts_code_hex_but_keeps_uicr_disabled() {
+        let backend = ProbeRsBackend::new("nRF52840_xxAA").unwrap();
+
+        assert!(backend.capabilities().flash);
+        assert!(backend.capabilities().segmented_flash);
+        assert!(backend.capabilities().intel_hex_flash);
+        assert!(!backend.capabilities().non_boot_nvm_flash);
+        assert_eq!(backend.target().core_count, 1);
     }
 
     #[test]

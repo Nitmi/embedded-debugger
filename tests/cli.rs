@@ -4870,6 +4870,57 @@ fn intel_hex_plan_is_normalized_and_execute_remains_blocked() {
 }
 
 #[test]
+fn intel_hex_execution_uses_independent_format_segment_and_non_boot_nvm_gates() {
+    let directory = tempdir().unwrap();
+    let firmware = directory.path().join("uicr.hex");
+    let fixture_path = directory.path().join("nrf52840.json");
+    fs::write(
+        &firmware,
+        ":020000041000EA\n:041000001122334442\n:00000001FF\n",
+    )
+    .unwrap();
+
+    let mut value: Value = serde_json::from_slice(&fs::read(fixture()).unwrap()).unwrap();
+    value["target"]["name"] = "nRF52840_xxAA".into();
+    value["target"]["architecture"] = "armv7em".into();
+    value["capabilities"]["intel_hex_flash"] = true.into();
+    value["capabilities"]["segmented_flash"] = true.into();
+    value["capabilities"]["non_boot_nvm_flash"] = false.into();
+    value["flash"]["base_address"] = "0x10001000".into();
+    value["flash"]["erase_ranges"] = serde_json::json!([{
+        "start": "0x10001000",
+        "length": 4096
+    }]);
+    fs::write(&fixture_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture_path.to_str().unwrap(),
+            "flash",
+            "plan",
+            firmware.to_str().unwrap(),
+            "--target",
+            "nRF52840_xxAA",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(plan["data"]["firmware"]["segments"][0]["kind"], "uicr");
+    assert_eq!(plan["data"]["execution"]["supported"], false);
+    assert_eq!(
+        plan["data"]["execution"]["blockers"][0]["code"],
+        "NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED"
+    );
+}
+
+#[test]
 fn idf_plan_exposes_normalized_segments_and_execution_blockers() {
     let directory = tempdir().unwrap();
     let firmware = directory.path().join("firmware.elf");

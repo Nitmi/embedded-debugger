@@ -374,6 +374,43 @@ running-origin implementation exercises with pre-attach safety rejection and
 post-read heartbeat recovery. They are now capability-gated for native one-shot
 use until halted-origin teardown can be guaranteed.
 
+## nRF52840 DK sparse Intel HEX candidate (2026-09-04)
+
+- The user reported that the nRF52840 DK routing jumpers were changed so the
+  onboard J-Link now selects the DK's onboard nRF52840 rather than the prior
+  external custom board. The exact J-Link selector is
+  `1366:1061:001050275757`; software enumeration alone does not prove the jumper
+  topology.
+- A 120-byte acceptance HEX with SHA-256
+  `3653e6dc49764e0897f9e59111dba0f0435caf6ef4892701451de7663e04be2f`
+  normalizes to two 16-byte code-Flash segments at `0x00000000` and
+  `0x00001000`. It contains no UICR, SoftDevice, bootloader, or business-data
+  segment and affects exactly the first two 4096-byte erase pages.
+- The prior release produced plan `plan_7417167073e68c15` and digest
+  `7417167073e68c15778a1062c33001b852455306d042b9644ff5a0ce67a1dc1c`,
+  but exact-confirmation execution was rejected before attach by the original
+  combined Intel HEX and segmented-image gates. No evidence file was created.
+- The candidate implementation now separates Intel HEX execution, segmented
+  programming, and non-boot NVM mutation. `nRF52840_xxAA` may proceed to a
+  separately confirmed code-Flash-only acceptance plan, while every UICR plan
+  remains blocked by `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` before attach.
+- Controlled Replay coverage proves the two-segment code-Flash path can plan,
+  program, independently verify both segments, reset, capture, restore, and
+  publish evidence while `non_boot_nvm_flash=false`. A separate UICR regression
+  proves that the non-boot gate remains closed. Physical DK execution and
+  preservation/recovery checks are still pending and no acceptance is claimed
+  yet.
+- The release candidate is 17,693,696 bytes with SHA-256
+  `a9cef79a5ca7e8bac86be7a681e837df26444a6b2d228401828df78d99d4741e`.
+  A read-only native plan selected the exact J-Link and canonical target,
+  returned `execution.supported=true`, and produced plan
+  `plan_1db582c27aa6875c` with confirmation digest
+  `1db582c27aa6875ca1ca2b5f19028e80240283bf2c0085778bef6f2090946089`.
+  Its exact write ranges are `0x00000000 + 16` and `0x00001000 + 16`; the
+  merged affected erase range is `0x00000000 + 8192`. This planning step only
+  enumerated the probe and did not attach, erase, program, reset, or create
+  execution evidence.
+
 ## MCP stdio smoke acceptance (2026-08-23)
 
 - The exact native ESP32-S3 USB-JTAG probe `303a:1001:E0:72:A1:D4:1F:DC` was

@@ -109,6 +109,16 @@ pub struct Capabilities {
     pub flash: bool,
     #[serde(default)]
     pub segmented_flash: bool,
+    /// Whether the backend has passed target-specific Intel HEX execution
+    /// acceptance. Planning can still parse HEX when this is false, but the
+    /// guarded execution path must remain blocked.
+    #[serde(default)]
+    pub intel_hex_flash: bool,
+    /// Whether non-boot NVM regions such as nRF52 UICR may be mutated by the
+    /// guarded flash workflow. This is deliberately independent from ordinary
+    /// code-flash and segmented-image acceptance.
+    #[serde(default)]
+    pub non_boot_nvm_flash: bool,
     #[serde(default)]
     pub multi_core_post_flash: bool,
     pub verify: bool,

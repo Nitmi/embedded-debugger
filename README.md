@@ -1066,9 +1066,14 @@ probe-rs planning accepts segments in readable nonvolatile regions, including
 nRF52 UICR, and reports the complete affected erase-sector set. The confirmation
 digest binds the original HEX hash and size, normalized segment addresses,
 lengths and hashes, erase impact, exact probe/target identity, policy, and
-execution blockers. Intel HEX execution is deliberately unavailable and reports
-`INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED` until target-specific sparse-flash and
-non-boot-NVM acceptance is completed.
+execution blockers. Intel HEX, segmented programming, and non-boot NVM writes
+have independent capability gates. The nRF52840 native backend currently exposes
+a code-Flash-only sparse Intel HEX acceptance candidate; a plan containing UICR
+still reports `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` and is rejected before
+attach. Other unaccepted targets report `INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED`
+or `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` as applicable. The nRF52840 candidate is
+not a physical qualification until its exact confirmed DK run, preservation
+checks, post-reset evidence, and recovery checks complete.
 
 ## ESP-IDF physical image planning
 
@@ -1095,12 +1100,12 @@ segment independently, and publish per-segment results in evidence. Replay
 exercises that full path with a single-core ESP32-C3 fixture and the complete
 multi-core evidence path with an ESP32-S3 fixture.
 
-Native execution remains target-gated. A probe-rs target must explicitly
-advertise `segmented_flash` only after physical acceptance, and multi-core
-targets also require a complete post-flash reset/snapshot/resume policy.
-ESP32-S3 has passed both gates on native USB-JTAG: its normalized ESP-IDF plan is
-executable after exact digest confirmation. Other targets continue to report
-explicit blockers until their own physical acceptance is complete.
+Native execution remains target-gated. Intel HEX parsing, segmented programming,
+non-boot NVM writes, and multi-core post-flash restoration are separate
+capabilities. ESP32-S3 has passed its segmented and multi-core gates on native
+USB-JTAG. nRF52840 now has a code-Flash-only Intel HEX candidate for the official
+DK acceptance flow; UICR remains disabled. Other targets continue to report
+explicit blockers until their own target-specific acceptance is complete.
 
 ## Design constraints
 

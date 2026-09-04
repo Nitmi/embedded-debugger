@@ -1312,10 +1312,10 @@ fn execution_readiness(
     }
 
     let mut blockers = Vec::new();
-    if is_intel_hex {
+    if is_intel_hex && !capabilities.intel_hex_flash {
         blockers.push(FlashExecutionBlocker {
             code: "INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED".to_string(),
-            message: "Intel HEX execution remains disabled until target-specific sparse flash and non-boot NVM acceptance is completed"
+            message: "Intel HEX execution remains disabled until target-specific code-flash acceptance is completed"
                 .to_string(),
         });
     }
@@ -1323,6 +1323,19 @@ fn execution_readiness(
         blockers.push(FlashExecutionBlocker {
             code: "SEGMENTED_FLASH_ACCEPTANCE_REQUIRED".to_string(),
             message: "the selected backend and target have not passed segmented flash execution acceptance"
+                .to_string(),
+        });
+    }
+    if is_intel_hex
+        && firmware
+            .segments
+            .iter()
+            .any(|segment| segment.kind == "uicr")
+        && !capabilities.non_boot_nvm_flash
+    {
+        blockers.push(FlashExecutionBlocker {
+            code: "NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED".to_string(),
+            message: "non-boot NVM execution remains disabled until target-specific UICR or other non-boot NVM acceptance is completed"
                 .to_string(),
         });
     }
@@ -2289,6 +2302,105 @@ mod tests {
             "MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED"
         );
         assert_ne!(first.confirm_digest, second.confirm_digest);
+    }
+
+    #[test]
+    fn accepted_hex_segmented_code_flash_can_execute_without_uicr_capability() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("dk-acceptance.hex");
+        let evidence = directory.path().join("run.evidence.json");
+        fs::write(
+            &firmware,
+            ":020000040000FA\n:100000000000042009000000FEE7000000000000DE\n:10100000A55AC33C9669F00F11224488DEADBEEFAD\n:00000001FF\n",
+        )
+        .unwrap();
+
+        let mut replay = fixture();
+        replay.target.name = "nRF52840_xxAA".to_string();
+        replay.target.architecture = "armv7em".to_string();
+        replay.capabilities.intel_hex_flash = true;
+        replay.capabilities.segmented_flash = true;
+        replay.capabilities.non_boot_nvm_flash = false;
+        replay.flash.base_address = Address(0);
+        replay.flash.erase_ranges = vec![FlashRange {
+            start: Address(0),
+            length: 0x2000,
+        }];
+
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+        let plan = service
+            .plan_flash_with_options(
+                &firmware,
+                Some("replay:stlink-v3:0039002A3432510433343034"),
+                Some("nRF52840_xxAA"),
+                &FirmwareInputOptions::default(),
+            )
+            .unwrap();
+
+        assert!(plan.execution.supported);
+        assert_eq!(plan.firmware.segments.len(), 2);
+        assert!(
+            plan.firmware
+                .segments
+                .iter()
+                .all(|segment| segment.kind == "data")
+        );
+
+        let result = service
+            .execute_flash_with_options(
+                &firmware,
+                Some("replay:stlink-v3:0039002A3432510433343034"),
+                Some("nRF52840_xxAA"),
+                &FirmwareInputOptions::default(),
+                &plan.confirm_digest,
+                &evidence,
+            )
+            .unwrap();
+
+        assert!(result.flash.verified);
+        assert_eq!(result.flash.segments.len(), 2);
+        assert!(result.flash.segments.iter().all(|segment| segment.verified));
+        assert!(evidence.exists());
+    }
+
+    #[test]
+    fn uicr_hex_execution_stays_blocked_without_non_boot_nvm_acceptance() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("uicr.hex");
+        fs::write(
+            &firmware,
+            ":020000041000EA\n:041000001122334442\n:00000001FF\n",
+        )
+        .unwrap();
+
+        let mut replay = fixture();
+        replay.target.name = "nRF52840_xxAA".to_string();
+        replay.target.architecture = "armv7em".to_string();
+        replay.capabilities.intel_hex_flash = true;
+        replay.capabilities.segmented_flash = true;
+        replay.capabilities.non_boot_nvm_flash = false;
+        replay.flash.base_address = Address(0x1000_1000);
+        replay.flash.erase_ranges = vec![FlashRange {
+            start: Address(0x1000_1000),
+            length: 0x1000,
+        }];
+
+        let service = DebugService::new(ReplayBackend::new(replay));
+        let plan = service
+            .plan_flash_with_options(
+                &firmware,
+                Some("replay:stlink-v3:0039002A3432510433343034"),
+                Some("nRF52840_xxAA"),
+                &FirmwareInputOptions::default(),
+            )
+            .unwrap();
+
+        assert!(!plan.execution.supported);
+        assert_eq!(plan.execution.blockers.len(), 1);
+        assert_eq!(
+            plan.execution.blockers[0].code,
+            "NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED"
+        );
     }
 
     #[test]

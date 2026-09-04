@@ -1111,8 +1111,11 @@ non-overlapping physical segments; sparse ranges remain separate. nRF52840
 segments wholly inside `0x10001000..0x10002000` are identified as `uicr`.
 Planning accepts readable nonvolatile target regions, including non-boot NVM
 such as UICR, and reports all affected erase sectors. Intel HEX execution
-remains blocked with `INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED` pending
-target-specific acceptance. The target-gated ESP-IDF path requires an explicit
+is independently gated by `capabilities.intel_hex_flash`; segmented execution
+also requires `capabilities.segmented_flash`. A segment identified as `uicr`
+additionally requires `capabilities.non_boot_nvm_flash`, otherwise the complete
+plan is blocked with `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` before attach.
+The target-gated ESP-IDF path requires an explicit
 `--format idf --flash-size <SIZE>` and rejects `--base-address`. An `.elf`
 extension is intentionally ambiguous and is never interpreted as ESP-IDF
 without that format selection.
@@ -1155,9 +1158,16 @@ physical address, length, SHA-256, and verification result. The service rejects
 backend reports whose aggregate bytes, source digest, segment manifest, or
 aggregate verification state differ from the confirmed firmware manifest.
 
-`capabilities.segmented_flash` and `capabilities.multi_core_post_flash` are
-false by default and may be advertised only after target-specific acceptance.
+`capabilities.intel_hex_flash`, `capabilities.segmented_flash`,
+`capabilities.non_boot_nvm_flash`, and `capabilities.multi_core_post_flash` are
+false by default and independently target-gated. Ordinary Intel HEX or
+segmented code-Flash acceptance never implies permission to mutate UICR or
+another non-boot NVM region.
 The native probe-rs ESP32-S3 target has passed both acceptance gates.
+A 2026-09-04 nRF52840 candidate enables Intel HEX and segmented execution only
+for ordinary code Flash so the official DK can perform a separately confirmed
+physical qualification. `non_boot_nvm_flash` remains false, so this candidate
+does not authorize UICR.
 A normalized plan reports
 `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` when that capability is absent. Multi-core
 targets report `MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED` until their backend can

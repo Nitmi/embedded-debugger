@@ -425,7 +425,7 @@ handshake; the rejected request was not forwarded.
 - Treat halt, run, step, continue, register reads, memory reads, and breakpoint changes as R1 reversible control, not side-effect-free inspection. Report the response `effects` and warnings.
 - Keep memory reads within the validated single-region limit of 4096 bytes. Do not turn an MMIO or cross-region request into a guessed read.
 - Breakpoint mutation requires a halted selected core. Preserve the complete before/after slot inventory and cleanup evidence.
-- Flashing is not exposed through the MCP session tool. Use the CLI `flash plan` first, require the exact confirmation digest for `flash execute`, and preserve the evidence path.
+- Flashing is not exposed through the MCP session tool. Use the CLI `flash plan` first, require the exact confirmation digest for `flash execute`, and preserve the evidence path. Treat Intel HEX, segmented programming, and non-boot NVM as independent gates; code-Flash acceptance never authorizes UICR, and any `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` blocker must stop before attach.
 - Treat `ok=true` as a completed operation, not proof that every target-side expectation was satisfied. Inspect `complete`, state fields, verification flags, and ordered operations.
 
 Read [mcp.md](references/mcp.md) for the MCP launch shape and request schema.

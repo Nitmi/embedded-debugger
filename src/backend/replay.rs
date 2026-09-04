@@ -165,6 +165,18 @@ impl ReplayFixture {
                 json!({"capability": "segmented_flash"}),
             ));
         }
+        if self.capabilities.intel_hex_flash && !self.capabilities.flash {
+            return Err(DebugError::fixture(
+                "Intel HEX flash capability requires base flash capability",
+                json!({"capability": "intel_hex_flash"}),
+            ));
+        }
+        if self.capabilities.non_boot_nvm_flash && !self.capabilities.intel_hex_flash {
+            return Err(DebugError::fixture(
+                "non-boot NVM flash capability requires Intel HEX flash capability",
+                json!({"capability": "non_boot_nvm_flash"}),
+            ));
+        }
         if !self.live_cores.is_empty()
             && let Err(problem) = validate_core_inventory(&self.target, &self.live_cores)
         {
@@ -720,6 +732,16 @@ impl DebugBackend for ReplayBackend {
     ) -> Result<FlashReport> {
         self.ensure_session(session)?;
         validate_firmware_segments(segments)?;
+        if segments.iter().any(|segment| segment.info.kind == "uicr")
+            && !self.fixture.capabilities.non_boot_nvm_flash
+        {
+            return Err(DebugError::new(
+                ErrorCode::CapabilityUnavailable,
+                "replay fixture does not advertise non-boot NVM flash capability",
+                6,
+                json!({"capability": "non_boot_nvm_flash"}),
+            ));
+        }
         if segments.len() > 1 && !self.fixture.capabilities.segmented_flash {
             return Err(DebugError::new(
                 ErrorCode::CapabilityUnavailable,

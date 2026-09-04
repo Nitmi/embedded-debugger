@@ -18,6 +18,8 @@
   "capabilities": {
     "flash": true,
     "segmented_flash": false,
+    "intel_hex_flash": false,
+    "non_boot_nvm_flash": false,
     "multi_core_post_flash": false,
     "verify": true,
     "halt": true,
