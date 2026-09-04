@@ -1124,6 +1124,17 @@ and its evidence file plus sibling artifact directory are never overwritten. A
 missing ready, build-identity, or heartbeat assertion, or an observed forbidden
 complete line, returns exit code 3 after publishing the complete failed report.
 
+On 2026-09-05, the exact DK fixture was provisioned once with Nordic `nrfjprog`
+using smoke HEX SHA-256
+`fc6b8364efdc30862fd9bc954bb8f29ed27934ce7a5fb32fc543bc0f84a4e953`,
+including only
+`UICR.APPROTECT=0x0000005A`. A fresh post-reset device query returned
+`NRF52840_xxAA_REV3`, and contract-driven native runtime acceptance then observed
+one READY line, one exact source-manifest identity, 62 complete heartbeats, zero
+forbidden lines, final CPU state `running`, and complete cleanup. This qualifies
+the fixture firmware and runtime contract; it does not enable
+`embedded-debugger`'s independent non-boot-NVM execution capability.
+
 ## ESP-IDF physical image planning
 
 An ESP-IDF application ELF can be normalized into its physical bootloader,

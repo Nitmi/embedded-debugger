@@ -48,14 +48,21 @@ range and effect, and provide the exact confirmation digest before execution.
 This image deliberately contains one non-boot-NVM word at `0x10001208`; the
 current native execution gate will report
 `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` and refuse to attach until the
-target-specific UICR workflow has passed acceptance.
+tool's target-specific UICR execution workflow has passed its own acceptance.
+
+The reference DK was provisioned on 2026-09-05 with HEX SHA-256
+`fc6b8364efdc30862fd9bc954bb8f29ed27934ce7a5fb32fc543bc0f84a4e953`.
+After reset, a fresh device query and the contract-driven native runtime test
+both succeeded. The latter observed one READY line, the exact build identity, 62
+complete HEARTBEAT lines, zero forbidden lines, and final CPU state `running`.
+This reference result does not lift the tool's separate UICR execution gate.
 
 `test-contract.json` records the bounded hardware-test contract qualified on the
 repository owner's DK fixture. In particular, it binds the exact J-Link, target,
 COM-port USB identity, runtime build line, and the only allowed UICR word;
-asserts DTR; keeps RTS false;
-transmits zero bytes; observes for 15 seconds; finds the READY line and at least
-three complete HEARTBEAT lines; and rejects configured fault or panic lines.
+asserts DTR; keeps RTS false; transmits zero bytes; observes for 15 seconds;
+finds the READY line and at least three complete HEARTBEAT lines; and rejects
+configured fault or panic lines.
 Any target mutation defaults to zero automatic retries. Replace every physical
 identity and the build line before reusing the contract for another board or
 newly flashed firmware.
