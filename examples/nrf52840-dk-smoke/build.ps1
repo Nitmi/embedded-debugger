@@ -11,7 +11,12 @@ try {
     if ($LASTEXITCODE -ne 0 -or $gitCommit -notmatch '^[0-9a-f]{40}$') {
         throw "unable to resolve the smoke firmware source commit"
     }
-    $dirtyTracked = (& git -C $crateRoot status --porcelain --untracked-files=no).Trim()
+    $dirtyTrackedRaw = & git -C $crateRoot status --porcelain --untracked-files=no
+    $dirtyTracked = if ($null -eq $dirtyTrackedRaw) {
+        ''
+    } else {
+        ($dirtyTrackedRaw -join "`n").Trim()
+    }
     $buildId = if ([string]::IsNullOrWhiteSpace($dirtyTracked)) {
         $gitCommit
     } else {
