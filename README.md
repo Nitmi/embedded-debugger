@@ -1067,13 +1067,26 @@ nRF52 UICR, and reports the complete affected erase-sector set. The confirmation
 digest binds the original HEX hash and size, normalized segment addresses,
 lengths and hashes, erase impact, exact probe/target identity, policy, and
 execution blockers. Intel HEX, segmented programming, and non-boot NVM writes
-have independent capability gates. The nRF52840 native backend currently exposes
-a code-Flash-only sparse Intel HEX acceptance candidate; a plan containing UICR
+have independent capability gates. The nRF52840 native backend has passed one
+exact-digest physical code-Flash-only sparse Intel HEX execution on an official
+DK; a plan containing UICR
 still reports `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` and is rejected before
 attach. Other unaccepted targets report `INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED`
-or `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` as applicable. The nRF52840 candidate is
-not a physical qualification until its exact confirmed DK run, preservation
-checks, post-reset evidence, and recovery checks complete.
+or `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` as applicable. The DK run verified both
+sparse segments and published complete post-reset evidence. Independent
+pre-existing-byte preservation and normal application readiness remain outside
+that exact acceptance.
+
+### Official DK smoke firmware
+
+[`examples/nrf52840-dk-smoke`](examples/nrf52840-dk-smoke) contains a standalone,
+dependency-free Rust firmware for closing the runtime-readiness gap. It toggles
+DK LED1 and emits one `EAT_NRF52840_DK_READY v1` line followed by repeated
+`EAT_NRF52840_DK_HEARTBEAT` lines through the DK virtual COM port at 115200 baud.
+Its PowerShell build produces an ELF, Intel HEX, and machine-readable artifact
+manifest beneath the ignored `target/firmware/nrf52840-dk-smoke` directory. The
+checked-in `test-contract.json` keeps flashing separately confirmation-gated and
+requires an exact zero-transmit serial identity before runtime observation.
 
 ## ESP-IDF physical image planning
 
@@ -1103,8 +1116,8 @@ multi-core evidence path with an ESP32-S3 fixture.
 Native execution remains target-gated. Intel HEX parsing, segmented programming,
 non-boot NVM writes, and multi-core post-flash restoration are separate
 capabilities. ESP32-S3 has passed its segmented and multi-core gates on native
-USB-JTAG. nRF52840 now has a code-Flash-only Intel HEX candidate for the official
-DK acceptance flow; UICR remains disabled. Other targets continue to report
+USB-JTAG. nRF52840 has passed one physical code-Flash-only sparse Intel HEX run
+on the official DK; UICR remains disabled. Other targets continue to report
 explicit blockers until their own target-specific acceptance is complete.
 
 ## Design constraints
@@ -1147,6 +1160,12 @@ write has passed exact-digest confirmation, read-back verification, unwritten
 byte preservation, reset/halt/snapshot/resume, complete evidence inspection,
 backup comparison, and serial runtime checks. The same preservation guarantees
 also passed for a 32-byte image crossing two adjacent 4 KiB pages. Physical
+code-Flash-only sparse Intel HEX execution has additionally passed on an
+official nRF52840 DK after an explicitly authorized access-protection recovery;
+both noncontiguous segments verified and complete post-reset evidence was
+published. Its intentionally minimal image reached an exception rather than a
+runtime-ready assertion, so that run does not qualify normal application boot.
+Physical
 probe removal returns stable unavailable errors without selecting another
 connected probe or creating evidence. ESP-IDF ELF normalization, segmented
 staging, per-segment verification, and single- and multi-core post-flash

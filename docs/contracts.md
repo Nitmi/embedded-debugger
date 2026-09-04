@@ -1164,10 +1164,13 @@ false by default and independently target-gated. Ordinary Intel HEX or
 segmented code-Flash acceptance never implies permission to mutate UICR or
 another non-boot NVM region.
 The native probe-rs ESP32-S3 target has passed both acceptance gates.
-A 2026-09-04 nRF52840 candidate enables Intel HEX and segmented execution only
-for ordinary code Flash so the official DK can perform a separately confirmed
-physical qualification. `non_boot_nvm_flash` remains false, so this candidate
-does not authorize UICR.
+On 2026-09-04, the nRF52840 target passed one separately confirmed physical
+Intel HEX and segmented execution on ordinary code Flash using the official DK.
+Both sparse segments verified and complete reset/halt/snapshot/resume evidence
+was published. That exact run followed a separately authorized access-protection
+recovery and did not independently prove preservation of pre-existing unwritten
+bytes or normal application readiness. `non_boot_nvm_flash` remains false, so
+this acceptance does not authorize UICR.
 A normalized plan reports
 `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` when that capability is absent. Multi-core
 targets report `MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED` until their backend can

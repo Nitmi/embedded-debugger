@@ -10,9 +10,17 @@ All notable changes to this project will be documented in this file.
   validation, sparse normalized segment manifests, overlap and address-overflow
   rejection, nRF52840 UICR labeling, readable non-boot NVM erase planning, and
   digest-bound execution gates. Intel HEX, segmented code Flash, and non-boot NVM
-  writes are now independent capabilities. The nRF52840 native backend exposes a
-  code-Flash-only sparse HEX acceptance candidate for the official DK while UICR
-  remains blocked by `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` before attach.
+  writes are now independent capabilities. The nRF52840 native backend passed a
+  separately confirmed physical code-Flash-only sparse HEX execution on the
+  official DK after an explicitly authorized access-protection recovery. Both
+  segments verified and complete post-reset evidence was published; normal
+  runtime readiness and independent preservation of pre-existing unwritten bytes
+  remain outside that exact run. UICR remains blocked by
+  `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` before attach.
+- A standalone dependency-free nRF52840 DK smoke firmware with a valid Cortex-M
+  vector table, active-low LED1 heartbeat, fixed 115200-baud virtual-COM READY and
+  HEARTBEAT records, reproducible ELF/Intel HEX build, artifact manifest, and
+  bounded machine-readable hardware-test contract.
 - Bounded `openocd inspect` host diagnostics with exact executable resolution,
   OpenOCD identity checking, a 100..=30000 ms version deadline, 64 KiB output
   limits, canonical top-level configuration/search paths, duplicate and `#`

@@ -374,13 +374,13 @@ running-origin implementation exercises with pre-attach safety rejection and
 post-read heartbeat recovery. They are now capability-gated for native one-shot
 use until halted-origin teardown can be guaranteed.
 
-## nRF52840 DK sparse Intel HEX candidate (2026-09-04)
+## nRF52840 DK sparse Intel HEX physical execution (2026-09-04)
 
-- The user reported that the nRF52840 DK routing jumpers were changed so the
-  onboard J-Link now selects the DK's onboard nRF52840 rather than the prior
-  external custom board. The exact J-Link selector is
-  `1366:1061:001050275757`; software enumeration alone does not prove the jumper
-  topology.
+- The fixture moved from an external custom board to the official DK's onboard
+  nRF52840. The exact J-Link selector is `1366:1061:001050275757`. Initial
+  software enumeration proved only USB probe visibility; the final run used the
+  DK after external SWD wiring was removed, the normal onboard-target jumper
+  configuration was restored, and the board was power-cycled.
 - A 120-byte acceptance HEX with SHA-256
   `3653e6dc49764e0897f9e59111dba0f0435caf6ef4892701451de7663e04be2f`
   normalizes to two 16-byte code-Flash segments at `0x00000000` and
@@ -397,9 +397,7 @@ use until halted-origin teardown can be guaranteed.
 - Controlled Replay coverage proves the two-segment code-Flash path can plan,
   program, independently verify both segments, reset, capture, restore, and
   publish evidence while `non_boot_nvm_flash=false`. A separate UICR regression
-  proves that the non-boot gate remains closed. Physical DK execution and
-  preservation/recovery checks are still pending and no acceptance is claimed
-  yet.
+  proves that the non-boot gate remains closed.
 - The release candidate is 17,693,696 bytes with SHA-256
   `a9cef79a5ca7e8bac86be7a681e837df26444a6b2d228401828df78d99d4741e`.
   A read-only native plan selected the exact J-Link and canonical target,
@@ -420,8 +418,46 @@ use until halted-origin teardown can be guaranteed.
 - A post-failure read-only enumeration still found J-Link
   `1366:1061:001050275757` accessible. This proves USB probe visibility only;
   target routing, target power/reference voltage, SWD continuity, protection
-  state, and onboard-device identity remain unresolved. The failure was not
-  retried and the DK sparse-HEX candidate remains unaccepted.
+  state, and onboard-device identity remained unresolved at that point. The
+  failure was not retried.
+- SEGGER-backed `nrfjprog 10.24.2` with J-Link DLL 9.24a enumerated serial
+  `1050275757`. A separately authorized one-shot `deviceversion` request then
+  reported `Access protection is enabled, can't read device version.` This
+  independently explained the probe-rs attach rejection without attributing it
+  to the sparse image or treating a process exit code as device acceptance.
+- The user explicitly authorized one destructive `nrfjprog --recover` for that
+  exact probe and accepted loss of user code and UICR. The command erased both
+  areas, wrote the access-protection-disable image, returned exit code 0, and was
+  not followed by an automatic flash. A fresh one-shot `deviceversion` then
+  identified `NRF52840_xxAA_REV3` at 1000 kHz, proving the onboard target was
+  accessible after recovery.
+- A post-recovery native `probes test` passed attach and disconnect on exact
+  selector `1366:1061:001050275757` and target `nRF52840_xxAA`. Operation
+  `op_15a78a7040fb44c3ad302d221b69d4f6` completed without a requested flash,
+  reset, execution continue, or memory read. Its effects still disclose that
+  probe-rs attach can modify volatile target control and breakpoint state.
+- A fresh read-only plan, operation `op_60bd913730b748f19ca19884b8bc6b0a`,
+  reproduced `plan_1db582c27aa6875c` and confirmation digest
+  `1db582c27aa6875ca1ca2b5f19028e80240283bf2c0085778bef6f2090946089`
+  because every digest-bound input remained identical. The earlier authorization
+  was not reused; the user supplied a new exact confirmation for one execution.
+- The separately confirmed physical execution passed under operation
+  `op_e04dbc9824524e50b3b836ab15ba777f` and session
+  `ses_3f1a7c5bf48543568ddd1e80f8841ac1`. It erased the affected 8192-byte range,
+  programmed 32 bytes across both sparse segments, independently verified both
+  segment hashes, performed the planned reset/halt/snapshot/resume sequence, and
+  disconnected cleanly. Evidence is 3,704 bytes with SHA-256
+  `f115ebda93363c59da06e007d28c3735ec7d05bb8039cd851f7828b1ad15a84a`
+  under
+  `target/hardware-acceptance/2026-09-04-nrf52840-dk-sparse-hex/flash-evidence-after-recover.jsonl`.
+- The snapshot reported `captured_state="halted"`, `state="running"`,
+  `halt_reason="exception"`, `pc=0x00000008`, `sp=0x20040000`, and
+  `lr=0xFFFFFFFF`. This qualifies the exact nRF52840 code-Flash-only sparse HEX
+  execution and evidence path, but it does not claim a normally booted
+  application. Because recovery erased the target before this run and there was
+  no independent pre/post full-page comparison, preservation of pre-existing
+  unwritten bytes also remains outside this exact acceptance. UICR execution
+  remains blocked by `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED`.
 
 ## MCP stdio smoke acceptance (2026-08-23)
 

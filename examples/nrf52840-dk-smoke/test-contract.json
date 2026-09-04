@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "name": "nrf52840-dk-smoke",
+  "board": "Nordic nRF52840 DK",
+  "target": "nRF52840_xxAA",
+  "firmware": {
+    "build_script": "build.ps1",
+    "format": "hex",
+    "allowed_code_flash": {
+      "start": "0x00000000",
+      "end_exclusive": "0x00100000"
+    },
+    "forbidden_non_boot_nvm": [
+      {
+        "name": "UICR",
+        "start": "0x10001000",
+        "end_exclusive": "0x10002000"
+      }
+    ]
+  },
+  "flash": {
+    "exact_probe_selector_required": true,
+    "exact_confirmation_digest_required": true,
+    "automatic_retries": 0
+  },
+  "serial": {
+    "exact_port_identity_required": true,
+    "baud": 115200,
+    "data_bits": 8,
+    "parity": "none",
+    "stop_bits": 1,
+    "flow_control": "none",
+    "dtr": true,
+    "rts": false,
+    "transmit_bytes": 0,
+    "observe_duration_seconds": 8,
+    "ready_line": "EAT_NRF52840_DK_READY v1",
+    "heartbeat_line": "EAT_NRF52840_DK_HEARTBEAT",
+    "minimum_complete_heartbeats": 3
+  },
+  "visual": {
+    "led": "LED1",
+    "pin": "P0.13",
+    "active_low": true,
+    "expected": "toggles repeatedly"
+  },
+  "abort_conditions": [
+    "probe identity differs",
+    "target differs",
+    "firmware hash differs from the reviewed plan",
+    "plan includes UICR or any non-boot NVM",
+    "serial port identity is ambiguous",
+    "any state-changing stage returns an indeterminate result"
+  ],
+  "cleanup": {
+    "close_serial_session": true,
+    "disconnect_debug_session": true,
+    "do_not_retry_state_changing_failures": true
+  }
+}
