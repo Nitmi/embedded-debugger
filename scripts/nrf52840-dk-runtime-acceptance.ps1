@@ -102,7 +102,8 @@ if ($baudListExit -ne 0 -or $serial.Count -ne 1) {
 $pnp = @(Get-CimInstance Win32_PnPEntity | Where-Object {
         $_.Name -match ('\(' + [regex]::Escape([string]$confirmation.serial.port) + '\)$')
     })
-if ($pnp.Count -ne 1 -or [string]$pnp[0].PNPDeviceID -notmatch ('&' + [regex]::Escape([string]$confirmation.serial.pnp_interface) + '&')) {
+$expectedPnpInterfacePattern = '&' + [regex]::Escape([string]$confirmation.serial.pnp_interface) + '(?:&|\\)'
+if ($pnp.Count -ne 1 -or [string]$pnp[0].PNPDeviceID -notmatch $expectedPnpInterfacePattern) {
     Fail "COM11 PnP interface is not the required $($confirmation.serial.pnp_interface)"
 }
 
