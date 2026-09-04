@@ -19,8 +19,9 @@ use uuid::Uuid;
 
 use crate::{
     backend::{
-        DebugBackend, checked_memory_read_end, firmware_flash_report, validate_firmware_segments,
-        validate_hardware_breakpoint_request,
+        DebugBackend, checked_memory_read_end, firmware_flash_report,
+        nrf52840_development_debug_authorized, validate_firmware_segments,
+        validate_hardware_breakpoint_request, validate_nrf52840_development_debug_erase_ranges,
     },
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
@@ -28,10 +29,11 @@ use crate::{
         Address, Capabilities, ContinueUntilHaltObservation, ContinueUntilHaltOptions,
         ContinueUntilHaltOutcome, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
         CoreSnapshot, CoreState, FirmwareImageOptions, FirmwareSegmentInfo, FlashLayout,
-        FlashRange, FlashReport, HardwareBreakpointAction, HardwareBreakpointObservation,
-        HardwareBreakpointSlot, MAX_REGISTER_READS, MemoryCoreObservation, MemoryReadRange,
-        MemoryReadResult, MemoryRegionInfo, MemoryRegionKind, PostFlashCoreObservation, ProbeInfo,
-        RegisterCoreObservation, RegisterKind, RegisterReading, SessionInfo, TargetInfo,
+        FlashPolicy, FlashRange, FlashReport, HardwareBreakpointAction,
+        HardwareBreakpointObservation, HardwareBreakpointSlot, MAX_REGISTER_READS,
+        MemoryCoreObservation, MemoryReadRange, MemoryReadResult, MemoryRegionInfo,
+        MemoryRegionKind, PostFlashCoreObservation, ProbeInfo, RegisterCoreObservation,
+        RegisterKind, RegisterReading, SessionInfo, TargetInfo,
         validate_continue_until_halt_observation, validate_continue_until_halt_options,
         validate_hardware_breakpoint_observation, validate_memory_read_range,
     },
@@ -492,10 +494,14 @@ impl DebugBackend for ProbeRsBackend {
         session: &SessionInfo,
         segments: &[FirmwareSegment],
         firmware_sha256: &str,
+        policy: &FlashPolicy,
     ) -> Result<FlashReport> {
         validate_firmware_segments(segments)?;
+        let development_debug_authorized =
+            nrf52840_development_debug_authorized(&self.target_info.name, segments, policy)?;
         if segments.iter().any(|segment| segment.info.kind == "uicr")
             && !self.capabilities.non_boot_nvm_flash
+            && !development_debug_authorized
         {
             return Err(DebugError::new(
                 ErrorCode::CapabilityUnavailable,
@@ -520,7 +526,7 @@ impl DebugBackend for ProbeRsBackend {
                 }),
             ));
         }
-        self.plan_segmented_flash_ranges(
+        let layout = self.plan_segmented_flash_ranges(
             &segments
                 .iter()
                 .map(|segment| FlashRange {
@@ -529,6 +535,9 @@ impl DebugBackend for ProbeRsBackend {
                 })
                 .collect::<Vec<_>>(),
         )?;
+        if development_debug_authorized {
+            validate_nrf52840_development_debug_erase_ranges(&layout.erase_ranges, policy)?;
+        }
 
         let active = self.ensure_session_mut(session)?;
         let mut loader = active.session.target().flash_loader();

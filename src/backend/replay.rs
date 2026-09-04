@@ -7,24 +7,25 @@ use uuid::Uuid;
 use crate::{
     SCHEMA_VERSION,
     backend::{
-        DebugBackend, checked_memory_read_end, firmware_flash_report, validate_firmware_segments,
-        validate_hardware_breakpoint_request,
+        DebugBackend, checked_memory_read_end, firmware_flash_report,
+        nrf52840_development_debug_authorized, validate_firmware_segments,
+        validate_hardware_breakpoint_request, validate_nrf52840_development_debug_erase_ranges,
     },
     error::{DebugError, ErrorCode, Result},
     firmware::FirmwareSegment,
     model::{
         Address, Capabilities, ContinueUntilHaltObservation, ContinueUntilHaltOptions,
         ContinueUntilHaltOutcome, CoreExecutionAction, CoreExecutionObservation, CoreObservation,
-        CoreSnapshot, CoreState, FirmwareSegmentInfo, FlashLayout, FlashRange, FlashReport,
-        HardwareBreakpointAction, HardwareBreakpointObservation, HardwareBreakpointSlot,
-        MAX_INLINE_MEMORY_READ_BYTES, MAX_REGISTER_READS, MemoryCoreObservation, MemoryReadRange,
-        MemoryReadResult, MemoryRegionInfo, MemoryRegionKind, PostFlashCoreObservation, ProbeInfo,
-        RegisterCoreObservation, RegisterReading, SessionInfo, TargetInfo,
-        validate_continue_until_halt_observation, validate_continue_until_halt_options,
-        validate_core_execution_observation, validate_core_inventory,
-        validate_hardware_breakpoint_observation, validate_memory_core_observation,
-        validate_memory_read_range, validate_post_flash_core_inventory,
-        validate_register_core_observation,
+        CoreSnapshot, CoreState, FirmwareSegmentInfo, FlashLayout, FlashPolicy, FlashRange,
+        FlashReport, HardwareBreakpointAction, HardwareBreakpointObservation,
+        HardwareBreakpointSlot, MAX_INLINE_MEMORY_READ_BYTES, MAX_REGISTER_READS,
+        MemoryCoreObservation, MemoryReadRange, MemoryReadResult, MemoryRegionInfo,
+        MemoryRegionKind, PostFlashCoreObservation, ProbeInfo, RegisterCoreObservation,
+        RegisterReading, SessionInfo, TargetInfo, validate_continue_until_halt_observation,
+        validate_continue_until_halt_options, validate_core_execution_observation,
+        validate_core_inventory, validate_hardware_breakpoint_observation,
+        validate_memory_core_observation, validate_memory_read_range,
+        validate_post_flash_core_inventory, validate_register_core_observation,
     },
 };
 
@@ -729,11 +730,15 @@ impl DebugBackend for ReplayBackend {
         session: &SessionInfo,
         segments: &[FirmwareSegment],
         firmware_sha256: &str,
+        policy: &FlashPolicy,
     ) -> Result<FlashReport> {
         self.ensure_session(session)?;
         validate_firmware_segments(segments)?;
+        let development_debug_authorized =
+            nrf52840_development_debug_authorized(&self.fixture.target.name, segments, policy)?;
         if segments.iter().any(|segment| segment.info.kind == "uicr")
             && !self.fixture.capabilities.non_boot_nvm_flash
+            && !development_debug_authorized
         {
             return Err(DebugError::new(
                 ErrorCode::CapabilityUnavailable,
@@ -750,7 +755,7 @@ impl DebugBackend for ReplayBackend {
                 json!({"capability": "segmented_flash"}),
             ));
         }
-        self.plan_segmented_flash_ranges(
+        let layout = self.plan_segmented_flash_ranges(
             &segments
                 .iter()
                 .map(|segment| FlashRange {
@@ -759,6 +764,9 @@ impl DebugBackend for ReplayBackend {
                 })
                 .collect::<Vec<_>>(),
         )?;
+        if development_debug_authorized {
+            validate_nrf52840_development_debug_erase_ranges(&layout.erase_ranges, policy)?;
+        }
         if segments[0].info.start != self.fixture.flash.base_address {
             return Err(DebugError::new(
                 ErrorCode::PlanStale,
@@ -1907,7 +1915,12 @@ mod tests {
         ];
 
         let staged = backend
-            .program(&session, &segments, &"11".repeat(32))
+            .program(
+                &session,
+                &segments,
+                &"11".repeat(32),
+                &FlashPolicy::default(),
+            )
             .unwrap();
         assert_eq!(staged.bytes_programmed, 15);
         assert_eq!(staged.segments.len(), 2);
@@ -1936,7 +1949,12 @@ mod tests {
         ];
 
         let error = backend
-            .program(&session, &segments, &"11".repeat(32))
+            .program(
+                &session,
+                &segments,
+                &"11".repeat(32),
+                &FlashPolicy::default(),
+            )
             .unwrap_err();
 
         assert_eq!(error.code, ErrorCode::CapabilityUnavailable);
@@ -2513,7 +2531,12 @@ mod tests {
             segment("application", base + 0x400, b"application"),
         ];
         backend
-            .program(&session, &segments, &"11".repeat(32))
+            .program(
+                &session,
+                &segments,
+                &"11".repeat(32),
+                &FlashPolicy::default(),
+            )
             .unwrap();
         let changed = [
             segment("bootloader", base, b"boot"),

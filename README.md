@@ -1069,13 +1069,36 @@ lengths and hashes, erase impact, exact probe/target identity, policy, and
 execution blockers. Intel HEX, segmented programming, and non-boot NVM writes
 have independent capability gates. The nRF52840 native backend has passed one
 exact-digest physical code-Flash-only sparse Intel HEX execution on an official
-DK; a plan containing UICR
-still reports `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` and is rejected before
-attach. Other unaccepted targets report `INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED`
-or `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` as applicable. The DK run verified both
-sparse segments and published complete post-reset evidence. Independent
-pre-existing-byte preservation and normal application readiness remain outside
-that exact acceptance.
+DK. By default, a plan containing UICR still reports
+`NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` and is rejected before attach.
+
+Development firmware may opt into one deliberately narrow exception:
+
+```console
+cargo run --release -- --backend probe-rs flash plan whole.hex \
+  --probe <vid:pid:serial> --target nRF52840_xxAA \
+  --allow-nrf52840-development-debug --json
+```
+
+The option is accepted only when the target is exactly `nRF52840_xxAA` and the
+normalized image contains at least one ordinary data segment wholly within
+`0x00000000..0x00100000` plus exactly one UICR segment: four bytes `5a000000`
+at `0x10001208`, representing `UICR.APPROTECT=0x0000005A`. The plan exposes the
+persistent security effect and allowed Code Flash range, requires the UICR erase
+impact to be exactly `0x10001000..0x10002000`, preserves all other UICR bytes,
+and binds the complete policy into `confirm_digest`. Supply the same option to
+`flash execute`; omitting it or using a digest from the default blocked plan
+fails before attach. Wrong targets, addresses, lengths, values, additional UICR
+bytes, non-Code-Flash data, broader UICR erase layouts, and arbitrary non-boot
+NVM remain rejected. This path has passed replay and CLI contract tests;
+physical probe-rs execution on the reference DK remains a separate confirmation
+and acceptance step.
+
+Other unaccepted targets report `INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED` or
+`SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` as applicable. The earlier DK code-Flash
+run verified both sparse segments and published complete post-reset evidence.
+Independent pre-existing-byte preservation and normal application readiness
+remain outside that exact acceptance.
 
 ### Official DK smoke firmware
 
@@ -1132,8 +1155,9 @@ including only
 `NRF52840_xxAA_REV3`, and contract-driven native runtime acceptance then observed
 one READY line, one exact source-manifest identity, 62 complete heartbeats, zero
 forbidden lines, final CPU state `running`, and complete cleanup. This qualifies
-the fixture firmware and runtime contract; it does not enable
-`embedded-debugger`'s independent non-boot-NVM execution capability.
+the fixture firmware and runtime contract. It does not enable arbitrary
+non-boot-NVM execution; the exact development-debug policy above is separately
+plan- and confirmation-bound.
 
 ## ESP-IDF physical image planning
 
@@ -1164,8 +1188,10 @@ Native execution remains target-gated. Intel HEX parsing, segmented programming,
 non-boot NVM writes, and multi-core post-flash restoration are separate
 capabilities. ESP32-S3 has passed its segmented and multi-core gates on native
 USB-JTAG. nRF52840 has passed one physical code-Flash-only sparse Intel HEX run
-on the official DK; UICR remains disabled. Other targets continue to report
-explicit blockers until their own target-specific acceptance is complete.
+on the official DK. Its generic UICR capability remains disabled; only the
+digest-bound exact development-debug exception described above can become
+executable. Other targets continue to report explicit blockers until their own
+target-specific acceptance is complete.
 
 ## Design constraints
 

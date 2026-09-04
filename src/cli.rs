@@ -30,7 +30,7 @@ use crate::{
         self, BaudCliDriver, DEFAULT_MINIMUM_HEARTBEATS, DEFAULT_RUNTIME_DURATION_SECONDS,
         DEFAULT_RUNTIME_MONITOR_STARTUP_DELAY_MS, RuntimeAcceptanceOptions,
     },
-    service::{DebugService, inspect_evidence},
+    service::{ConfirmedFlashOptions, DebugService, inspect_evidence},
     session, supervisor,
 };
 
@@ -957,6 +957,12 @@ pub struct FlashSelection {
         help = "ESP chip revision encoded as major * 100 + minor"
     )]
     pub chip_revision: Option<u16>,
+
+    #[arg(
+        long,
+        help = "allow only the exact nRF52840 UICR.APPROTECT=0x0000005A development-debug policy encoded in the confirmed plan"
+    )]
+    pub allow_nrf52840_development_debug: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -2457,11 +2463,13 @@ fn run_flash_plan<B: DebugBackend>(
     service: &DebugService<B>,
     selection: &FlashSelection,
 ) -> Result<CommandResult> {
-    let plan = service.plan_flash_with_options(
+    let policy = flash_policy(selection);
+    let plan = service.plan_flash_with_policy(
         &selection.firmware,
         selection.probe.as_deref(),
         selection.target.as_deref(),
         &firmware_options(selection),
+        &policy,
     )?;
     let human = format!(
         "Plan {}\nTarget: {}\nProbe: {}\nFirmware: {} source bytes, {} program bytes ({})\nWrite ranges: {}\nErase ranges: {}\nExecutable: {}\nRisk: {}\nConfirm: {}",
@@ -2492,13 +2500,18 @@ fn run_flash_execute<B: DebugBackend>(
     service: &mut DebugService<B>,
     arguments: &FlashExecute,
 ) -> Result<CommandResult> {
-    let result = service.execute_flash_with_options(
+    let policy = flash_policy(&arguments.selection);
+    let firmware = firmware_options(&arguments.selection);
+    let result = service.execute_flash_with_policy(
         &arguments.selection.firmware,
         arguments.selection.probe.as_deref(),
         arguments.selection.target.as_deref(),
-        &firmware_options(&arguments.selection),
-        &arguments.confirm,
-        &arguments.evidence,
+        ConfirmedFlashOptions {
+            firmware: &firmware,
+            policy: &policy,
+            confirm_digest: &arguments.confirm,
+            evidence_path: &arguments.evidence,
+        },
     )?;
     let human = format!(
         "Flashed and verified {} bytes\nTarget: {}\nSnapshot: {:?}, PC={}\nEvidence: {}",
@@ -2517,6 +2530,14 @@ fn firmware_options(selection: &FlashSelection) -> FirmwareInputOptions {
         base_address: selection.base_address,
         flash_size: selection.flash_size,
         chip_revision: selection.chip_revision,
+    }
+}
+
+fn flash_policy(selection: &FlashSelection) -> crate::model::FlashPolicy {
+    if selection.allow_nrf52840_development_debug {
+        crate::model::FlashPolicy::with_nrf52840_development_debug()
+    } else {
+        crate::model::FlashPolicy::default()
     }
 }
 

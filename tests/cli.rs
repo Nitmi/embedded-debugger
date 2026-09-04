@@ -5061,6 +5061,92 @@ fn intel_hex_execution_uses_independent_format_segment_and_non_boot_nvm_gates() 
 }
 
 #[test]
+fn nrf52840_development_debug_flag_accepts_only_the_digest_bound_approtect_policy() {
+    let directory = tempdir().unwrap();
+    let firmware = directory.path().join("development-debug.hex");
+    let fixture_path = directory.path().join("nrf52840.json");
+    fs::write(
+        &firmware,
+        ":020000040000FA\n:0400000001020304F2\n:020000041000EA\n:041208005A00000088\n:00000001FF\n",
+    )
+    .unwrap();
+
+    let mut value: Value = serde_json::from_slice(&fs::read(fixture()).unwrap()).unwrap();
+    value["target"]["name"] = "nRF52840_xxAA".into();
+    value["target"]["architecture"] = "armv7em".into();
+    value["capabilities"]["intel_hex_flash"] = true.into();
+    value["capabilities"]["segmented_flash"] = true.into();
+    value["capabilities"]["non_boot_nvm_flash"] = false.into();
+    value["flash"]["base_address"] = "0x00000000".into();
+    value["flash"]["erase_ranges"] = serde_json::json!([
+        {"start": "0x00000000", "length": 4096},
+        {"start": "0x10001000", "length": 4096}
+    ]);
+    fs::write(&fixture_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+    let default_output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture_path.to_str().unwrap(),
+            "flash",
+            "plan",
+            firmware.to_str().unwrap(),
+            "--target",
+            "nRF52840_xxAA",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_plan: Value = serde_json::from_slice(&default_output).unwrap();
+
+    let accepted_output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture_path.to_str().unwrap(),
+            "flash",
+            "plan",
+            firmware.to_str().unwrap(),
+            "--target",
+            "nRF52840_xxAA",
+            "--allow-nrf52840-development-debug",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let accepted_plan: Value = serde_json::from_slice(&accepted_output).unwrap();
+
+    assert_eq!(default_plan["data"]["execution"]["supported"], false);
+    assert_eq!(accepted_plan["data"]["execution"]["supported"], true);
+    assert_ne!(
+        default_plan["data"]["confirm_digest"],
+        accepted_plan["data"]["confirm_digest"]
+    );
+    assert_eq!(
+        accepted_plan["data"]["policy"]["nrf52840_development_debug"]["uicr_address"],
+        "0x10001208"
+    );
+    assert_eq!(
+        accepted_plan["data"]["policy"]["nrf52840_development_debug"]["little_endian_bytes"],
+        "5a000000"
+    );
+    assert!(
+        accepted_plan["data"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "program_nrf52840_uicr_approtect_hw_disabled")
+    );
+}
+
+#[test]
 fn idf_plan_exposes_normalized_segments_and_execution_blockers() {
     let directory = tempdir().unwrap();
     let firmware = directory.path().join("firmware.elf");

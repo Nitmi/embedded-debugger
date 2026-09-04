@@ -1294,6 +1294,23 @@ pub struct FlashPolicy {
     pub preserve_unwritten_bytes: bool,
     pub verify: bool,
     pub post_flash: String,
+    #[serde(default)]
+    pub nrf52840_development_debug: Option<Nrf52840DevelopmentDebugPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Nrf52840DevelopmentDebugPolicy {
+    pub operation: String,
+    pub target: String,
+    pub allowed_code_flash_range: FlashRange,
+    pub uicr_register: String,
+    pub uicr_address: Address,
+    pub uicr_value: String,
+    pub little_endian_bytes: String,
+    pub affected_erase_range: FlashRange,
+    pub unwritten_uicr_bytes_preserved: bool,
+    pub persistent_until_uicr_erase_or_rewrite: bool,
+    pub security_effect: String,
 }
 
 impl Default for FlashPolicy {
@@ -1303,6 +1320,36 @@ impl Default for FlashPolicy {
             preserve_unwritten_bytes: true,
             verify: true,
             post_flash: "reset_halt_snapshot_resume".to_string(),
+            nrf52840_development_debug: None,
+        }
+    }
+}
+
+impl FlashPolicy {
+    pub fn with_nrf52840_development_debug() -> Self {
+        Self {
+            nrf52840_development_debug: Some(Nrf52840DevelopmentDebugPolicy {
+                operation: "program_exact_approtect_hw_disabled".to_string(),
+                target: "nRF52840_xxAA".to_string(),
+                allowed_code_flash_range: FlashRange {
+                    start: Address(0),
+                    length: 0x10_0000,
+                },
+                uicr_register: "UICR.APPROTECT".to_string(),
+                uicr_address: Address(0x1000_1208),
+                uicr_value: "0x0000005A".to_string(),
+                little_endian_bytes: "5a000000".to_string(),
+                affected_erase_range: FlashRange {
+                    start: Address(0x1000_1000),
+                    length: 0x1000,
+                },
+                unwritten_uicr_bytes_preserved: true,
+                persistent_until_uicr_erase_or_rewrite: true,
+                security_effect:
+                    "keeps invasive debug access enabled across reset for development use"
+                        .to_string(),
+            }),
+            ..Self::default()
         }
     }
 }

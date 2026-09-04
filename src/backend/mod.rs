@@ -10,7 +10,7 @@ use crate::{
     model::{
         Address, Capabilities, ContinueUntilHaltObservation, ContinueUntilHaltOptions,
         CoreExecutionAction, CoreExecutionObservation, CoreObservation, CoreSnapshot,
-        FirmwareImageOptions, FlashLayout, FlashReport, FlashSegmentReport,
+        FirmwareImageOptions, FlashLayout, FlashPolicy, FlashReport, FlashSegmentReport,
         HardwareBreakpointAction, HardwareBreakpointObservation, MAX_INLINE_MEMORY_READ_BYTES,
         MemoryReadRange, MemoryReadResult, PostFlashCoreObservation, ProbeInfo,
         RegisterCoreObservation, SessionInfo, TargetInfo,
@@ -60,6 +60,7 @@ pub trait DebugBackend {
         session: &SessionInfo,
         segments: &[FirmwareSegment],
         firmware_sha256: &str,
+        policy: &FlashPolicy,
     ) -> Result<FlashReport>;
     fn verify(
         &mut self,
@@ -124,6 +125,95 @@ pub trait DebugBackend {
         range: &MemoryReadRange,
     ) -> Result<MemoryReadResult>;
     fn disconnect(&mut self, session: &SessionInfo) -> Result<()>;
+}
+
+pub(crate) fn nrf52840_development_debug_authorized(
+    target: &str,
+    segments: &[FirmwareSegment],
+    policy: &FlashPolicy,
+) -> Result<bool> {
+    let Some(requested) = &policy.nrf52840_development_debug else {
+        return Ok(false);
+    };
+    let uicr_segments = segments
+        .iter()
+        .filter(|segment| segment.info.kind == "uicr")
+        .collect::<Vec<_>>();
+    let expected = FlashPolicy::with_nrf52840_development_debug()
+        .nrf52840_development_debug
+        .expect("development-debug policy constructor always sets the policy");
+    let exact_payload = uicr_segments.len() == 1
+        && uicr_segments[0].info.start == expected.uicr_address
+        && uicr_segments[0].info.length == 4
+        && uicr_segments[0].data == [0x5a, 0x00, 0x00, 0x00];
+    let code_segments = segments
+        .iter()
+        .filter(|segment| segment.info.kind != "uicr")
+        .collect::<Vec<_>>();
+    let code_end =
+        expected.allowed_code_flash_range.start.0 + expected.allowed_code_flash_range.length;
+    let exact_code_scope = !code_segments.is_empty()
+        && code_segments.iter().all(|segment| {
+            segment.info.kind == "data"
+                && segment.info.start.0 >= expected.allowed_code_flash_range.start.0
+                && segment
+                    .info
+                    .start
+                    .0
+                    .checked_add(segment.info.length)
+                    .is_some_and(|end| end <= code_end)
+        });
+    if !target.eq_ignore_ascii_case(&expected.target)
+        || requested != &expected
+        || !exact_payload
+        || !exact_code_scope
+    {
+        return Err(DebugError::config(
+            "nRF52840 development-debug policy requires code Flash plus the exact UICR.APPROTECT HwDisabled payload",
+            serde_json::json!({
+                "requested_policy": requested,
+                "target": target,
+                "required_target": expected.target,
+                "required_code_flash_range": expected.allowed_code_flash_range,
+                "required_uicr_address": expected.uicr_address,
+                "required_uicr_length": 4,
+                "required_little_endian_bytes": expected.little_endian_bytes,
+                "observed_non_uicr_segments": code_segments.iter().map(|segment| &segment.info).collect::<Vec<_>>(),
+                "observed_uicr_segments": uicr_segments.iter().map(|segment| &segment.info).collect::<Vec<_>>(),
+            }),
+        ));
+    }
+    Ok(true)
+}
+
+pub(crate) fn validate_nrf52840_development_debug_erase_ranges(
+    erase_ranges: &[crate::model::FlashRange],
+    policy: &FlashPolicy,
+) -> Result<()> {
+    let Some(requested) = &policy.nrf52840_development_debug else {
+        return Ok(());
+    };
+    let expected = &requested.affected_erase_range;
+    let expected_end = expected.start.0 + expected.length;
+    let touching_uicr = erase_ranges
+        .iter()
+        .filter(|range| {
+            let end = range.start.0.saturating_add(range.length);
+            range.start.0 < expected_end && end > expected.start.0
+        })
+        .collect::<Vec<_>>();
+    if touching_uicr.as_slice() != [expected] {
+        return Err(DebugError::new(
+            ErrorCode::CapabilityUnavailable,
+            "backend erase layout does not exactly isolate the confirmed nRF52840 UICR page",
+            6,
+            serde_json::json!({
+                "required_uicr_erase_range": expected,
+                "observed_uicr_erase_ranges": touching_uicr,
+            }),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn checked_memory_read_end(start: Address, length: u64) -> Result<u64> {

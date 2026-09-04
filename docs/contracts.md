@@ -1160,6 +1160,16 @@ is independently gated by `capabilities.intel_hex_flash`; segmented execution
 also requires `capabilities.segmented_flash`. A segment identified as `uicr`
 additionally requires `capabilities.non_boot_nvm_flash`, otherwise the complete
 plan is blocked with `NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` before attach.
+The sole narrower exception is an explicit
+`--allow-nrf52840-development-debug` policy. It is valid only for target
+`nRF52840_xxAA`, at least one ordinary data segment wholly within its
+`0x00000000..0x00100000` Code Flash, and exactly one four-byte UICR segment at
+`0x10001208` containing `5a000000`. Its fixed allowed Code Flash range,
+register, value, UICR-page erase range, unwritten-byte preservation,
+persistence, and security effect are serialized into `policy` and therefore
+bound by `confirm_digest`. Service and backend independently validate the same
+contract. Any mismatch fails closed; the option does not set the generic
+non-boot-NVM capability.
 The target-gated ESP-IDF path requires an explicit
 `--format idf --flash-size <SIZE>` and rejects `--base-address`. An `.elf`
 extension is intentionally ambiguous and is never interpreted as ESP-IDF
@@ -1176,7 +1186,8 @@ A plan exposes:
   capacity, and chip revision for a generated image.
 - `ranges`: exact bytes supplied by the image.
 - `erase_ranges`: complete sectors affected by programming.
-- `policy`: erase mode, preservation, verification, and post-flash behavior.
+- `policy`: erase mode, preservation, verification, post-flash behavior, and
+  any exact target-specific persistent configuration exception.
 - `execution`: whether the current backend can execute the complete plan, plus
   stable blockers when it cannot.
 - `confirm_digest`: SHA-256 over backend, probe, target, source identity,
@@ -1215,7 +1226,10 @@ Both sparse segments verified and complete reset/halt/snapshot/resume evidence
 was published. That exact run followed a separately authorized access-protection
 recovery and did not independently prove preservation of pre-existing unwritten
 bytes or normal application readiness. `non_boot_nvm_flash` remains false, so
-this acceptance does not authorize UICR.
+this acceptance does not authorize arbitrary UICR. A later exact
+development-debug plan may bypass only this one blocker when its target,
+payload, erase isolation, policy, and confirmation all match; replay and CLI
+tests cover that narrow path, while physical acceptance remains separate.
 A normalized plan reports
 `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` when that capability is absent. Multi-core
 targets report `MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED` until their backend can

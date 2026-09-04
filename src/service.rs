@@ -12,7 +12,10 @@ use uuid::Uuid;
 
 use crate::{
     SCHEMA_VERSION,
-    backend::DebugBackend,
+    backend::{
+        DebugBackend, nrf52840_development_debug_authorized,
+        validate_nrf52840_development_debug_erase_ranges,
+    },
     error::{DebugError, ErrorCode, Result},
     firmware::{self, FirmwareFormat, FirmwareInputOptions},
     model::{
@@ -50,6 +53,13 @@ struct ConfirmationInput<'a> {
 
 pub struct DebugService<B: DebugBackend> {
     backend: B,
+}
+
+pub struct ConfirmedFlashOptions<'a> {
+    pub firmware: &'a FirmwareInputOptions,
+    pub policy: &'a FlashPolicy,
+    pub confirm_digest: &'a str,
+    pub evidence_path: &'a Path,
 }
 
 impl<B: DebugBackend> DebugService<B> {
@@ -862,6 +872,23 @@ impl<B: DebugBackend> DebugService<B> {
         target: Option<&str>,
         firmware_options: &FirmwareInputOptions,
     ) -> Result<FlashPlan> {
+        self.plan_flash_with_policy(
+            firmware_path,
+            probe_id,
+            target,
+            firmware_options,
+            &FlashPolicy::default(),
+        )
+    }
+
+    pub fn plan_flash_with_policy(
+        &self,
+        firmware_path: &Path,
+        probe_id: Option<&str>,
+        target: Option<&str>,
+        firmware_options: &FirmwareInputOptions,
+        policy: &FlashPolicy,
+    ) -> Result<FlashPlan> {
         let target_info = self.backend.target().clone();
         if let Some(requested) = target
             && !self.backend.matches_target(requested)
@@ -877,8 +904,15 @@ impl<B: DebugBackend> DebugService<B> {
             self.backend
                 .validate_firmware_image_options(image_options)?;
         }
+        let development_debug_authorized =
+            nrf52840_development_debug_authorized(&target_info.name, &firmware.segments, policy)?;
         let capabilities = self.backend.capabilities();
-        let execution = execution_readiness(&firmware.info, &target_info, capabilities);
+        let execution = execution_readiness(
+            &firmware.info,
+            &target_info,
+            capabilities,
+            development_debug_authorized,
+        );
         if firmware.info.format == FirmwareFormat::Bin.name() {
             require_guarded_flash_capabilities(self.backend.name(), &target_info, capabilities)?;
         } else {
@@ -898,6 +932,9 @@ impl<B: DebugBackend> DebugService<B> {
             self.backend
                 .plan_segmented_flash_ranges(&firmware.write_ranges())?
         };
+        if development_debug_authorized {
+            validate_nrf52840_development_debug_erase_ranges(&layout.erase_ranges, policy)?;
+        }
         if firmware.info.base_address.is_none() || layout.write_ranges.is_empty() {
             return Err(DebugError::new(
                 ErrorCode::Internal,
@@ -918,7 +955,6 @@ impl<B: DebugBackend> DebugService<B> {
                 }),
             ));
         }
-        let policy = FlashPolicy::default();
         let confirmation = ConfirmationInput {
             schema_version: SCHEMA_VERSION,
             operation: "flash.execute",
@@ -933,12 +969,54 @@ impl<B: DebugBackend> DebugService<B> {
             firmware_image_options: &firmware.info.image_options,
             ranges: &layout.write_ranges,
             erase_ranges: &layout.erase_ranges,
-            policy: &policy,
+            policy,
             execution: &execution,
         };
         let confirm_digest = sha256_bytes(
             &serde_json::to_vec(&confirmation).expect("confirmation input always serializes"),
         );
+        let mut actions = vec![
+            PlannedAction {
+                action: "attach_probe".to_string(),
+                risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            },
+            PlannedAction {
+                action: "erase_affected_sectors".to_string(),
+                risk: "R2_DEVICE_WRITE".to_string(),
+            },
+        ];
+        if development_debug_authorized {
+            actions.push(PlannedAction {
+                action: "program_nrf52840_uicr_approtect_hw_disabled".to_string(),
+                risk: "R2_PERSISTENT_SECURITY_CONFIGURATION".to_string(),
+            });
+        }
+        actions.extend([
+            PlannedAction {
+                action: "program_firmware".to_string(),
+                risk: "R2_DEVICE_WRITE".to_string(),
+            },
+            PlannedAction {
+                action: "verify_firmware".to_string(),
+                risk: "R0_READ_ONLY".to_string(),
+            },
+            PlannedAction {
+                action: "reset_and_halt_target".to_string(),
+                risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            },
+            PlannedAction {
+                action: "capture_core_snapshot".to_string(),
+                risk: "R0_READ_ONLY".to_string(),
+            },
+            PlannedAction {
+                action: "resume_target".to_string(),
+                risk: "R1_REVERSIBLE_CONTROL".to_string(),
+            },
+            PlannedAction {
+                action: "disconnect_probe".to_string(),
+                risk: "R0_READ_ONLY".to_string(),
+            },
+        ]);
         Ok(FlashPlan {
             plan_id: format!("plan_{}", &confirm_digest[..16]),
             risk: "R2_DEVICE_WRITE".to_string(),
@@ -948,42 +1026,9 @@ impl<B: DebugBackend> DebugService<B> {
             firmware: firmware.info,
             ranges: layout.write_ranges,
             erase_ranges: layout.erase_ranges,
-            policy,
+            policy: policy.clone(),
             execution,
-            actions: vec![
-                PlannedAction {
-                    action: "attach_probe".to_string(),
-                    risk: "R1_REVERSIBLE_CONTROL".to_string(),
-                },
-                PlannedAction {
-                    action: "erase_affected_sectors".to_string(),
-                    risk: "R2_DEVICE_WRITE".to_string(),
-                },
-                PlannedAction {
-                    action: "program_firmware".to_string(),
-                    risk: "R2_DEVICE_WRITE".to_string(),
-                },
-                PlannedAction {
-                    action: "verify_firmware".to_string(),
-                    risk: "R0_READ_ONLY".to_string(),
-                },
-                PlannedAction {
-                    action: "reset_and_halt_target".to_string(),
-                    risk: "R1_REVERSIBLE_CONTROL".to_string(),
-                },
-                PlannedAction {
-                    action: "capture_core_snapshot".to_string(),
-                    risk: "R0_READ_ONLY".to_string(),
-                },
-                PlannedAction {
-                    action: "resume_target".to_string(),
-                    risk: "R1_REVERSIBLE_CONTROL".to_string(),
-                },
-                PlannedAction {
-                    action: "disconnect_probe".to_string(),
-                    risk: "R0_READ_ONLY".to_string(),
-                },
-            ],
+            actions,
             confirm_digest,
         })
     }
@@ -1019,12 +1064,38 @@ impl<B: DebugBackend> DebugService<B> {
         confirm_digest: &str,
         evidence_path: &Path,
     ) -> Result<FlashExecution> {
-        let plan =
-            self.plan_flash_with_options(firmware_path, probe_id, target, firmware_options)?;
-        if plan.confirm_digest != confirm_digest {
+        let policy = FlashPolicy::default();
+        self.execute_flash_with_policy(
+            firmware_path,
+            probe_id,
+            target,
+            ConfirmedFlashOptions {
+                firmware: firmware_options,
+                policy: &policy,
+                confirm_digest,
+                evidence_path,
+            },
+        )
+    }
+
+    pub fn execute_flash_with_policy(
+        &mut self,
+        firmware_path: &Path,
+        probe_id: Option<&str>,
+        target: Option<&str>,
+        options: ConfirmedFlashOptions<'_>,
+    ) -> Result<FlashExecution> {
+        let plan = self.plan_flash_with_policy(
+            firmware_path,
+            probe_id,
+            target,
+            options.firmware,
+            options.policy,
+        )?;
+        if plan.confirm_digest != options.confirm_digest {
             return Err(DebugError::confirmation(
                 &plan.confirm_digest,
-                confirm_digest,
+                options.confirm_digest,
             ));
         }
         if !plan.execution.supported {
@@ -1043,9 +1114,9 @@ impl<B: DebugBackend> DebugService<B> {
                 }),
             ));
         }
-        let mut evidence_reservation = EvidenceReservation::new(evidence_path)?;
+        let mut evidence_reservation = EvidenceReservation::new(options.evidence_path)?;
 
-        let mut current = firmware::load(firmware_path, &plan.target.name, firmware_options)?;
+        let mut current = firmware::load(firmware_path, &plan.target.name, options.firmware)?;
         if current.info.format == FirmwareFormat::Bin.name() {
             current.bind_raw_segment(plan.ranges[0].start)?;
         }
@@ -1065,9 +1136,12 @@ impl<B: DebugBackend> DebugService<B> {
 
         let session = self.backend.attach(&plan.probe.id, &plan.target.name)?;
         let result = (|| {
-            let staged = self
-                .backend
-                .program(&session, &current.segments, &current.info.sha256)?;
+            let staged = self.backend.program(
+                &session,
+                &current.segments,
+                &current.info.sha256,
+                &plan.policy,
+            )?;
             validate_flash_report(&staged, &current.info)?;
             let flash = self
                 .backend
@@ -1304,6 +1378,7 @@ fn execution_readiness(
     firmware: &crate::model::FirmwareInfo,
     target: &crate::model::TargetInfo,
     capabilities: &crate::model::Capabilities,
+    development_debug_authorized: bool,
 ) -> FlashExecutionReadiness {
     let is_idf = firmware.format == FirmwareFormat::EspIdf.name();
     let is_intel_hex = firmware.format == FirmwareFormat::IntelHex.name();
@@ -1332,6 +1407,7 @@ fn execution_readiness(
             .iter()
             .any(|segment| segment.kind == "uicr")
         && !capabilities.non_boot_nvm_flash
+        && !development_debug_authorized
     {
         blockers.push(FlashExecutionBlocker {
             code: "NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED".to_string(),
@@ -2400,6 +2476,221 @@ mod tests {
         assert_eq!(
             plan.execution.blockers[0].code,
             "NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn exact_nrf52840_development_debug_policy_is_digest_bound_and_executable() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("development-debug.hex");
+        let evidence = directory.path().join("run.evidence.json");
+        fs::write(
+            &firmware,
+            ":020000040000FA\n:0400000001020304F2\n:020000041000EA\n:041208005A00000088\n:00000001FF\n",
+        )
+        .unwrap();
+
+        let mut replay = fixture();
+        replay.target.name = "nRF52840_xxAA".to_string();
+        replay.target.architecture = "armv7em".to_string();
+        replay.capabilities.intel_hex_flash = true;
+        replay.capabilities.segmented_flash = true;
+        replay.capabilities.non_boot_nvm_flash = false;
+        replay.flash.base_address = Address(0);
+        replay.flash.erase_ranges = vec![
+            FlashRange {
+                start: Address(0),
+                length: 0x1000,
+            },
+            FlashRange {
+                start: Address(0x1000_1000),
+                length: 0x1000,
+            },
+        ];
+
+        let mut service = DebugService::new(ReplayBackend::new(replay));
+        let default_plan = service
+            .plan_flash_with_options(
+                &firmware,
+                Some("replay:stlink-v3:0039002A3432510433343034"),
+                Some("nRF52840_xxAA"),
+                &FirmwareInputOptions::default(),
+            )
+            .unwrap();
+        let policy = FlashPolicy::with_nrf52840_development_debug();
+        let accepted_plan = service
+            .plan_flash_with_policy(
+                &firmware,
+                Some("replay:stlink-v3:0039002A3432510433343034"),
+                Some("nRF52840_xxAA"),
+                &FirmwareInputOptions::default(),
+                &policy,
+            )
+            .unwrap();
+
+        assert!(!default_plan.execution.supported);
+        assert!(accepted_plan.execution.supported);
+        assert_ne!(default_plan.confirm_digest, accepted_plan.confirm_digest);
+        assert_eq!(
+            accepted_plan
+                .policy
+                .nrf52840_development_debug
+                .as_ref()
+                .unwrap()
+                .uicr_address,
+            Address(0x1000_1208)
+        );
+        assert!(accepted_plan.actions.iter().any(|action| {
+            action.action == "program_nrf52840_uicr_approtect_hw_disabled"
+                && action.risk == "R2_PERSISTENT_SECURITY_CONFIGURATION"
+        }));
+
+        let stale = service
+            .execute_flash_with_policy(
+                &firmware,
+                Some("replay:stlink-v3:0039002A3432510433343034"),
+                Some("nRF52840_xxAA"),
+                ConfirmedFlashOptions {
+                    firmware: &FirmwareInputOptions::default(),
+                    policy: &policy,
+                    confirm_digest: &default_plan.confirm_digest,
+                    evidence_path: &evidence,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(stale.code, ErrorCode::ConfirmationMismatch);
+        assert!(!evidence.exists());
+
+        let result = service
+            .execute_flash_with_policy(
+                &firmware,
+                Some("replay:stlink-v3:0039002A3432510433343034"),
+                Some("nRF52840_xxAA"),
+                ConfirmedFlashOptions {
+                    firmware: &FirmwareInputOptions::default(),
+                    policy: &policy,
+                    confirm_digest: &accepted_plan.confirm_digest,
+                    evidence_path: &evidence,
+                },
+            )
+            .unwrap();
+
+        assert!(result.flash.verified);
+        assert_eq!(result.flash.segments.len(), 2);
+        assert_eq!(result.plan.policy, policy);
+        assert_eq!(result.evidence.path, evidence.display().to_string());
+    }
+
+    #[test]
+    fn nrf52840_development_debug_policy_rejects_any_other_uicr_value() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("wrong-uicr.hex");
+        fs::write(
+            &firmware,
+            ":020000040000FA\n:0400000001020304F2\n:020000041000EA\n:041208005B00000087\n:00000001FF\n",
+        )
+        .unwrap();
+
+        let mut replay = fixture();
+        replay.target.name = "nRF52840_xxAA".to_string();
+        replay.target.architecture = "armv7em".to_string();
+        replay.capabilities.intel_hex_flash = true;
+        replay.capabilities.segmented_flash = true;
+        replay.flash.base_address = Address(0);
+        let service = DebugService::new(ReplayBackend::new(replay));
+
+        let error = service
+            .plan_flash_with_policy(
+                &firmware,
+                None,
+                Some("nRF52840_xxAA"),
+                &FirmwareInputOptions::default(),
+                &FlashPolicy::with_nrf52840_development_debug(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(error.details["required_uicr_address"], "0x10001208");
+        assert_eq!(error.details["required_little_endian_bytes"], "5a000000");
+    }
+
+    #[test]
+    fn nrf52840_development_debug_policy_rejects_a_broader_uicr_erase_layout() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("development-debug.hex");
+        fs::write(
+            &firmware,
+            ":020000040000FA\n:0400000001020304F2\n:020000041000EA\n:041208005A00000088\n:00000001FF\n",
+        )
+        .unwrap();
+
+        let mut replay = fixture();
+        replay.target.name = "nRF52840_xxAA".to_string();
+        replay.target.architecture = "armv7em".to_string();
+        replay.capabilities.intel_hex_flash = true;
+        replay.capabilities.segmented_flash = true;
+        replay.flash.base_address = Address(0);
+        replay.flash.erase_ranges = vec![
+            FlashRange {
+                start: Address(0),
+                length: 0x1000,
+            },
+            FlashRange {
+                start: Address(0x1000_1000),
+                length: 0x2000,
+            },
+        ];
+        let service = DebugService::new(ReplayBackend::new(replay));
+
+        let error = service
+            .plan_flash_with_policy(
+                &firmware,
+                None,
+                Some("nRF52840_xxAA"),
+                &FirmwareInputOptions::default(),
+                &FlashPolicy::with_nrf52840_development_debug(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CapabilityUnavailable);
+        assert_eq!(
+            error.details["required_uicr_erase_range"]["start"],
+            "0x10001000"
+        );
+    }
+
+    #[test]
+    fn nrf52840_development_debug_policy_rejects_extra_non_boot_nvm() {
+        let directory = tempdir().unwrap();
+        let firmware = directory.path().join("extra-nvm.hex");
+        fs::write(
+            &firmware,
+            ":020000040000FA\n:0400000001020304F2\n:020000041000EA\n:041208005A00000088\n:040000001122334452\n:00000001FF\n",
+        )
+        .unwrap();
+
+        let mut replay = fixture();
+        replay.target.name = "nRF52840_xxAA".to_string();
+        replay.target.architecture = "armv7em".to_string();
+        replay.capabilities.intel_hex_flash = true;
+        replay.capabilities.segmented_flash = true;
+        replay.flash.base_address = Address(0);
+        let service = DebugService::new(ReplayBackend::new(replay));
+
+        let error = service
+            .plan_flash_with_policy(
+                &firmware,
+                None,
+                Some("nRF52840_xxAA"),
+                &FirmwareInputOptions::default(),
+                &FlashPolicy::with_nrf52840_development_debug(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert_eq!(
+            error.details["required_code_flash_range"]["length"],
+            0x10_0000
         );
     }
 

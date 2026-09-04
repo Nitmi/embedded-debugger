@@ -46,16 +46,34 @@ also writes a machine-readable artifact `manifest.json`. Flashing is a separate
 guarded operation: generate a fresh `embedded-debugger flash plan`, review every
 range and effect, and provide the exact confirmation digest before execution.
 This image deliberately contains one non-boot-NVM word at `0x10001208`; the
-current native execution gate will report
-`NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` and refuse to attach until the
-tool's target-specific UICR execution workflow has passed its own acceptance.
+default native execution gate reports
+`NON_BOOT_NVM_EXECUTION_ACCEPTANCE_REQUIRED` and refuses to attach. The explicit
+`--allow-nrf52840-development-debug` policy removes that blocker only for this
+exact target, Code Flash range, address, four-byte value, isolated UICR-page
+erase impact, and unwritten-byte preservation contract. The policy and its
+persistent security effect are included in the confirmation digest. It has
+passed replay contract tests; a real DK execution still requires a fresh plan
+and confirmation.
+
+Generate the development-debug plan with:
+
+```powershell
+embedded-debugger --backend probe-rs flash plan `
+  .\target\firmware\nrf52840-dk-smoke\nrf52840-dk-smoke.hex `
+  --probe 1366:1061:<serial> --target nRF52840_xxAA `
+  --allow-nrf52840-development-debug --json
+```
+
+Use the identical flag and selections for `flash execute`; a digest produced
+without the flag is intentionally stale for the enabled policy.
 
 The reference DK was provisioned on 2026-09-05 with HEX SHA-256
 `fc6b8364efdc30862fd9bc954bb8f29ed27934ce7a5fb32fc543bc0f84a4e953`.
 After reset, a fresh device query and the contract-driven native runtime test
 both succeeded. The latter observed one READY line, the exact build identity, 62
 complete HEARTBEAT lines, zero forbidden lines, and final CPU state `running`.
-This reference result does not lift the tool's separate UICR execution gate.
+This reference result does not authorize a later tool execution or any broader
+UICR write.
 
 `test-contract.json` records the bounded hardware-test contract qualified on the
 repository owner's DK fixture. In particular, it binds the exact J-Link, target,
