@@ -6,8 +6,14 @@ for the official nRF52840 DK without enabling UICR or access protection.
 It performs two observable actions after reset:
 
 - toggles LED1 on P0.13 (active low);
-- sends `EAT_NRF52840_DK_READY v1` once and
+- sends `EAT_NRF52840_DK_READY v1` once,
+  `EAT_NRF52840_DK_BUILD_ID v1 <git-commit>` once, then
   `EAT_NRF52840_DK_HEARTBEAT` repeatedly through UART0 TX on P0.06.
+
+The build ID is bound to the smoke firmware source commit (and gains a
+`-dirty` suffix when tracked source changes are present). It is useful for
+runtime source-version correlation, but is not a cryptographic attestation of
+the final ELF/HEX bytes.
 
 The DK interface MCU routes the application UART to USB Serial Port 0. Observe
 it at 115200 baud, 8 data bits, no parity, one stop bit, and no flow control.
