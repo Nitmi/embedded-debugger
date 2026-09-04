@@ -159,8 +159,8 @@ finally {
     $monitorProcess.WaitForExit()
 }
 
-$monitorExit = $monitorProcess.ExitCode
 $monitorResult = Get-Content -LiteralPath $monitorStdoutPath -Raw | ConvertFrom-Json
+$monitorExit = [int]$monitorResult.exit_code
 $debuggerResultRaw = Get-Content -LiteralPath $debuggerStdoutPath -Raw
 try {
     $debuggerResult = $debuggerResultRaw | ConvertFrom-Json
@@ -171,7 +171,23 @@ try {
         raw_output = $debuggerResultRaw
     }
 }
-$text = [string]$monitorResult.steps[0].text
+$eventTexts = @()
+if ($monitorResult.events_file -and (Test-Path -LiteralPath ([string]$monitorResult.events_file))) {
+    foreach ($eventLine in (Get-Content -LiteralPath ([string]$monitorResult.events_file))) {
+        if ([string]::IsNullOrWhiteSpace($eventLine)) {
+            continue
+        }
+        $event = $eventLine | ConvertFrom-Json
+        if ([string]$event.type -eq 'recv') {
+            $eventTexts += [string]$event.text
+        }
+    }
+}
+if ($eventTexts.Count -gt 0) {
+    $text = [string]::Join('', $eventTexts)
+} else {
+    $text = [string]$monitorResult.steps[0].text
+}
 $lines = $text -split "`r?`n"
 $readyCount = @($lines | Where-Object { $_ -ceq [string]$confirmation.assertions.ready_line }).Count
 $heartbeatCount = @($lines | Where-Object { $_ -ceq [string]$confirmation.assertions.heartbeat_line }).Count
