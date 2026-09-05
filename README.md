@@ -6,6 +6,10 @@ use the same versioned domain contract.
 
 ## Install the CLI
 
+For a precompiled Windows x64 candidate, see the
+[binary package guide](docs/binary-release.md). Its build and verify commands
+produce a separate CLI archive; the toolkit plugin remains independently installed.
+
 From a trusted source checkout with Rust 1.89 or newer and a working native
 build toolchain:
 

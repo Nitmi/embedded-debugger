@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Windows x64 CLI candidate packaging with a pinned clean source revision,
+  Cargo-reported release artifact, locked dependency inventory, fixed ZIP
+  metadata, SHA-256 sidecar, and host-only archive verification. No hardware,
+  installation, plugin activation, or public-release action is performed.
+
 ## 0.2.0 - 2026-09-06
 
 ### Added

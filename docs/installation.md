@@ -1,5 +1,9 @@
 # Local CLI installation
 
+For a precompiled Windows x64 candidate without Rust, use the
+[binary package workflow](binary-release.md). Do not extract it over a
+Cargo-managed installation; keep source and archive installation paths distinct.
+
 ## Install from a trusted checkout
 
 Use Rust 1.89 or newer and the native compiler/linker prerequisites needed to

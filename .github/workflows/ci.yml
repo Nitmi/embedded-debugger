@@ -27,6 +27,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test native package tooling
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
@@ -44,4 +49,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo package --locked
-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build Windows CLI candidate
+        run: python scripts/package_binary.py build --output-dir target/binary-dist --json
+      - name: Verify and smoke test extracted candidate
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem -LiteralPath target/binary-dist -Filter '*.zip')
+          if ($archives.Count -ne 1) { throw 'Expected one CLI archive' }
+          $archive = $archives[0].FullName
+          python scripts/package_binary.py verify $archive --checksum "$archive.sha256" --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $destination = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $executables = @(Get-ChildItem -LiteralPath $destination -Filter embedded-debugger.exe -Recurse)
+          if ($executables.Count -ne 1) { throw 'Expected one extracted executable' }
+          & $executables[0].FullName --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $executables[0].FullName runtime --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: embedded-debugger-windows-x64-candidate
+          path: target/binary-dist/*

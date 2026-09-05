@@ -3,4 +3,5 @@
 /.vscode/
 *.tmp
 *.evidence.json
-
+__pycache__/
+/.ruff_cache/
