@@ -2054,3 +2054,46 @@ authority is spent.
   cleanup path on this DK. It does not authorize another flash, prove the
   physical RESET button routing, or turn source revision telemetry into signed
   firmware attestation.
+
+## Native nRF52840 development-debug flash (2026-09-05)
+
+- The user confirmed digest
+  `a67402e7e71b054e5598195f44056b4afaec17130814baa283963ade58bc43f2`
+  for exactly one execution, with no retry. The official DK onboard target was
+  selected using J-Link `1366:1061:001050275757` and `nRF52840_xxAA`.
+- Implementation commit `8c3c4ac1f85d08b2d8316190ba4068d0be9b1199` supplied
+  the release executable with SHA-256
+  `ce2659dd6ddcd50caa79fab4efd2f6d9ee0e84a0bb8367f70fa984f6929a7914`.
+  Its hash and the smoke HEX hash
+  `fc6b8364efdc30862fd9bc954bb8f29ed27934ce7a5fb32fc543bc0f84a4e953`
+  were rechecked immediately before execution. No competing debugger process
+  was observed.
+- One `flash execute --allow-nrf52840-development-debug` completed with exit
+  code 0 and `ok=true`. The recomputed plan matched the approved digest. Its
+  write ranges were code `0x00000000 + 661` and UICR `0x10001208 + 4`, with
+  exactly `5a000000` at `UICR.APPROTECT`. The affected erase ranges were
+  `0x00000000 + 4096` and `0x10001000 + 4096`; Code Flash at and above
+  `0x00001000` was outside that erase plan.
+- Both segments independently reported `verified=true`, with 665 total image
+  bytes programmed. The code payload SHA-256 was
+  `b8b9270e97f93c7d2561df18e92a61cebe5497af464d94142404851051119f46`;
+  the UICR payload SHA-256 was
+  `a962c99ae0666415e78efb96bab1039f404abe9f9be88e317ee7e4c473dfaa32`.
+- The single-core reset snapshot captured `PC=0x00000100`, `SP=0x20040000`,
+  and `LR=0xFFFFFFFF` while halted, then reported the core restored to
+  `running`. All eight operations, through `session.disconnect`, completed.
+  No debugger process remained after command exit. There was no additional
+  target command, automatic retry, external recovery, or serial/BLE operation.
+- Complete evidence was captured at `2026-09-05T07:29:38.828Z` in
+  `target/hardware-acceptance/2026-09-05-nrf52840-development-debug/flash.evidence.json`.
+  Its 4,430-byte size and SHA-256
+  `bcbfcdd8810f0c867db3c21da736451e69060a3cf90868192e80c1534e6d5b18`
+  independently matched the returned artifact reference. The directory also
+  contains the structured command result and an empty stderr log.
+- This accepts the exact smoke image and development-debug policy on that DK.
+  `non_boot_nvm_flash` remains false. The preservation fields describe the
+  confirmed loader policy; no separate before/after comparison proves the
+  retained Code Flash or UICR bytes. Running was observed before disconnect;
+  subsequent firmware readiness or post-disconnect debug access was not
+  sampled in this execution. Earlier runtime-contract evidence must not be
+  presented as a fresh serial acceptance of this flash.

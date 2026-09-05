@@ -52,10 +52,13 @@ default native execution gate reports
 exact target, Code Flash range, address, four-byte value, isolated UICR-page
 erase impact, and unwritten-byte preservation contract. The policy and its
 persistent security effect are included in the confirmation digest. It has
-passed replay contract tests; a real DK execution still requires a fresh plan
-and confirmation.
+passed replay contract tests and one separately confirmed physical probe-rs
+execution on the reference DK on 2026-09-05. That execution verified both image
+segments, captured PC/SP/LR after reset, restored running, and disconnected.
+Preservation of bytes outside the image was requested by the loader policy but
+was not independently compared before and after this run.
 
-Generate the development-debug plan with:
+From the repository root, generate the development-debug plan with:
 
 ```powershell
 embedded-debugger --backend probe-rs flash plan `

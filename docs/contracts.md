@@ -1228,8 +1228,13 @@ recovery and did not independently prove preservation of pre-existing unwritten
 bytes or normal application readiness. `non_boot_nvm_flash` remains false, so
 this acceptance does not authorize arbitrary UICR. A later exact
 development-debug plan may bypass only this one blocker when its target,
-payload, erase isolation, policy, and confirmation all match; replay and CLI
-tests cover that narrow path, while physical acceptance remains separate.
+payload, erase isolation, policy, and confirmation all match. Replay and CLI
+tests cover that narrow path. On 2026-09-05, one separately confirmed probe-rs
+execution on J-Link `1366:1061:001050275757` verified the 661-byte smoke code
+segment and exact four-byte APPROTECT word, completed reset/halt/snapshot/resume,
+and disconnected. This qualifies that exact image and policy; independent
+before/after preservation comparison and subsequent serial readiness were not
+part of that run. The generic `non_boot_nvm_flash` capability remains false.
 A normalized plan reports
 `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` when that capability is absent. Multi-core
 targets report `MULTI_CORE_POST_FLASH_POLICY_UNVERIFIED` until their backend can

@@ -1090,9 +1090,12 @@ and binds the complete policy into `confirm_digest`. Supply the same option to
 `flash execute`; omitting it or using a digest from the default blocked plan
 fails before attach. Wrong targets, addresses, lengths, values, additional UICR
 bytes, non-Code-Flash data, broader UICR erase layouts, and arbitrary non-boot
-NVM remain rejected. This path has passed replay and CLI contract tests;
-physical probe-rs execution on the reference DK remains a separate confirmation
-and acceptance step.
+NVM remain rejected. This path has passed replay and CLI contract tests and one
+separately confirmed physical probe-rs execution on the reference DK on
+2026-09-05. Both the 661-byte code segment and four-byte APPROTECT word verified;
+the reset snapshot restored the core to running and the session disconnected.
+That run did not independently compare preserved bytes or observe serial
+readiness. See [the acceptance record](docs/hardware-acceptance.md#native-nrf52840-development-debug-flash-2026-09-05).
 
 Other unaccepted targets report `INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED` or
 `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` as applicable. The earlier DK code-Flash
@@ -1320,7 +1323,7 @@ breakpoints, persistent OpenOCD breakpoints, breakpoint-hit execution,
 write-only or persistent watchpoints,
 asynchronous request cancellation, durable crash recovery,
 multi-client arbitration, other physically accepted native segmented targets,
-and non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD
+and arbitrary non-boot NVM writes are not yet exposed. A separate fixed direct-OpenOCD
 `running -> halted -> running` command now passes controlled process/Tcl
 regressions and exact-digest physical acceptance on ESP32-S3 CPU0; it does not
 expose general execution control. A separate fixed global-reset and
