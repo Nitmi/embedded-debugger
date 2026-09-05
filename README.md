@@ -4,6 +4,26 @@
 debugging. It is CLI-first: humans, scripts, CI, Skills, and MCP clients will all
 use the same versioned domain contract.
 
+## Install the CLI
+
+From a trusted source checkout with Rust 1.89 or newer and a working native
+build toolchain:
+
+```console
+cargo install --path . --locked --bin embedded-debugger
+embedded-debugger --version
+embedded-debugger runtime --help
+```
+
+Add `--offline` when all locked dependencies are already cached. Cargo installs
+a release executable into its installation `bin` directory, normally
+`~/.cargo/bin`, which must be on `PATH`. The installed command does not depend
+on this checkout's `target/release` directory. Installation and these version/help
+checks do not access hardware. See [installation and upgrades](docs/installation.md)
+for host verification, existing installations, and rollback considerations.
+
+## Backend milestones
+
 The current milestone implements the contract, a deterministic Replay backend,
 and a native probe-rs guarded flash workflow:
 
