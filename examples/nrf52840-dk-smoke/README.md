@@ -78,6 +78,15 @@ complete HEARTBEAT lines, zero forbidden lines, and final CPU state `running`.
 This reference result does not authorize a later tool execution or any broader
 UICR write.
 
+A fresh contract-driven runtime acceptance also passed after the separately
+confirmed native development-debug flash on the same date. It reattached
+without recovery, observed READY and the expected build line once each, and
+received 62 complete heartbeats (60 after READY), with no configured fault or
+panic lines. The final partial `E` was excluded from assertions. The core was
+restored to running, the debug session disconnected, and the serial process
+exited. This closes the native flash-to-runtime path for this fixture; see the
+[post-flash runtime record](../../docs/hardware-acceptance.md#native-development-debug-post-flash-runtime-2026-09-05).
+
 `test-contract.json` records the bounded hardware-test contract qualified on the
 repository owner's DK fixture. In particular, it binds the exact J-Link, target,
 COM-port USB identity, runtime build line, and the only allowed UICR word;

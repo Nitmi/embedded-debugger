@@ -1094,8 +1094,11 @@ NVM remain rejected. This path has passed replay and CLI contract tests and one
 separately confirmed physical probe-rs execution on the reference DK on
 2026-09-05. Both the 661-byte code segment and four-byte APPROTECT word verified;
 the reset snapshot restored the core to running and the session disconnected.
-That run did not independently compare preserved bytes or observe serial
-readiness. See [the acceptance record](docs/hardware-acceptance.md#native-nrf52840-development-debug-flash-2026-09-05).
+That run did not independently compare preserved bytes. A subsequent, separate
+runtime acceptance reattached without recovery, observed READY, the expected
+build identity and 62 complete heartbeats, and completed cleanup. See the
+[flash record](docs/hardware-acceptance.md#native-nrf52840-development-debug-flash-2026-09-05)
+and [post-flash runtime record](docs/hardware-acceptance.md#native-development-debug-post-flash-runtime-2026-09-05).
 
 Other unaccepted targets report `INTEL_HEX_EXECUTION_ACCEPTANCE_REQUIRED` or
 `SEGMENTED_FLASH_ACCEPTANCE_REQUIRED` as applicable. The earlier DK code-Flash

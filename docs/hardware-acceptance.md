@@ -2097,3 +2097,43 @@ authority is spent.
   subsequent firmware readiness or post-disconnect debug access was not
   sampled in this execution. Earlier runtime-contract evidence must not be
   presented as a fresh serial acceptance of this flash.
+
+## Native development-debug post-flash runtime (2026-09-05)
+
+- Following the native development-debug flash above, one `runtime accept`
+  used `examples/nrf52840-dk-smoke/test-contract.json` with SHA-256
+  `4c3609ac49710b7bed38485beafe2930dd14433cf76a9734538c4d6be0ed6fd7`.
+  The release executable and smoke HEX hashes still matched that flash record.
+  No further flash, erase, recover, UICR access, BLE operation, or retry occurred.
+- Host readiness checks passed for baud and embedded-debugger. Exact selection
+  bound J-Link `1366:1061:001050275757`, target `nRF52840_xxAA`, and COM11 with
+  USB `1366:1061` / `001050275757`. A fresh Windows PnP check identified COM11
+  as `MI_00`; baud itself reported no interface field, so this check remains
+  separate from the native contract's exact port/VID/PID/serial binding.
+- The serial session used 115200 baud, DTR=true, RTS=false, and zero transmitted
+  bytes. Its requested monitor window was 15 seconds; baud reported 15,031 ms
+  for the monitor step and 15,891 ms including startup. One reset-capture
+  reattached successfully after the preceding flash had disconnected.
+- Assertions passed with one `EAT_NRF52840_DK_READY v1`, one build line for
+  source-manifest SHA-256
+  `bfb6b26450ddfcd5049a0423f975c384f16ac12264c3a88068c0e04a810db05c`,
+  and 62 complete `EAT_NRF52840_DK_HEARTBEAT` lines. Of those, 60 followed
+  READY; two preceded it. Neither configured FAULT nor PANIC line appeared.
+  The final partial `E` was excluded. The two receive events contained 1,795
+  bytes; their Base64 bytes matched their text and reported lengths, with no
+  transmit events.
+- The reset snapshot recorded the single core halted at `PC=0x00000100`,
+  `SP=0x20040000`, and `LR=0xFFFFFFFF`, restored it to `running`, and disconnected.
+  All five reset-capture operations and all six runtime operations succeeded.
+  The serial child exited with code 0 and no related process remained.
+- Complete evidence was captured at `2026-09-05T07:55:55.499Z` in
+  `target/hardware-acceptance/2026-09-05-nrf52840-development-debug/runtime.evidence.json`.
+  Its 8,705-byte size and SHA-256
+  `dbe3492135987597b69f2cc2215f466ee2945034cbbd95f729b739a022680201`
+  were independently verified, as were the captured contract and all four
+  serial artifacts. Command stderr and serial stderr were empty.
+
+This closes the native flash, subsequent debug reattach, reset, and serial
+runtime acceptance path on this exact fixture. It does not establish power-cycle
+debug availability, indefinite runtime continuity, independently preserved
+out-of-image bytes, LED behavior, or cryptographic firmware attestation.
