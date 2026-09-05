@@ -1,6 +1,6 @@
 {
   "name": "embedded-debugger",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent-safe embedded flashing and debugging through structured CLI, Skill, and MCP session contracts.",
   "author": {
     "name": "Nitmi",
