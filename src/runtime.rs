@@ -68,7 +68,7 @@ pub struct LoadedRuntimeContract {
     bytes: Vec<u8>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeContractDocument {
     schema_version: String,
@@ -84,7 +84,7 @@ struct RuntimeContractDocument {
     cleanup: RuntimeContractCleanup,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeContractDebug {
     probe: String,
@@ -100,7 +100,7 @@ struct RuntimeContractFlash {
     automatic_retries: u32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeContractSerial {
     exact_port_identity_required: bool,
@@ -133,6 +133,17 @@ struct RuntimeContractCleanup {
     close_serial_session: bool,
     disconnect_debug_session: bool,
     do_not_retry_state_changing_failures: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuntimeContractInspection {
+    pub scope: &'static str,
+    pub valid: bool,
+    pub hardware_identity_verified: bool,
+    pub runtime_firmware_identity_verified: bool,
+    pub flash_authorized: bool,
+    pub artifact: ArtifactReference,
+    pub contract: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -735,6 +746,14 @@ pub fn load_runtime_acceptance_contract(
         MAX_RUNTIME_CONTRACT_BYTES,
         "read runtime acceptance contract",
     )?;
+    parse_runtime_acceptance_contract(canonical_path, bytes, evidence)
+}
+
+fn parse_runtime_acceptance_contract(
+    canonical_path: PathBuf,
+    bytes: Vec<u8>,
+    evidence: PathBuf,
+) -> Result<RuntimeAcceptanceOptions> {
     let contract: RuntimeContractDocument = serde_json::from_slice(&bytes).map_err(|error| {
         DebugError::config(
             "runtime acceptance contract is not valid strict JSON",
@@ -780,6 +799,129 @@ pub fn load_runtime_acceptance_contract(
     };
     validate_options(&options)?;
     Ok(options)
+}
+
+pub fn init_runtime_acceptance_contract(
+    name: &str,
+    board: &str,
+    options: &RuntimeAcceptanceOptions,
+    output: &Path,
+) -> Result<RuntimeContractInspection> {
+    validate_visible_value("contract.name", name, 256)?;
+    validate_visible_value("contract.board", board, 256)?;
+    validate_options(options)?;
+    let document = RuntimeContractDocument {
+        schema_version: SCHEMA_VERSION.to_string(),
+        name: name.to_string(),
+        board: board.to_string(),
+        target: options.target.clone(),
+        debug: RuntimeContractDebug {
+            probe: options.probe.clone(),
+            operation: "snapshot.reset-capture".to_string(),
+            automatic_retries: 0,
+        },
+        firmware: json!({}),
+        flash: RuntimeContractFlash {
+            exact_probe_selector_required: true,
+            exact_confirmation_digest_required: true,
+            automatic_retries: 0,
+        },
+        serial: RuntimeContractSerial {
+            exact_port_identity_required: true,
+            port: options.port.clone(),
+            usb_vendor_id: format!("{:04X}", options.vendor_id),
+            usb_product_id: format!("{:04X}", options.product_id),
+            usb_serial_number: options.serial_number.clone(),
+            usb_interface: options.interface.clone(),
+            baud: options.baudrate,
+            data_bits: 8,
+            parity: "none".to_string(),
+            stop_bits: 1,
+            flow_control: "none".to_string(),
+            dtr: options.dtr,
+            rts: options.rts,
+            transmit_bytes: 0,
+            observe_duration_seconds: options.duration_seconds,
+            monitor_startup_delay_ms: options.monitor_startup_delay_ms,
+            ready_line: options.ready_line.clone(),
+            build_id_line: options.build_id_line.clone(),
+            heartbeat_line: options.heartbeat_line.clone(),
+            minimum_complete_heartbeats: options.minimum_heartbeats,
+            forbidden_complete_lines: options.forbidden_lines.clone(),
+        },
+        visual: None,
+        abort_conditions: vec![
+            "probe or serial identity differs".to_string(),
+            "any state-changing stage returns an indeterminate result".to_string(),
+        ],
+        cleanup: RuntimeContractCleanup {
+            close_serial_session: true,
+            disconnect_debug_session: true,
+            do_not_retry_state_changing_failures: true,
+        },
+    };
+    let mut bytes = serde_json::to_vec_pretty(&document).expect("contract always serializes");
+    bytes.push(b'\n');
+    parse_runtime_acceptance_contract(output.to_path_buf(), bytes.clone(), PathBuf::new())?;
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            DebugError::io("create runtime contract parent", parent.to_str(), &error)
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                DebugError::new(
+                    ErrorCode::OutputExists,
+                    "refusing to overwrite an existing runtime contract",
+                    2,
+                    json!({"path": output}),
+                )
+            } else {
+                DebugError::io("create runtime contract", output.to_str(), &error)
+            }
+        })?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| DebugError::io("write runtime contract", output.to_str(), &error))?;
+    let canonical_path = output
+        .canonicalize()
+        .map_err(|error| DebugError::io("resolve new runtime contract", output.to_str(), &error))?;
+    Ok(runtime_contract_inspection(&canonical_path, &bytes))
+}
+
+pub fn inspect_runtime_acceptance_contract(path: &Path) -> Result<RuntimeContractInspection> {
+    let options = load_runtime_acceptance_contract(path, PathBuf::new())?;
+    let loaded = options
+        .contract
+        .expect("loaded contract contains source bytes");
+    Ok(runtime_contract_inspection(
+        &loaded.source_path,
+        &loaded.bytes,
+    ))
+}
+
+fn runtime_contract_inspection(path: &Path, bytes: &[u8]) -> RuntimeContractInspection {
+    RuntimeContractInspection {
+        scope: "host_only_no_hardware_access",
+        valid: true,
+        hardware_identity_verified: false,
+        runtime_firmware_identity_verified: false,
+        flash_authorized: false,
+        artifact: ArtifactReference {
+            kind: "runtime_acceptance_contract".to_string(),
+            path: path.display().to_string(),
+            size: bytes.len() as u64,
+            sha256: hex::encode(Sha256::digest(bytes)),
+        },
+        contract: serde_json::from_slice(bytes).expect("contract bytes were already validated"),
+    }
 }
 
 fn validate_contract(contract: &RuntimeContractDocument, path: &Path) -> Result<()> {
@@ -1013,6 +1155,15 @@ fn validate_options(options: &RuntimeAcceptanceOptions) -> Result<()> {
     }
     for line in &options.forbidden_lines {
         validate_expected_line("forbidden_line", line)?;
+        if line == &options.ready_line
+            || line == &options.heartbeat_line
+            || options.build_id_line.as_ref() == Some(line)
+        {
+            return Err(DebugError::config(
+                "runtime acceptance cannot both require and forbid the same complete line",
+                json!({"line": line}),
+            ));
+        }
     }
     let mut unique_forbidden_lines = options.forbidden_lines.clone();
     unique_forbidden_lines.sort();
@@ -1342,6 +1493,12 @@ fn create_new_file(path: &Path, operation_name: &str) -> Result<File> {
 fn read_bounded_file(path: &Path, maximum: u64, operation_name: &str) -> Result<Vec<u8>> {
     let metadata = fs::metadata(path)
         .map_err(|error| DebugError::io(operation_name, path.to_str(), &error))?;
+    if !metadata.is_file() {
+        return Err(DebugError::config(
+            format!("{operation_name} requires a regular file"),
+            json!({"path": path}),
+        ));
+    }
     if metadata.len() > maximum {
         return Err(DebugError::new(
             ErrorCode::ProtocolError,
@@ -1350,7 +1507,19 @@ fn read_bounded_file(path: &Path, maximum: u64, operation_name: &str) -> Result<
             json!({"path": path, "bytes": metadata.len(), "maximum": maximum}),
         ));
     }
-    fs::read(path).map_err(|error| DebugError::io(operation_name, path.to_str(), &error))
+    let mut bytes = Vec::new();
+    File::open(path)
+        .and_then(|file| file.take(maximum.saturating_add(1)).read_to_end(&mut bytes))
+        .map_err(|error| DebugError::io(operation_name, path.to_str(), &error))?;
+    if bytes.len() as u64 > maximum {
+        return Err(DebugError::new(
+            ErrorCode::ProtocolError,
+            format!("{operation_name} exceeded the bounded file limit"),
+            6,
+            json!({"path": path, "bytes": bytes.len(), "maximum": maximum}),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn artifact_reference(kind: &str, path: &Path) -> Result<ArtifactReference> {
@@ -1872,6 +2041,190 @@ mod tests {
                 .unwrap()
                 .contains("unknown field")
         );
+    }
+
+    #[test]
+    fn initialized_contract_round_trips_and_runs_through_existing_acceptance() {
+        let directory = tempdir().unwrap();
+        let contract_path = directory.path().join("project/runtime.json");
+        let expected = options(directory.path().join("unused.evidence.json"));
+        let created = init_runtime_acceptance_contract(
+            "project-smoke",
+            "Project development board",
+            &expected,
+            &contract_path,
+        )
+        .unwrap();
+        assert_eq!(created.scope, "host_only_no_hardware_access");
+        assert!(created.valid);
+        assert!(!created.hardware_identity_verified);
+        assert!(!created.runtime_firmware_identity_verified);
+        assert!(!created.flash_authorized);
+        assert_eq!(created.contract["firmware"], json!({}));
+        assert_eq!(created.contract["visual"], Value::Null);
+        assert_eq!(created.contract["serial"]["transmit_bytes"], 0);
+        assert_eq!(created.contract["debug"]["automatic_retries"], 0);
+        assert_eq!(
+            created.contract["flash"]["exact_confirmation_digest_required"],
+            true
+        );
+        let bytes = fs::read(&contract_path).unwrap();
+        assert_eq!(created.artifact.size, bytes.len() as u64);
+        assert_eq!(created.artifact.sha256, hex::encode(Sha256::digest(&bytes)));
+        let inspected = inspect_runtime_acceptance_contract(&contract_path).unwrap();
+        assert_eq!(inspected.artifact, created.artifact);
+        assert_eq!(inspected.contract, created.contract);
+
+        let evidence = directory.path().join("runtime.evidence.json");
+        let loaded = load_runtime_acceptance_contract(&contract_path, evidence).unwrap();
+        assert_eq!(serial_selection(&loaded), serial_selection(&expected));
+        assert_eq!(loaded.build_id_line, expected.build_id_line);
+        assert_eq!(loaded.forbidden_lines, expected.forbidden_lines);
+        let execution = run_runtime_acceptance(
+            ReplayBackend::new(fixture()),
+            &driver("READY v1\r\nBUILD v1 abc123\r\nHEARTBEAT\r\nHEARTBEAT\r\nHEARTBEAT\r\n"),
+            &loaded,
+        )
+        .unwrap();
+        assert!(execution.report.accepted);
+        assert_eq!(
+            execution.report.contract.unwrap().captured.sha256,
+            created.artifact.sha256
+        );
+    }
+
+    #[test]
+    fn initialized_contract_is_deterministic_and_never_overwritten() {
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("first.json");
+        let second = directory.path().join("second.json");
+        let expected = options(PathBuf::new());
+        init_runtime_acceptance_contract("smoke", "Board", &expected, &first).unwrap();
+        init_runtime_acceptance_contract("smoke", "Board", &expected, &second).unwrap();
+        let bytes = fs::read(&first).unwrap();
+        assert_eq!(bytes, fs::read(&second).unwrap());
+        let error =
+            init_runtime_acceptance_contract("other", "Board", &expected, &first).unwrap_err();
+        assert_eq!(error.code, ErrorCode::OutputExists);
+        assert_eq!(bytes, fs::read(&first).unwrap());
+    }
+
+    #[test]
+    fn invalid_initialization_does_not_create_parent_or_contract() {
+        let directory = tempdir().unwrap();
+        let output = directory.path().join("not-created/runtime.json");
+        let mut invalid = options(PathBuf::new());
+        invalid.duration_seconds = 121;
+        let error =
+            init_runtime_acceptance_contract("smoke", "Board", &invalid, &output).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert!(!output.parent().unwrap().exists());
+        let error =
+            init_runtime_acceptance_contract(" ", "Board", &options(PathBuf::new()), &output)
+                .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        assert!(!output.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn contract_inspection_rejects_invalid_shapes_and_unsafe_policies() {
+        let directory = tempdir().unwrap();
+        let output = directory.path().join("runtime.json");
+        let original =
+            init_runtime_acceptance_contract("smoke", "Board", &options(PathBuf::new()), &output)
+                .unwrap()
+                .contract;
+        for (pointer, invalid) in [
+            ("/schema_version", json!("2.0")),
+            ("/serial/unexpected", json!(true)),
+            ("/debug/automatic_retries", json!(1)),
+            ("/flash/exact_confirmation_digest_required", json!(false)),
+            ("/serial/transmit_bytes", json!(1)),
+            ("/serial/usb_vendor_id", json!("136")),
+            ("/serial/observe_duration_seconds", json!(121)),
+            ("/serial/minimum_complete_heartbeats", json!(0)),
+            (
+                "/serial/forbidden_complete_lines",
+                json!(["FAULT", "FAULT"]),
+            ),
+            ("/serial/forbidden_complete_lines", json!(["READY v1"])),
+            (
+                "/serial/forbidden_complete_lines",
+                json!(["BUILD v1 abc123"]),
+            ),
+            ("/serial/forbidden_complete_lines", json!(["HEARTBEAT"])),
+            ("/serial/ready_line", json!("READY\nINJECTED")),
+            ("/cleanup/close_serial_session", json!(false)),
+        ] {
+            let mut changed = original.clone();
+            if pointer == "/serial/unexpected" {
+                changed["serial"]["unexpected"] = invalid;
+            } else {
+                *changed.pointer_mut(pointer).unwrap() = invalid;
+            }
+            let bytes = serde_json::to_vec(&changed).unwrap();
+            fs::write(&output, &bytes).unwrap();
+            let error = inspect_runtime_acceptance_contract(&output).unwrap_err();
+            assert_eq!(error.code, ErrorCode::ConfigInvalid, "{pointer}");
+            assert_eq!(fs::read(&output).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn contract_inspection_preserves_optional_identity_and_metadata() {
+        let directory = tempdir().unwrap();
+        let output = directory.path().join("runtime.json");
+        let mut expected = options(PathBuf::new());
+        expected.interface = Some("Port 0".to_string());
+        expected.build_id_line = None;
+        let created =
+            init_runtime_acceptance_contract("smoke", "Board", &expected, &output).unwrap();
+        assert_eq!(created.contract["serial"]["usb_interface"], "Port 0");
+        assert_eq!(created.contract["serial"]["build_id_line"], Value::Null);
+
+        let mut document = created.contract;
+        document["firmware"] = json!({"build_script": "never-execute.ps1"});
+        fs::write(&output, serde_json::to_vec(&document).unwrap()).unwrap();
+        let inspected = inspect_runtime_acceptance_contract(&output).unwrap();
+        assert_eq!(
+            inspected.contract["firmware"]["build_script"],
+            "never-execute.ps1"
+        );
+        assert!(!inspected.runtime_firmware_identity_verified);
+    }
+
+    #[test]
+    fn contract_inspection_rejects_non_files_oversize_and_malformed_json() {
+        let directory = tempdir().unwrap();
+        assert_eq!(
+            inspect_runtime_acceptance_contract(directory.path())
+                .unwrap_err()
+                .code,
+            ErrorCode::ConfigInvalid
+        );
+        let output = directory.path().join("runtime.json");
+        File::create(&output)
+            .unwrap()
+            .set_len(MAX_RUNTIME_CONTRACT_BYTES + 1)
+            .unwrap();
+        assert_eq!(
+            inspect_runtime_acceptance_contract(&output)
+                .unwrap_err()
+                .code,
+            ErrorCode::ProtocolError
+        );
+        for bytes in [
+            &b""[..],
+            &b"{\"schema_version\":\"1.0\",\"schema_version\":\"1.0\"}"[..],
+        ] {
+            fs::write(&output, bytes).unwrap();
+            assert_eq!(
+                inspect_runtime_acceptance_contract(&output)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::ConfigInvalid
+            );
+        }
     }
 
     #[test]

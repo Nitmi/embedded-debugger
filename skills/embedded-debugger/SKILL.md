@@ -19,6 +19,18 @@ OpenOCD shell parsing.
 
 ## Runtime acceptance
 
+For new-project setup, use `runtime init --name <name> --board <label>` with
+explicit runtime identity/assertion fields and `--output <new-contract.json>`.
+Inspect it with `runtime inspect <contract.json> --json`. These two commands
+are offline: skip device discovery when the task is only contract preparation.
+They neither verify connected identities nor authorize a flash. Do not copy a
+reference board's serial number or UICR policy; generated firmware metadata is
+empty, and metadata in existing contracts is descriptive, not executed or
+enforced as artifact verification. The reported SHA-256 identifies contract
+bytes, not a flash confirmation. Use documented DTR/RTS values and include a
+build line when build correlation is required. Check `runtime --help` on older
+installations; never use `accept` merely to validate a file.
+
 After a separately planned, confirmed, and completed flash, prefer
 `runtime accept` when firmware readiness must be correlated with one exact
 reset-capture. Prefer `--contract <test-contract.json>` plus a new evidence path

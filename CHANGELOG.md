@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Host-only `runtime init` and `runtime inspect` for per-project runtime
+  contracts. Generation shares direct acceptance options, validates before
+  writing, refuses overwrite, and does not inherit fixture firmware or UICR
+  policy. Inspection shares the execution validator and reports the full
+  contract and exact-byte hash without starting a tool or accessing hardware.
+  Required/forbidden line conflicts now fail configuration validation, and
+  bounded runtime file reads reject non-files and enforce the limit while
+  reading as well as before it.
 - Native `runtime accept` orchestration across the exact probe-rs target and the
   exact `baud` port identity. The fixed R1 workflow starts one bounded
   zero-transmit serial monitor, performs one existing reset-capture, evaluates

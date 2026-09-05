@@ -1126,12 +1126,44 @@ zero-transmit serial observation. It is a fixture-specific acceptance contract:
 update every physical identity and runtime build line before using it with a
 different board or a newly flashed build.
 
+For a new project, generate its own contract instead of copying the reference
+DK's serial number or UICR policy. Both setup commands are host-only and work
+without baud, a connected board, a replay fixture, or a configured backend:
+
+```console
+embedded-debugger runtime init --name app-smoke --board "My board" \
+  --probe "<exact-probe-selector>" --target "<exact-target>" \
+  --port "<exact-port>" --vid 1234 --pid 5678 --serial-number "<usb-serial>" \
+  --baud 115200 --dtr false --rts false --duration 15 \
+  --ready-line "APP_READY v1" --build-id-line "APP_BUILD v1 <build-id>" \
+  --heartbeat-line "APP_HEARTBEAT" --forbid-line "APP_FAULT" \
+  --output .embedded/runtime.json --json
+embedded-debugger runtime inspect .embedded/runtime.json --json
+```
+
+Replace the example USB IDs, selectors, line values, and DTR/RTS settings with
+your project's actual requirements. `init` creates missing parent directories
+but never overwrites a contract. It writes deterministic strict JSON with the
+existing zero-transmit, zero-retry, cleanup, and separate flash-confirmation
+policy, without guessing firmware paths, Flash layout, or UICR settings.
+`inspect` uses the same validator as `accept` and reports the complete contract,
+exact-byte SHA-256, and size. An unknown target or disconnected probe can still
+pass offline validation: neither command verifies physical identity, firmware
+readiness, or backend support, and neither authorizes or executes a flash.
+The `firmware` and `visual` objects are descriptive metadata, not executed
+scripts or enforced firmware-hash/Flash-layout assertions.
+
+Commit the project contract with the firmware inputs. When only a local device
+selection differs, keep a separate local contract instead of silently overriding
+a reviewed one. For an existing DK fixture, inspect the checked-in contract
+without regenerating it.
+
 After a separately confirmed flash, close the runtime loop with the native
 cross-component acceptance command:
 
 ```console
 embedded-debugger --backend probe-rs runtime accept \
-  --contract examples/nrf52840-dk-smoke/test-contract.json \
+  --contract .embedded/runtime.json \
   --evidence runtime.evidence.json --json
 ```
 

@@ -4089,6 +4089,194 @@ fn replay_reset_capture_reports_per_core_reset_policy() {
 }
 
 #[test]
+fn runtime_init_and_inspect_are_offline_for_every_backend() {
+    for backend in ["replay", "probe-rs", "openocd"] {
+        let directory = tempdir().unwrap();
+        let contract = directory.path().join("project/runtime.json");
+        let output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .current_dir(directory.path())
+            .env("PATH", "")
+            .args([
+                "--backend",
+                backend,
+                "--fixture",
+                "missing-fixture.json",
+                "runtime",
+                "init",
+                "--name",
+                "project-smoke",
+                "--board",
+                "Project board",
+                "--probe",
+                "not-a-connected-probe",
+                "--target",
+                "not-a-real-target",
+                "--port",
+                "not-a-real-port",
+                "--vid",
+                "1234",
+                "--pid",
+                "aBcD",
+                "--serial-number",
+                "project-fixture",
+                "--baud",
+                "57600",
+                "--dtr",
+                "true",
+                "--rts",
+                "false",
+                "--duration",
+                "8",
+                "--ready-line",
+                "READY v1",
+                "--build-id-line",
+                "BUILD v1 test",
+                "--heartbeat-line",
+                "HEARTBEAT",
+                "--minimum-heartbeats",
+                "4",
+                "--forbid-line",
+                "FAULT",
+                "--output",
+                contract.to_str().unwrap(),
+                "--json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        assert!(output.stderr.is_empty());
+        let created: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(created["operation"], "runtime.init");
+        assert_eq!(created["data"]["scope"], "host_only_no_hardware_access");
+        assert_eq!(created["data"]["hardware_identity_verified"], false);
+        let document: Value = serde_json::from_slice(&fs::read(&contract).unwrap()).unwrap();
+        assert_eq!(document["serial"]["usb_product_id"], "ABCD");
+        assert_eq!(document["serial"]["baud"], 57600);
+        assert_eq!(document["serial"]["dtr"], true);
+        assert_eq!(document["serial"]["rts"], false);
+        assert_eq!(document["serial"]["observe_duration_seconds"], 8);
+        assert_eq!(document["serial"]["minimum_complete_heartbeats"], 4);
+        assert_eq!(document["serial"]["build_id_line"], "BUILD v1 test");
+        assert_eq!(document["serial"]["forbidden_complete_lines"][0], "FAULT");
+        let inspected_output = Command::cargo_bin("embedded-debugger")
+            .unwrap()
+            .current_dir(directory.path())
+            .env("PATH", "")
+            .args([
+                "--backend",
+                backend,
+                "--fixture",
+                "missing-fixture.json",
+                "runtime",
+                "inspect",
+                contract.to_str().unwrap(),
+                "--json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        assert!(inspected_output.stderr.is_empty());
+        let inspected: Value = serde_json::from_slice(&inspected_output.stdout).unwrap();
+        assert_eq!(inspected["operation"], "runtime.inspect");
+        assert_eq!(inspected["data"], created["data"]);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(contract.parent().unwrap()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn runtime_init_requires_identity_and_preserves_existing_files() {
+    let directory = tempdir().unwrap();
+    let output_path = directory.path().join("runtime.json");
+    let missing = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "runtime",
+            "init",
+            "--name",
+            "smoke",
+            "--board",
+            "Board",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let missing: Value = serde_json::from_slice(&missing).unwrap();
+    assert_eq!(missing["operation"], "runtime.init");
+    assert_eq!(missing["error"]["details"]["missing"], "--probe");
+    assert!(!output_path.exists());
+    fs::write(&output_path, b"keep existing project config").unwrap();
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "runtime",
+            "init",
+            "--name",
+            "smoke",
+            "--board",
+            "Board",
+            "--probe",
+            "probe",
+            "--target",
+            "target",
+            "--port",
+            "port",
+            "--vid",
+            "1234",
+            "--pid",
+            "5678",
+            "--serial-number",
+            "serial",
+            "--ready-line",
+            "READY",
+            "--heartbeat-line",
+            "HEARTBEAT",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(result["error"]["code"], "OUTPUT_EXISTS");
+    assert_eq!(
+        fs::read(output_path).unwrap(),
+        b"keep existing project config"
+    );
+}
+
+#[test]
+fn runtime_inspect_reports_invalid_contract_without_creating_evidence() {
+    let directory = tempdir().unwrap();
+    let contract = directory.path().join("contract.json");
+    fs::write(&contract, b"{}").unwrap();
+    let output = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .current_dir(directory.path())
+        .args(["runtime", "inspect", contract.to_str().unwrap(), "--json"])
+        .assert()
+        .code(7)
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(result["operation"], "runtime.inspect");
+    assert_eq!(result["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn runtime_accept_rejects_non_exact_usb_ids_during_cli_parsing() {
     let stderr = Command::cargo_bin("embedded-debugger")
         .unwrap()

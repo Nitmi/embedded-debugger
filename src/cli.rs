@@ -1008,7 +1008,32 @@ pub enum SnapshotCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum RuntimeCommand {
+    /// Generate a project contract without accessing hardware or starting tools
+    Init(RuntimeInitSelection),
+    /// Validate and inspect a contract offline; does not prove hardware readiness
+    Inspect {
+        contract: PathBuf,
+    },
     Accept(RuntimeAcceptSelection),
+}
+
+#[derive(Debug, Args)]
+pub struct RuntimeInitSelection {
+    #[arg(long)]
+    pub name: String,
+
+    #[arg(long, help = "descriptive board label, not a hardware selector")]
+    pub board: String,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "new contract path; never overwritten"
+    )]
+    pub output: PathBuf,
+
+    #[command(flatten)]
+    pub fields: RuntimeDirectSelection,
 }
 
 #[derive(Debug, Args)]
@@ -1028,6 +1053,15 @@ pub struct RuntimeAcceptSelection {
     )]
     pub contract: Option<PathBuf>,
 
+    #[command(flatten)]
+    pub fields: RuntimeDirectSelection,
+
+    #[arg(long, value_name = "FILE")]
+    pub evidence: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct RuntimeDirectSelection {
     #[arg(long, help = "exact probe selector from probes list")]
     pub probe: Option<String>,
 
@@ -1085,9 +1119,6 @@ pub struct RuntimeAcceptSelection {
         help = "repeatable exact complete line that must not appear"
     )]
     pub forbidden_lines: Vec<String>,
-
-    #[arg(long, value_name = "FILE")]
-    pub evidence: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -1239,6 +1270,12 @@ impl Cli {
             Command::Snapshot {
                 command: SnapshotCommand::Inspect { .. },
             } => "snapshot.inspect",
+            Command::Runtime {
+                command: RuntimeCommand::Init(_),
+            } => "runtime.init",
+            Command::Runtime {
+                command: RuntimeCommand::Inspect { .. },
+            } => "runtime.inspect",
             Command::Runtime {
                 command: RuntimeCommand::Accept(_),
             } => "runtime.accept",
@@ -2374,6 +2411,39 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
             command: SnapshotCommand::ResetCapture(selection),
         } => capture_reset_snapshot(cli, selection),
         Command::Runtime {
+            command: RuntimeCommand::Init(selection),
+        } => {
+            let options =
+                runtime_direct_options(&selection.fields, PathBuf::new(), "runtime init")?;
+            let report = runtime::init_runtime_acceptance_contract(
+                &selection.name,
+                &selection.board,
+                &options,
+                &selection.output,
+            )?;
+            let human = format!(
+                "Runtime contract created: {}\nSHA-256: {}\nHost only; hardware identity and firmware readiness not verified.\nReview the contract before runtime accept; no hardware operation was performed.",
+                report.artifact.path, report.artifact.sha256,
+            );
+            Ok(CommandResult::serializable("runtime.init", &report, human))
+        }
+        Command::Runtime {
+            command: RuntimeCommand::Inspect { contract },
+        } => {
+            let report = runtime::inspect_runtime_acceptance_contract(contract)?;
+            let human = format!(
+                "Runtime contract valid: {}\nSHA-256: {}\nHost only; hardware identity and firmware readiness not verified.\n{}",
+                report.artifact.path,
+                report.artifact.sha256,
+                serde_json::to_string_pretty(&report.contract).expect("contract always serializes"),
+            );
+            Ok(CommandResult::serializable(
+                "runtime.inspect",
+                &report,
+                human,
+            ))
+        }
+        Command::Runtime {
             command: RuntimeCommand::Accept(selection),
         } => accept_runtime(cli, selection),
         Command::Registers {
@@ -2767,9 +2837,10 @@ fn accept_runtime(cli: &Cli, selection: &RuntimeAcceptSelection) -> Result<Comma
 }
 
 fn runtime_acceptance_options(
-    selection: &RuntimeAcceptSelection,
+    acceptance: &RuntimeAcceptSelection,
 ) -> Result<RuntimeAcceptanceOptions> {
-    if let Some(contract) = &selection.contract {
+    let selection = &acceptance.fields;
+    if let Some(contract) = &acceptance.contract {
         let mut conflicts = Vec::new();
         for (name, present) in [
             ("--probe", selection.probe.is_some()),
@@ -2806,16 +2877,26 @@ fn runtime_acceptance_options(
                 json!({"contract": contract, "conflicts": conflicts}),
             ));
         }
-        return runtime::load_runtime_acceptance_contract(contract, selection.evidence.clone());
+        return runtime::load_runtime_acceptance_contract(contract, acceptance.evidence.clone());
     }
 
+    runtime_direct_options(selection, acceptance.evidence.clone(), "runtime accept")
+}
+
+fn runtime_direct_options(
+    selection: &RuntimeDirectSelection,
+    evidence: PathBuf,
+    command: &str,
+) -> Result<RuntimeAcceptanceOptions> {
+    let required =
+        |name: &str, value: &Option<String>| required_runtime_field(command, name, value);
     Ok(RuntimeAcceptanceOptions {
-        probe: required_runtime_field("--probe", &selection.probe)?,
-        target: required_runtime_field("--target", &selection.target)?,
-        port: required_runtime_field("--port", &selection.port)?,
-        vendor_id: required_runtime_field("--vid", &selection.vid)?,
-        product_id: required_runtime_field("--pid", &selection.pid)?,
-        serial_number: required_runtime_field("--serial-number", &selection.serial_number)?,
+        probe: required("--probe", &selection.probe)?,
+        target: required("--target", &selection.target)?,
+        port: required("--port", &selection.port)?,
+        vendor_id: required_runtime_field(command, "--vid", &selection.vid)?,
+        product_id: required_runtime_field(command, "--pid", &selection.pid)?,
+        serial_number: required("--serial-number", &selection.serial_number)?,
         interface: selection.interface.clone(),
         baudrate: selection.baud.unwrap_or(115_200),
         dtr: selection.dtr.unwrap_or(false),
@@ -2826,22 +2907,22 @@ fn runtime_acceptance_options(
         monitor_startup_delay_ms: selection
             .monitor_startup_delay_ms
             .unwrap_or(DEFAULT_RUNTIME_MONITOR_STARTUP_DELAY_MS),
-        ready_line: required_runtime_field("--ready-line", &selection.ready_line)?,
+        ready_line: required("--ready-line", &selection.ready_line)?,
         build_id_line: selection.build_id_line.clone(),
-        heartbeat_line: required_runtime_field("--heartbeat-line", &selection.heartbeat_line)?,
+        heartbeat_line: required("--heartbeat-line", &selection.heartbeat_line)?,
         minimum_heartbeats: selection
             .minimum_heartbeats
             .unwrap_or(DEFAULT_MINIMUM_HEARTBEATS),
         forbidden_lines: selection.forbidden_lines.clone(),
-        evidence: selection.evidence.clone(),
+        evidence,
         contract: None,
     })
 }
 
-fn required_runtime_field<T: Clone>(name: &str, value: &Option<T>) -> Result<T> {
+fn required_runtime_field<T: Clone>(command: &str, name: &str, value: &Option<T>) -> Result<T> {
     value.clone().ok_or_else(|| {
         DebugError::config(
-            format!("runtime accept requires {name} when --contract is not used"),
+            format!("{command} requires {name}"),
             json!({"missing": name}),
         )
     })

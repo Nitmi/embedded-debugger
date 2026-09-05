@@ -1063,6 +1063,45 @@ captures every available core while halted, restores each core to its explicit
 memory write. CPU0 is expected to run after the workflow. Secondary cores retain
 the running or halted state observed immediately after the target reset sequence.
 
+## Offline runtime contract setup
+
+`runtime init` creates a new project contract from `--name`, `--board`, and
+the existing direct runtime identity and assertion fields. It requires exact
+probe, target, port, USB VID/PID, USB serial, ready line, and heartbeat line
+inputs; it never discovers values or copies a reference fixture. Defaults match
+direct `runtime accept`: 115200 baud, DTR/RTS=false, 15 seconds, 400 ms startup
+delay, and three complete heartbeats. Interface, build line, and forbidden lines
+are optional. Missing build identity means build correlation is not asserted.
+
+The initializer serializes the existing strict contract schema, validates it
+through the acceptance loader before filesystem writes, creates missing parent
+directories, and uses exclusive file creation. Existing files are never replaced;
+`OUTPUT_EXISTS` returns exit code 2. The contract bytes include a final newline
+and are deterministic for identical inputs, independently of output location.
+It sets zero transmit/retries, complete cleanup, and separate flash confirmation;
+`firmware` is an empty object and `visual` is null. No firmware artifact, memory
+layout, security policy, or physical capability is inferred.
+
+`runtime inspect <FILE>` validates an existing contract without writing files.
+It reads one bounded regular-file snapshot (at most 1 MiB), uses the same strict
+JSON parser and semantic checks as `runtime accept`, and hashes those exact
+bytes. Both commands return `scope=host_only_no_hardware_access`, `valid=true`,
+an artifact path/size/SHA-256, and the full contract document. The fields
+`hardware_identity_verified`, `runtime_firmware_identity_verified`, and
+`flash_authorized` are always false. `valid` means configuration validation only,
+not an observed device, supported target/backend, executable prerequisite, or
+successful hardware acceptance. Global backend and fixture arguments do not
+cause backend initialization; no component process is started.
+
+Unknown typed fields, invalid USB IDs, retry or transmit requests, weakened
+cleanup, invalid bounds, duplicate forbidden lines, and lines that are both
+required and forbidden fail validation. Metadata objects `firmware` and `visual`
+remain descriptive: their contents are not interpreted as scripts, artifact
+hash checks, or enforced Flash boundaries. Flash still uses its separate plan.
+The source contract hash is not a flash confirmation digest. Offline inspection
+does not reserve or authorize a later runtime operation; `accept` reloads and
+captures the contract actually used, then performs its normal hardware checks.
+
 ## Joint runtime acceptance
 
 `runtime accept` composes the existing `snapshot reset-capture` contract with
