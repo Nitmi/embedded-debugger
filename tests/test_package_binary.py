@@ -272,6 +272,7 @@ class BinaryPackageTests(unittest.TestCase):
         result = json.loads(release.dependency_inventory(metadata, lockfile))
         self.assertFalse(result["runtime_sbom"])
         self.assertFalse(result["license_compliance_verified"])
+        self.assertEqual(result["target"], release.TARGET)
         self.assertEqual(result["packages"][0]["registry_checksum"], "abc")
         self.assertNotIn("/private/home", json.dumps(result))
         metadata["packages"][0]["version"] = "2.0.0"
@@ -318,6 +319,10 @@ class BinaryPackageTests(unittest.TestCase):
             if args == ["cargo", "--version"]:
                 return b"cargo fixture\n"
             if args[:2] == ["cargo", "metadata"]:
+                self.assertIn("--offline", args)
+                self.assertEqual(
+                    args[args.index("--filter-platform") + 1], release.TARGET
+                )
                 return release.json_bytes(metadata)
             if args[:2] == ["cargo", "build"]:
                 self.assertIn("--locked", args)

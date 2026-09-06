@@ -73,8 +73,9 @@ ZIP ordering, timestamps, permissions, and storage method are fixed, so identica
 payloads and build metadata produce identical archives. This is archive
 reproducibility, not a promise of reproducible compiler output across machines.
 
-`DEPENDENCIES.json` lists Cargo metadata, including build, development, and
-platform dependencies. It is not a precise runtime SBOM or complete third-party
+`DEPENDENCIES.json` lists target-filtered Cargo metadata, including build and
+development dependencies. Other platforms are not queried or downloaded merely
+to generate this inventory. It is not a precise runtime SBOM or complete third-party
 license notice bundle. `LICENSE` covers this project only. Signing, full license
 review, runtime SBOM generation, and clean-machine testing remain public-release
 work; neither this script nor the CI artifact step publishes a public release.

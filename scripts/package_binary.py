@@ -133,7 +133,8 @@ def dependency_inventory(metadata: dict, lockfile: bytes) -> bytes:
     return json_bytes(
         {
             "schema_version": "embedded-debugger.dependencies.v1",
-            "scope": "cargo_metadata_including_build_dev_and_platform_dependencies",
+            "scope": "target_filtered_cargo_metadata_including_build_and_dev_dependencies",
+            "target": TARGET,
             "runtime_sbom": False,
             "license_compliance_verified": False,
             "cargo_lock_sha256": sha256(lockfile),
@@ -293,7 +294,18 @@ def build(root: Path, output_dir: Path, offline: bool) -> dict:
     cargo_version = run(root, ["cargo", "--version"]).decode("utf-8").strip()
     flags = ["--locked", *(["--offline"] if offline else [])]
     metadata = parse_json(
-        run(root, ["cargo", "metadata", *flags, "--format-version", "1"])
+        run(
+            root,
+            [
+                "cargo",
+                "metadata",
+                *flags,
+                "--filter-platform",
+                TARGET,
+                "--format-version",
+                "1",
+            ],
+        )
     )
     root_id = metadata["resolve"]["root"]
     root_package = next(item for item in metadata["packages"] if item["id"] == root_id)
