@@ -332,7 +332,10 @@ class BinaryPackageTests(unittest.TestCase):
                 self.assertIn("--fail", args)
                 if mutate_about:
                     about.write_bytes(b"changed license generator")
-                return b'{"licenses": []}'
+                Path(args[args.index("--output-file") + 1]).write_bytes(
+                    b'{"licenses": []}'
+                )
+                return b""
             if args == ["rustc", "-vV"]:
                 return f"rustc fixture\nhost: {host}\n".encode()
             if args == ["cargo", "--version"]:

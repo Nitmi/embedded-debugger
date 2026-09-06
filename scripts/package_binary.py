@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import tomllib
 import zipfile
 from pathlib import Path
@@ -355,7 +356,9 @@ def build(root: Path, output_dir: Path, offline: bool, cargo_about: Path) -> dic
             f"license collection requires {license_materials.ABOUT_VERSION}"
         )
     about_config = git_file(root, revision, "about.toml")
-    about_report = parse_json(
+    # cargo-about rejects redirected stdout on Windows; use its output-file API.
+    with tempfile.TemporaryDirectory(prefix="embedded-debugger-licenses-") as temporary:
+        about_output = Path(temporary) / "licenses.json"
         run(
             root,
             [
@@ -367,10 +370,12 @@ def build(root: Path, output_dir: Path, offline: bool, cargo_about: Path) -> dic
                 "json",
                 "--config",
                 str(root / "about.toml"),
+                "--output-file",
+                str(about_output),
             ],
             timeout=300,
         )
-    )
+        about_report = parse_json(bounded_read(about_output, MAX_FILE))
     if bounded_read(about_executable, MAX_FILE) != about_binary:
         raise ReleaseError("cargo-about executable changed during collection")
     build_output = run(
