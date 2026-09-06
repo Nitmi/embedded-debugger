@@ -74,7 +74,7 @@ class BinaryPackageTests(unittest.TestCase):
         manifest = release.inspect_archive(self.data)
         self.assertEqual(manifest["version"], "0.2.0")
         with zipfile.ZipFile(io.BytesIO(self.data)) as archive:
-            self.assertEqual(len(archive.infolist()), 6)
+            self.assertEqual(len(archive.infolist()), 11)
             for entry in archive.infolist():
                 self.assertEqual(entry.date_time, (1980, 1, 1, 0, 0, 0))
                 self.assertEqual(entry.compress_type, zipfile.ZIP_STORED)
@@ -171,6 +171,8 @@ class BinaryPackageTests(unittest.TestCase):
             ("target", "aarch64-unknown-linux-gnu"),
             ("source_revision", "not-a-commit"),
             ("schema_version", "future"),
+            ("schema_version", []),
+            ("schema_version", {}),
             ("publication", "signed"),
             ("product", "another-tool"),
             ("build_profile", "debug"),
@@ -284,7 +286,9 @@ class BinaryPackageTests(unittest.TestCase):
             patch.object(release, "run", return_value=b" M src/main.rs\n") as runner,
             self.assertRaisesRegex(release.ReleaseError, "clean"),
         ):
-            release.build(self.root, self.root / "dist", True)
+            release.build(
+                self.root, self.root / "dist", True, self.root / "cargo-about.exe"
+            )
         self.assertEqual(runner.call_count, 1)
 
     def build_with_fake_cargo(
@@ -294,9 +298,13 @@ class BinaryPackageTests(unittest.TestCase):
         mutate_binary=False,
         version="0.2.0",
         host=release.TARGET,
+        about_version="0.9.2",
+        mutate_about=False,
     ):
         binary = self.root / "artifact.exe"
         binary.write_bytes(b"not executable; controlled fixture")
+        about = self.root / "cargo-about.exe"
+        about.write_bytes(b"fixture cargo-about")
         root_id = "fixture-root"
         package = {
             "name": release.NAME,
@@ -311,9 +319,20 @@ class BinaryPackageTests(unittest.TestCase):
             "Cargo.lock": b'[[package]]\nname="embedded-debugger"\nversion="0.2.0"\n',
             "LICENSE": b"license\n",
             "docs/binary-release.md": b"instructions\n",
+            "about.toml": b'accepted = ["MIT"]\n',
+            "scripts/test_windows_candidate.ps1": b"smoke script\n",
+            "docs/windows-runtime.md": b"runtime guide\n",
         }
 
         def fake_run(root, args, timeout=60):
+            if args == [str(about), "--version"]:
+                return f"cargo-about {about_version}\n".encode()
+            if args[:2] == [str(about), "generate"]:
+                self.assertIn("--frozen", args)
+                self.assertIn("--fail", args)
+                if mutate_about:
+                    about.write_bytes(b"changed license generator")
+                return b'{"licenses": []}'
             if args == ["rustc", "-vV"]:
                 return f"rustc fixture\nhost: {host}\n".encode()
             if args == ["cargo", "--version"]:
@@ -355,8 +374,48 @@ class BinaryPackageTests(unittest.TestCase):
                 side_effect=lambda root, revision, name: sources[name],
             ),
             patch.object(release, "run", side_effect=fake_run),
+            patch.object(
+                release.license_materials,
+                "collect",
+                return_value={
+                    name: b"fixture license materials\n"
+                    for name in release.PAYLOAD_NAMES
+                    if name.startswith("THIRD_PARTY_")
+                },
+            ),
         ):
-            return release.build(self.root, output, True)
+            return release.build(self.root, output, True, about)
+
+    def test_legacy_archive_verification_is_preserved(self):
+        with (
+            patch.object(release, "SCHEMA", release.LEGACY_SCHEMA),
+            patch.object(release, "PAYLOAD_NAMES", release.LEGACY_PAYLOAD_NAMES),
+        ):
+            data = release.archive_bytes(
+                {name: self.payload[name] for name in release.LEGACY_PAYLOAD_NAMES},
+                self.build,
+            )
+        result = release.verify(*self.write_candidate(data))
+        self.assertTrue(result["integrity_verified"])
+        self.assertFalse(result["license_materials_present"])
+        self.assertEqual(result["archive_schema_version"], release.LEGACY_SCHEMA)
+
+    def test_schema_and_license_payload_layout_must_agree(self):
+        with self.assertRaises(release.ReleaseError):
+            release.inspect_archive(
+                self.change_manifest(
+                    lambda manifest: manifest.update(
+                        schema_version=release.LEGACY_SCHEMA
+                    )
+                )
+            )
+
+    def test_wrong_or_changed_license_generator_publishes_nothing(self):
+        output = self.root / "dist"
+        for options in ({"about_version": "0.9.1"}, {"mutate_about": True}):
+            with self.subTest(options=options), self.assertRaises(release.ReleaseError):
+                self.build_with_fake_cargo(output, **options)
+            self.assertFalse(output.exists())
 
     def test_build_binds_the_cargo_artifact_and_preserves_existing_outputs(self):
         output = self.root / "dist"

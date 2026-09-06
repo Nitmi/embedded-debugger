@@ -53,7 +53,19 @@ jobs:
         with:
           python-version: '3.12'
       - name: Build Windows CLI candidate
-        run: python scripts/package_binary.py build --output-dir target/binary-dist --json
+        shell: pwsh
+        run: |
+          $toolDir = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $toolDir | Out-Null
+          $toolArchive = Join-Path $toolDir 'cargo-about.tar.gz'
+          Invoke-WebRequest -Uri 'https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.2/cargo-about-0.9.2-x86_64-pc-windows-msvc.tar.gz' -OutFile $toolArchive
+          if ((Get-FileHash -LiteralPath $toolArchive -Algorithm SHA256).Hash -ne '1c03e5890238562497c2d89a3b75b02560af349c1fc3e713d3284f532a5cd748') { throw 'cargo-about checksum mismatch' }
+          tar -xf $toolArchive -C $toolDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $cargoAbout = Join-Path $toolDir 'cargo-about-0.9.2-x86_64-pc-windows-msvc/cargo-about.exe'
+          cargo fetch --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/package_binary.py build --offline --cargo-about $cargoAbout --output-dir target/binary-dist --json
       - name: Verify and smoke test extracted candidate
         shell: pwsh
         run: |
@@ -69,6 +81,11 @@ jobs:
           & $executables[0].FullName --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $executables[0].FullName runtime --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $candidateRoot = $executables[0].DirectoryName
+          $manifest = Get-Content -Raw -LiteralPath (Join-Path $candidateRoot 'release-manifest.json') | ConvertFrom-Json
+          $binaryHash = ($manifest.files | Where-Object path -eq 'embedded-debugger.exe').sha256
+          powershell -NoProfile -File (Join-Path $candidateRoot 'Test-WindowsCandidate.ps1') -Executable $executables[0].FullName -ExpectedSha256 $binaryHash -ReportPath target/binary-dist/windows-host-smoke.json -EnvironmentLabel 'GitHub Windows runner (not a clean machine)'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:

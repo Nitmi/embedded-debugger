@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Windows candidate v2 license materials using pinned cargo-about, coverage of
+  Cargo-reported compiled packages, checksum-bound original crate notices and
+  MPL source archives. Review gaps remain explicit; original v1 ZIP verification
+  remains supported. Includes a non-overwriting PowerShell host smoke and
+  Windows VC runtime/clean-machine qualification guidance.
 - Windows x64 CLI candidate packaging with a pinned clean source revision,
   Cargo-reported release artifact, locked dependency inventory, fixed ZIP
   metadata, SHA-256 sidecar, and host-only archive verification. No hardware,

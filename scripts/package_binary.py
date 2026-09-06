@@ -11,19 +11,34 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
 import tomllib
 import zipfile
 from pathlib import Path
 
+if __package__:
+    from . import license_materials
+else:
+    import license_materials
+
 NAME = "embedded-debugger"
 TARGET = "x86_64-pc-windows-msvc"
-SCHEMA = "embedded-debugger.binary-release.v1"
-PAYLOAD_NAMES = (
+SCHEMA = "embedded-debugger.binary-release.v2"
+LEGACY_SCHEMA = "embedded-debugger.binary-release.v1"
+LEGACY_PAYLOAD_NAMES = (
     "Cargo.lock",
     "DEPENDENCIES.json",
     "LICENSE",
     "README.md",
     "embedded-debugger.exe",
+)
+PAYLOAD_NAMES = (
+    *LEGACY_PAYLOAD_NAMES,
+    "THIRD_PARTY_LICENSES.json",
+    "THIRD_PARTY_NOTICES.txt",
+    "THIRD_PARTY_SOURCES.zip",
+    "Test-WindowsCandidate.ps1",
+    "WINDOWS_RUNTIME.md",
 )
 MANIFEST_NAME = "release-manifest.json"
 MAX_FILE = 128 * 1024 * 1024
@@ -177,7 +192,7 @@ def inspect_archive(data: bytes) -> dict:
         raise ReleaseError("archive exceeds the size limit")
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         entries = archive.infolist()
-        if len(entries) != len(PAYLOAD_NAMES) + 1:
+        if len(entries) not in {len(PAYLOAD_NAMES) + 1, len(LEGACY_PAYLOAD_NAMES) + 1}:
             raise ReleaseError("unexpected archive member count")
         names = [entry.filename for entry in entries]
         manifest_entries = [
@@ -201,6 +216,10 @@ def inspect_archive(data: bytes) -> dict:
         manifest = parse_json(archive.read(manifest_entry))
         if not isinstance(manifest, dict):
             raise ReleaseError("release manifest must be an object")
+        schema = manifest.get("schema_version")
+        payload_names = (
+            LEGACY_PAYLOAD_NAMES if schema == LEGACY_SCHEMA else PAYLOAD_NAMES
+        )
         if set(manifest) != {
             "schema_version",
             "product",
@@ -221,7 +240,8 @@ def inspect_archive(data: bytes) -> dict:
             raise ReleaseError("invalid build metadata")
         version = manifest.get("version")
         if (
-            manifest.get("schema_version") != SCHEMA
+            not isinstance(schema, str)
+            or schema not in {SCHEMA, LEGACY_SCHEMA}
             or manifest.get("product") != NAME
             or manifest.get("target") != TARGET
             or manifest.get("publication") != "unsigned_local_candidate"
@@ -234,18 +254,18 @@ def inspect_archive(data: bytes) -> dict:
         ):
             raise ReleaseError("unsupported release identity")
         folder = f"{NAME}-{version}-{TARGET}"
-        expected = {f"{folder}/{name}" for name in (*PAYLOAD_NAMES, MANIFEST_NAME)}
+        expected = {f"{folder}/{name}" for name in (*payload_names, MANIFEST_NAME)}
         if set(names) != expected:
             raise ReleaseError("archive paths do not match the fixed release layout")
         files = manifest.get("files")
-        if not isinstance(files, list) or len(files) != len(PAYLOAD_NAMES):
+        if not isinstance(files, list) or len(files) != len(payload_names):
             raise ReleaseError("invalid manifest inventory")
         seen = set()
         for item in files:
             if not isinstance(item, dict) or set(item) != {"path", "size", "sha256"}:
                 raise ReleaseError("invalid manifest file record")
             name = item["path"]
-            if not isinstance(name, str) or name not in PAYLOAD_NAMES or name in seen:
+            if not isinstance(name, str) or name not in payload_names or name in seen:
                 raise ReleaseError("unknown or duplicate payload path")
             seen.add(name)
             entry = archive.getinfo(f"{folder}/{name}")
@@ -277,10 +297,12 @@ def verify(archive: Path, checksum: Path) -> dict:
         "integrity_verified": True,
         "publisher_authenticity_verified": False,
         "executable_started": False,
+        "archive_schema_version": manifest["schema_version"],
+        "license_materials_present": manifest["schema_version"] == SCHEMA,
     }
 
 
-def build(root: Path, output_dir: Path, offline: bool) -> dict:
+def build(root: Path, output_dir: Path, offline: bool, cargo_about: Path) -> dict:
     revision = clean_revision(root)
     package = tomllib.loads(git_file(root, revision, "Cargo.toml").decode("utf-8"))[
         "package"
@@ -323,6 +345,34 @@ def build(root: Path, output_dir: Path, offline: bool) -> dict:
         raise ReleaseError(
             "release output already exists; choose a new output directory"
         )
+    about_executable = cargo_about.resolve()
+    about_binary = bounded_read(about_executable, MAX_FILE)
+    about_version = (
+        run(root, [str(about_executable), "--version"]).decode("utf-8").strip()
+    )
+    if about_version != license_materials.ABOUT_VERSION:
+        raise ReleaseError(
+            f"license collection requires {license_materials.ABOUT_VERSION}"
+        )
+    about_config = git_file(root, revision, "about.toml")
+    about_report = parse_json(
+        run(
+            root,
+            [
+                str(about_executable),
+                "generate",
+                "--frozen",
+                "--fail",
+                "--format",
+                "json",
+                "--config",
+                str(root / "about.toml"),
+            ],
+            timeout=300,
+        )
+    )
+    if bounded_read(about_executable, MAX_FILE) != about_binary:
+        raise ReleaseError("cargo-about executable changed during collection")
     build_output = run(
         root,
         [
@@ -357,10 +407,7 @@ def build(root: Path, output_dir: Path, offline: bool) -> dict:
         != f"{NAME} {version}"
     ):
         raise ReleaseError("built executable version differs from the source")
-    if (
-        bounded_read(binary, MAX_FILE) != binary_data
-        or clean_revision(root) != revision
-    ):
+    if bounded_read(binary, MAX_FILE) != binary_data:
         raise ReleaseError("source or executable changed during packaging")
     lockfile = git_file(root, revision, "Cargo.lock")
     payload = {
@@ -369,7 +416,34 @@ def build(root: Path, output_dir: Path, offline: bool) -> dict:
         "README.md": git_file(root, revision, "docs/binary-release.md"),
         "Cargo.lock": lockfile,
         "DEPENDENCIES.json": dependency_inventory(metadata, lockfile),
+        "Test-WindowsCandidate.ps1": git_file(
+            root, revision, "scripts/test_windows_candidate.ps1"
+        ),
+        "WINDOWS_RUNTIME.md": git_file(root, revision, "docs/windows-runtime.md"),
     }
+    payload.update(
+        license_materials.collect(
+            metadata,
+            lockfile,
+            about_report,
+            {
+                item["package_id"]
+                for item in artifacts
+                if item.get("reason") == "compiler-artifact"
+            },
+            {
+                "version": about_version,
+                "executable_sha256": sha256(about_binary),
+                "network_access": False,
+            },
+            about_config,
+        )
+    )
+    if (
+        clean_revision(root) != revision
+        or bounded_read(binary, MAX_FILE) != binary_data
+    ):
+        raise ReleaseError("source or executable changed during packaging")
     data = archive_bytes(
         payload,
         {
@@ -407,6 +481,12 @@ def main() -> int:
     builder = commands.add_parser("build")
     builder.add_argument("--output-dir", type=Path, default=Path("target/binary-dist"))
     builder.add_argument("--offline", action="store_true")
+    builder.add_argument(
+        "--cargo-about",
+        type=Path,
+        required=True,
+        help="exact trusted cargo-about 0.9.2 executable (never installed automatically)",
+    )
     builder.add_argument("--json", action="store_true")
     verifier = commands.add_parser("verify")
     verifier.add_argument("archive", type=Path)
@@ -416,7 +496,10 @@ def main() -> int:
     try:
         if args.operation == "build":
             result = build(
-                Path(__file__).resolve().parent.parent, args.output_dir, args.offline
+                Path(__file__).resolve().parent.parent,
+                args.output_dir,
+                args.offline,
+                args.cargo_about,
             )
         else:
             result = verify(args.archive, args.checksum)
@@ -435,6 +518,7 @@ def main() -> int:
         StopIteration,
         subprocess.SubprocessError,
         zipfile.BadZipFile,
+        tarfile.TarError,
         UnicodeError,
     ) as error:
         report = {

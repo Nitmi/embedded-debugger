@@ -1,0 +1,10 @@
+# Candidate materials, not an automatic legal approval for public distribution.
+accepted = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib"]
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = false
+ignore-dev-dependencies = false
+ignore-transitive-dependencies = false
+
+# Keep the MPL component visible for source-availability review before publishing.
+[serialport]
+accepted = ["MPL-2.0"]
