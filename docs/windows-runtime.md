@@ -44,11 +44,50 @@ persistent environment variables. An existing report is refused. An execution
 policy restriction is reported by PowerShell; this workflow does not change that
 policy. Review and sign the script according to your organization's policy.
 
-## Clean Windows acceptance, still pending
+## Clean Windows Sandbox acceptance
 
-Use a disposable Windows x64 VM or Windows Sandbox. Record Windows build,
-architecture, environment origin and runtime installation state. A CI runner or
-a developer host with a reduced PATH is not equivalent to a clean machine.
+The source repository can prepare a one-run Windows Sandbox bundle around an
+already verified candidate. Preparation requires Python 3.11+ on the host; the
+Sandbox guest itself requires neither Python nor Rust:
+
+```console
+python scripts/windows_sandbox_acceptance.py prepare <archive.zip> --checksum <archive.zip.sha256> --output-dir target/clean-windows-acceptance
+```
+
+Preparation refuses an existing output directory. It verifies the candidate,
+copies only the archive, checksum and pinned guest script into an input folder,
+then creates `Run-Clean-Windows-Acceptance.wsb`. Open that file once. It launches
+Windows Sandbox with networking, clipboard, audio/video input, printer sharing
+and vGPU disabled; Protected Client is enabled. The input mapping is read-only
+and a separate folder is writable only for evidence. No source workspace, home
+directory, USB device, development tool or credential is mapped.
+
+The guest verifies all immutable inputs and release payload hashes, proves that
+the input mapping rejects a write, requires zero operational non-loopback network
+interfaces, records its Windows/VC runtime environment, and runs only `--version`
+and `runtime --help`. It never invokes device discovery or a hardware backend.
+Wait for the result, close Sandbox, then run on the host:
+
+```console
+python scripts/windows_sandbox_acceptance.py verify target/clean-windows-acceptance
+```
+
+The verifier rechecks the candidate, exact WSB restrictions, request nonce,
+read-only/network observations, `WDAGUtilityAccount` identity and both evidence
+hashes. Only this successful combination emits `clean_environment_verified=true`.
+That means a fresh disposable Windows Sandbox instance for the exact recorded
+host-derived Windows image and pre-existing VC runtime state. It does not mean a
+pristine Windows installation, authenticated publisher, broad OS compatibility,
+or hardware qualification. Evidence is not cryptographically attested and still
+requires custody appropriate to the release process.
+
+Windows Sandbox is an optional Windows feature. This project does not enable it,
+change virtualization settings or reboot the host. If the launcher is unavailable,
+enable Sandbox deliberately using Microsoft's documented process or use a fresh
+disposable Windows x64 VM and preserve equivalent evidence. A CI runner or a
+developer host with a reduced PATH is not equivalent to this acceptance.
+
+## Manual disposable-VM fallback
 
 1. Create the disposable environment with networking and device redirection
    disabled. Map only the candidate input folder read-only and a dedicated empty
@@ -63,11 +102,11 @@ a developer host with a reduced PATH is not equivalent to a clean machine.
    OS/runtime combination qualified after inspecting the evidence. Do not infer
    hardware functionality, signing or broad OS support from this smoke.
 
-The script deliberately leaves `clean_environment_verified=false`: it cannot
-prove that the supplied environment label describes a fresh VM. The operator's
-environment evidence supplies that separate qualification. Windows Sandbox and
-Hyper-V management commands were not available on the current host during this
-checkpoint; no optional Windows feature was enabled or machine reboot requested.
+The bundled host-smoke script deliberately leaves
+`clean_environment_verified=false`: it cannot prove that the supplied environment
+label describes a fresh VM. The Sandbox host verifier supplies that separate,
+bounded conclusion from its configuration and evidence. A manual VM requires
+equivalent operator provenance and cannot use that automated Sandbox conclusion.
 
 References: [DUMPBIN /DEPENDENTS](https://learn.microsoft.com/en-us/cpp/build/reference/dependents),
 [Windows Sandbox](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/).

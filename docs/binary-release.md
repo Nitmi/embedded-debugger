@@ -141,3 +141,10 @@ materials), precise runtime SBOM generation, and clean-machine testing remain
 public-release work. Neither this script nor the CI artifact step publishes a
 public release. The verifier continues to accept original v1 candidates, while
 reporting that those archives do not contain these license materials.
+
+For a disposable Windows Sandbox smoke, use the source repository's
+`scripts/windows_sandbox_acceptance.py`. It prepares a candidate-bound `.wsb`
+launcher with networking and host redirection disabled, read-only input and a
+dedicated evidence mapping, then verifies the returned guest evidence. See
+`WINDOWS_RUNTIME.md` for the exact boundary. The project never enables the
+optional Windows feature or changes host virtualization settings automatically.
