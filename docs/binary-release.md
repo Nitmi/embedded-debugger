@@ -98,7 +98,8 @@ project only. New v2 archives additionally include:
 
 - `THIRD_PARTY_LICENSES.json`: normalized cargo-about selections, original
   license/notice/copyright/author documents from Cargo.lock-checksummed crates.io
-  archives, package source URLs and explicit review gaps. Local cache paths are
+  archives, committed supplemental upstream texts, package source URLs and
+  explicit review gaps. Local cache paths are
   not exported. The builder rejects a compiled Cargo artifact whose package is
   missing from the cargo-about report; metadata-only packages remain labeled.
 - `THIRD_PARTY_NOTICES.txt`: readable license texts and original source documents,
@@ -117,6 +118,23 @@ not establish legal sufficiency or fully validate the semantics of every notice.
 See [Mozilla's MPL guidance](https://www.mozilla.org/en-US/MPL/2.0/FAQ/), especially
 source delivery for compiled components, and
 [cargo-about's configuration](https://embarkstudios.github.io/cargo-about/cli/generate/config.html).
+
+Supplemental originals are recorded in the source repository's
+`licenses/upstream-supplements.json`, read from the pinned Git commit, and copied
+into the two generated notice reports. The catalog records original text hashes,
+immutable source URLs, package archive checksums and source bindings. Seven
+packages use published Cargo VCS records; `difflib` uses a complete comparison of
+its non-generated package files to matching Git source, without claiming an
+authenticated release commit. These checks require no upstream network access
+during packaging and reject stale dependency versions or altered evidence.
+
+Seven previously missing packages now have supplemental upstream full-license
+texts. `parse_int` has a README license declaration only; that original is
+included and distinguished from full license text. Existing generic fallback
+texts and in-crate document gaps remain recorded. Authors from published
+manifests are reported separately; upstream attribution differences and missing
+copyright lines are retained for review. See each package's `supplement` and
+`review_items` in `THIRD_PARTY_LICENSES.json` and the source `licenses/README.md`.
 
 Signing, full license review (including vendored code and toolchain/runtime
 materials), precise runtime SBOM generation, and clean-machine testing remain

@@ -12,6 +12,11 @@ import tomllib
 import zipfile
 from pathlib import Path, PurePosixPath
 
+if __package__:
+    from . import license_supplements
+else:
+    import license_supplements
+
 ABOUT_VERSION = "cargo-about 0.9.2"
 MAX_CRATE = 32 * 1024 * 1024
 MAX_EXPANDED_CRATE = 128 * 1024 * 1024
@@ -195,7 +200,14 @@ def collect(
     artifact_ids: set[str],
     tool: dict,
     config: bytes,
+    supplements: bytes | None = None,
 ) -> dict[str, bytes]:
+    supplemental_packages, supplemental_documents = (
+        license_supplements.load_catalog(supplements)
+        if supplements is not None
+        else ({}, {})
+    )
+    unused_supplements = set(supplemental_packages)
     packages = {item["id"]: item for item in metadata["packages"]}
     root_id = metadata["resolve"]["root"]
     locked = {
@@ -264,6 +276,17 @@ def collect(
         if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
             raise ValueError("third-party package missing from pinned Cargo.lock")
         archive, documents = crate_materials(package, checksum)
+        supplement = None
+        identity = (package["name"], package["version"])
+        if identity in supplemental_packages:
+            supplement = license_supplements.verify_package(
+                package,
+                checksum,
+                archive,
+                supplemental_packages[identity],
+                supplemental_documents,
+            )
+            unused_supplements.remove(identity)
         chosen = sorted(selected.get(package_id, set()))
         source_archive = None
         if "MPL-2.0" in chosen:
@@ -274,6 +297,12 @@ def collect(
             review.append("cargo_about_used_default_text")
         if not documents:
             review.append("no_conventional_license_documents_in_crate")
+        if supplement and not any(
+            doc["kind"] == "upstream_license_text" for doc in supplement["documents"]
+        ):
+            review.append("supplement_contains_declaration_only_not_full_license_text")
+        if supplement and supplement["review_note"]:
+            review.append("supplement_provenance_or_attribution_review")
         if not chosen:
             review.append("metadata_only_not_in_cargo_about_graph")
         if source_archive:
@@ -291,8 +320,13 @@ def collect(
                 "source_url": f"https://crates.io/api/v1/crates/{package['name']}/{package['version']}/download",
                 "bundled_source_archive": source_archive,
                 "documents": documents,
+                "supplement": supplement,
                 "review_items": review,
             }
+        )
+    if unused_supplements:
+        raise ValueError(
+            f"stale license supplements absent from Cargo metadata: {sorted(unused_supplements)}"
         )
     licenses.sort(key=lambda item: (item["id"], item["sha256"], item["used_by"]))
     report = {
@@ -300,6 +334,9 @@ def collect(
         "scope": "windows_target_metadata_superset_including_build_and_dev_dependencies",
         "cargo_lock_sha256": digest(lockfile),
         "about_config_sha256": digest(config),
+        "supplement_catalog_sha256": digest(supplements)
+        if supplements is not None
+        else None,
         "generator": tool,
         "license_compliance_verified": False,
         "runtime_sbom": False,
@@ -345,6 +382,28 @@ def collect(
                     document["text"],
                 ]
             )
+        if record["supplement"]:
+            supplement = record["supplement"]
+            notices.extend(
+                [
+                    "",
+                    f"Supplemental materials: {record['name']} {record['version']}",
+                    f"Package authors (published manifest): {', '.join(supplement['package_authors'])}",
+                    f"Binding method: {supplement['binding']['method']}",
+                    f"Review note: {supplement['review_note'] or 'None recorded'}",
+                ]
+            )
+            for document in supplement["documents"]:
+                notices.extend(
+                    [
+                        "",
+                        f"Supplement kind: {document['kind']}",
+                        f"Source: {document['url']}",
+                        f"SHA-256: {document['sha256']}",
+                        "",
+                        document["text"],
+                    ]
+                )
     result = {
         "THIRD_PARTY_LICENSES.json": encode_json(report),
         "THIRD_PARTY_NOTICES.txt": ("\n".join(notices) + "\n").encode("utf-8"),

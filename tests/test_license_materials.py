@@ -119,7 +119,7 @@ class LicenseMaterialsTests(unittest.TestCase):
         self.checksum = materials.digest(output.getvalue())
         self.lockfile = f'[[package]]\nname="example"\nversion="1.0.0"\nsource="{self.package["source"]}"\nchecksum="{self.checksum}"\n'.encode()
 
-    def collect(self, about=None, artifacts=None):
+    def collect(self, about=None, artifacts=None, supplements=None):
         return materials.collect(
             self.metadata,
             self.lockfile,
@@ -127,7 +127,66 @@ class LicenseMaterialsTests(unittest.TestCase):
             {"local-root", "registry-example"} if artifacts is None else artifacts,
             {"version": materials.ABOUT_VERSION},
             b"configuration",
+            supplements,
         )
+
+    def test_supplements_are_in_notices_and_declarations_keep_review_gap(self):
+        catalog = b"committed fixture"
+        supplement = {
+            "binding": {"method": "cargo_vcs_info"},
+            "package_authors": ["Original author"],
+            "review_note": "Declaration only",
+            "documents": [
+                {
+                    "kind": "crate_license_declaration",
+                    "url": "https://example.test/README.md",
+                    "sha256": "a" * 64,
+                    "text": "Original upstream declaration",
+                }
+            ],
+        }
+        with (
+            patch.object(
+                materials.license_supplements,
+                "load_catalog",
+                return_value=({("example", "1.0.0"): {}}, {}),
+            ),
+            patch.object(
+                materials.license_supplements, "verify_package", return_value=supplement
+            ),
+        ):
+            result = self.collect(supplements=catalog)
+        report = json.loads(result["THIRD_PARTY_LICENSES.json"])
+        self.assertEqual(report["supplement_catalog_sha256"], materials.digest(catalog))
+        self.assertEqual(report["packages"][0]["supplement"], supplement)
+        self.assertIn(
+            "supplement_contains_declaration_only_not_full_license_text",
+            report["packages"][0]["review_items"],
+        )
+        self.assertIn(
+            "cargo_about_used_default_text", report["packages"][0]["review_items"]
+        )
+        self.assertIn(
+            b"Original upstream declaration", result["THIRD_PARTY_NOTICES.txt"]
+        )
+        self.assertIn(
+            b"https://example.test/README.md", result["THIRD_PARTY_NOTICES.txt"]
+        )
+
+    def test_stale_supplements_after_dependency_update_are_rejected(self):
+        with (
+            patch.object(
+                materials.license_supplements,
+                "load_catalog",
+                return_value=({("example", "0.9.0"): {}}, {}),
+            ),
+            self.assertRaisesRegex(ValueError, "stale license supplements"),
+        ):
+            self.collect(supplements=b"fixture")
+
+    def test_empty_supplement_catalog_is_not_silently_ignored(self):
+        with self.assertRaises(ValueError):
+            self.collect(supplements=b"")
 
     def test_preserves_original_documents_and_mpl_archive(self):
         result = self.collect()

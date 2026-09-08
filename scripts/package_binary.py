@@ -444,6 +444,7 @@ def build(root: Path, output_dir: Path, offline: bool, cargo_about: Path) -> dic
                 "network_access": False,
             },
             about_config,
+            git_file(root, revision, "licenses/upstream-supplements.json"),
         )
     )
     if (

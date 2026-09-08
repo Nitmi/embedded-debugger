@@ -320,6 +320,7 @@ class BinaryPackageTests(unittest.TestCase):
             "LICENSE": b"license\n",
             "docs/binary-release.md": b"instructions\n",
             "about.toml": b'accepted = ["MIT"]\n',
+            "licenses/upstream-supplements.json": b"committed supplement fixture\n",
             "scripts/test_windows_candidate.ps1": b"smoke script\n",
             "docs/windows-runtime.md": b"runtime guide\n",
         }
