@@ -91,6 +91,48 @@ class BinaryPackageTests(unittest.TestCase):
         self.assertFalse(report["publisher_authenticity_verified"])
         self.assertFalse(report["executable_started"])
 
+    def test_versioned_install_is_idempotent_and_does_not_execute(self):
+        archive, checksum = self.write_candidate()
+        install_root = self.root / "install"
+        with patch.object(
+            release.subprocess, "run", side_effect=AssertionError("must not execute")
+        ):
+            first = release.install(archive, checksum, install_root)
+            second = release.install(archive, checksum, install_root)
+        executable = Path(first["executable"])
+        self.assertEqual(executable.read_bytes(), self.payload["embedded-debugger.exe"])
+        self.assertFalse(first["existing_installation_verified"])
+        self.assertTrue(second["existing_installation_verified"])
+        self.assertFalse(first["path_modified"])
+        self.assertFalse(first["executable_started"])
+        record = json.loads(
+            (executable.parent / release.INSTALL_RECORD_NAME).read_bytes()
+        )
+        self.assertEqual(record["archive_sha256"], release.sha256(self.data))
+        self.assertEqual(
+            record["executable_sha256"], release.sha256(executable.read_bytes())
+        )
+
+    def test_install_refuses_changed_or_extra_existing_files(self):
+        archive, checksum = self.write_candidate()
+        install_root = self.root / "install"
+        installed = release.install(archive, checksum, install_root)
+        destination = Path(installed["installation"])
+        for change in ("changed", "extra"):
+            with self.subTest(change=change):
+                if change == "changed":
+                    (destination / "embedded-debugger.exe").write_bytes(b"changed")
+                else:
+                    (destination / "extra.txt").write_text("extra", encoding="ascii")
+                with self.assertRaises(release.ReleaseError):
+                    release.install(archive, checksum, install_root)
+                if change == "changed":
+                    (destination / "embedded-debugger.exe").write_bytes(
+                        self.payload["embedded-debugger.exe"]
+                    )
+                else:
+                    (destination / "extra.txt").unlink()
+
     def test_checksum_is_required_and_bound_to_filename(self):
         archive, checksum = self.write_candidate()
         for text in (

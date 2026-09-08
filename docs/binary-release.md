@@ -30,6 +30,17 @@ target, and source revision. It neither extracts files nor executes any program.
 A checksum detects changed content relative to the expected value; it is not a
 signature and does not establish who published the package.
 
+The same source-side tool offers a versioned, non-activating installation after
+verification. It never changes `PATH` or overwrites an existing version:
+
+```console
+python scripts/package_binary.py install <archive.zip> --checksum <archive.zip.sha256> --install-root <directory> --json
+```
+
+This requires Python on the installation host; it is a controlled deployment
+option, not a standalone end-user installer. See `docs/installation.md` for its
+idempotency, evidence and rollback boundaries.
+
 ## Use an isolated version
 
 Extract into a new directory, not over a Cargo-managed installation or another

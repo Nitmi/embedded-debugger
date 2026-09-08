@@ -4,6 +4,22 @@ For a precompiled Windows x64 candidate without Rust, use the
 [binary package workflow](binary-release.md). Do not extract it over a
 Cargo-managed installation; keep source and archive installation paths distinct.
 
+From a trusted source checkout, the package tool can install a verified candidate
+into a version-and-target-specific directory without executing it or changing
+`PATH`:
+
+```console
+python scripts/package_binary.py install <archive.zip> --checksum <archive.zip.sha256> --install-root <directory> --json
+```
+
+The command validates the archive before writing, stages new files before an
+atomic directory rename, and writes `installation.json` with the archive,
+manifest, executable and source identities. Repeating the exact install is
+idempotent. Any changed, missing or extra file in an existing destination is an
+error; the command never repairs or overwrites it. Select the returned full
+executable path explicitly for host checks and toolkit configuration. Retaining
+older version directories provides rollback without changing Cargo ownership.
+
 ## Install from a trusted checkout
 
 Use Rust 1.89 or newer and the native compiler/linker prerequisites needed to

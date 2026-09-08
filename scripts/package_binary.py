@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import stat
 import struct
 import subprocess
@@ -44,6 +45,8 @@ PAYLOAD_NAMES = (
     "WINDOWS_RUNTIME.md",
 )
 MANIFEST_NAME = "release-manifest.json"
+INSTALL_RECORD_NAME = "installation.json"
+INSTALL_SCHEMA = "embedded-debugger.binary-installation.v1"
 MAX_FILE = 128 * 1024 * 1024
 MAX_METADATA = 4 * 1024 * 1024
 MAX_ARCHIVE = MAX_FILE + 8 * MAX_METADATA
@@ -254,6 +257,10 @@ def enforce_static_windows_crt(data: bytes) -> list[str]:
     return imports
 
 
+def payload_names_for_schema(schema: str) -> tuple[str, ...]:
+    return LEGACY_PAYLOAD_NAMES if schema == LEGACY_SCHEMA else PAYLOAD_NAMES
+
+
 def archive_bytes(payload: dict[str, bytes], build: dict) -> bytes:
     if set(payload) != set(PAYLOAD_NAMES):
         raise ReleaseError("unexpected payload inventory")
@@ -313,9 +320,7 @@ def inspect_archive(data: bytes) -> dict:
         if not isinstance(manifest, dict):
             raise ReleaseError("release manifest must be an object")
         schema = manifest.get("schema_version")
-        payload_names = (
-            LEGACY_PAYLOAD_NAMES if schema == LEGACY_SCHEMA else PAYLOAD_NAMES
-        )
+        payload_names = payload_names_for_schema(schema)
         expected_fields = {
             "schema_version",
             "product",
@@ -401,6 +406,87 @@ def verify(archive: Path, checksum: Path) -> dict:
         "archive_schema_version": manifest["schema_version"],
         "license_materials_present": manifest["schema_version"] != LEGACY_SCHEMA,
         "windows_crt_linkage": manifest.get("windows_crt_linkage", "unspecified"),
+    }
+
+
+def installation_record(
+    archive_data: bytes, manifest_data: bytes, manifest: dict
+) -> bytes:
+    return json_bytes(
+        {
+            "schema_version": INSTALL_SCHEMA,
+            "product": NAME,
+            "version": manifest["version"],
+            "target": manifest["target"],
+            "source_revision": manifest["source_revision"],
+            "archive_schema_version": manifest["schema_version"],
+            "archive_sha256": sha256(archive_data),
+            "release_manifest_sha256": sha256(manifest_data),
+            "executable_sha256": next(
+                item["sha256"]
+                for item in manifest["files"]
+                if item["path"] == f"{NAME}.exe"
+            ),
+        }
+    )
+
+
+def validate_installation(
+    destination: Path, members: dict[str, bytes], record_data: bytes
+) -> None:
+    expected = {*members, INSTALL_RECORD_NAME}
+    if destination.is_symlink() or not destination.is_dir():
+        raise ReleaseError("installation destination is not a regular directory")
+    if {item.name for item in destination.iterdir()} != expected:
+        raise ReleaseError("installed file inventory differs")
+    for name, data in {**members, INSTALL_RECORD_NAME: record_data}.items():
+        if bounded_read(destination / name, MAX_FILE) != data:
+            raise ReleaseError(f"installed file differs: {name}")
+
+
+def install(archive: Path, checksum: Path, install_root: Path) -> dict:
+    verification = verify(archive, checksum)
+    archive_data = bounded_read(archive, MAX_ARCHIVE)
+    manifest = inspect_archive(archive_data)
+    payload_names = payload_names_for_schema(manifest["schema_version"])
+    folder = f"{NAME}-{manifest['version']}-{manifest['target']}"
+    with zipfile.ZipFile(io.BytesIO(archive_data)) as package:
+        manifest_data = package.read(f"{folder}/{MANIFEST_NAME}")
+        members = {name: package.read(f"{folder}/{name}") for name in payload_names}
+        members[MANIFEST_NAME] = manifest_data
+    record_data = installation_record(archive_data, manifest_data, manifest)
+
+    root = install_root.resolve()
+    if root.exists() and (root.is_symlink() or not root.is_dir()):
+        raise ReleaseError("install root is not a regular directory")
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / folder
+    if destination.exists() or destination.is_symlink():
+        validate_installation(destination, members, record_data)
+        existing = True
+    else:
+        staging = Path(tempfile.mkdtemp(prefix=f".{folder}-", dir=root))
+        try:
+            for name, data in {**members, INSTALL_RECORD_NAME: record_data}.items():
+                with (staging / name).open("xb") as stream:
+                    stream.write(data)
+            staging.rename(destination)
+        except BaseException:
+            if staging.exists() and staging.is_dir() and not staging.is_symlink():
+                shutil.rmtree(staging)
+            raise
+        validate_installation(destination, members, record_data)
+        existing = False
+
+    executable = destination / f"{NAME}.exe"
+    return {
+        **verification,
+        "installation_schema_version": INSTALL_SCHEMA,
+        "installation": str(destination),
+        "executable": str(executable),
+        "existing_installation_verified": existing,
+        "path_modified": False,
+        "executable_started": False,
     }
 
 
@@ -606,6 +692,11 @@ def main() -> int:
     verifier.add_argument("archive", type=Path)
     verifier.add_argument("--checksum", type=Path, required=True)
     verifier.add_argument("--json", action="store_true")
+    installer = commands.add_parser("install")
+    installer.add_argument("archive", type=Path)
+    installer.add_argument("--checksum", type=Path, required=True)
+    installer.add_argument("--install-root", type=Path, required=True)
+    installer.add_argument("--json", action="store_true")
     args = parser.parse_args()
     try:
         if args.operation == "build":
@@ -615,8 +706,10 @@ def main() -> int:
                 args.offline,
                 args.cargo_about,
             )
-        else:
+        elif args.operation == "verify":
             result = verify(args.archive, args.checksum)
+        else:
+            result = install(args.archive, args.checksum, args.install_root)
         report = {
             "schema_version": SCHEMA,
             "ok": True,
