@@ -375,7 +375,9 @@ def build(root: Path, output_dir: Path, offline: bool, cargo_about: Path) -> dic
             ],
             timeout=300,
         )
-        about_report = parse_json(bounded_read(about_output, MAX_FILE))
+        about_report = license_materials.parse_about_report(
+            bounded_read(about_output, MAX_FILE)
+        )
     if bounded_read(about_executable, MAX_FILE) != about_binary:
         raise ReleaseError("cargo-about executable changed during collection")
     build_output = run(
@@ -519,6 +521,7 @@ def main() -> int:
         ReleaseError,
         OSError,
         ValueError,
+        TypeError,
         KeyError,
         StopIteration,
         subprocess.SubprocessError,

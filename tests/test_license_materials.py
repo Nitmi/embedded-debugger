@@ -12,6 +12,50 @@ from scripts import license_materials as materials
 
 
 class LicenseMaterialsTests(unittest.TestCase):
+    def test_pinned_about_repeated_target_doctest_is_normalized(self):
+        data = b'{"crates":[{"package":{"targets":[{"doctest":true,"doctest":true}]}}],"licenses":[{"used_by":[{"crate":{"targets":[{"doctest":false,"doctest":false}]}}]}]}'
+        result = materials.parse_about_report(data)
+        self.assertIs(result["crates"][0]["package"]["targets"][0]["doctest"], True)
+        self.assertIs(
+            result["licenses"][0]["used_by"][0]["crate"]["targets"][0]["doctest"], False
+        )
+
+    def test_about_conflicting_repeated_and_nonboolean_doctest_rejected(self):
+        for fields in (
+            b'"doctest":true,"doctest":false',
+            b'"doctest":true,"doctest":1',
+            b'"doctest":1,"doctest":true',
+            b'"doctest":null,"doctest":null',
+            b'"doctest":true,"doctest":true,"doctest":true',
+            b'"name":"example","name":"example"',
+        ):
+            with (
+                self.subTest(fields=fields),
+                self.assertRaisesRegex(ValueError, "duplicate"),
+            ):
+                materials.parse_about_report(
+                    b'{"crates":[{"package":{"targets":[{' + fields + b"}]}}]}"
+                )
+
+    def test_about_license_records_and_unknown_paths_remain_strict(self):
+        for data in (
+            b'{"doctest":true,"doctest":true}',
+            b'{"licenses":[{"text":"a","text":"a"}]}',
+            b'{"licenses":[{"doctest":true,"doctest":true}]}',
+            b'{"crates":[{"package":{"metadata":{"targets":[{"doctest":true,"doctest":true}]}}}]}',
+            b'{"crates":[],"crates":[]}',
+        ):
+            with (
+                self.subTest(data=data),
+                self.assertRaisesRegex(ValueError, "duplicate"),
+            ):
+                materials.parse_about_report(data)
+
+    def test_about_requires_json_object_and_finite_numbers(self):
+        for data in (b"[]", b"null", b'{"value":NaN}', b'{"value":Infinity}'):
+            with self.subTest(data=data), self.assertRaises((TypeError, ValueError)):
+                materials.parse_about_report(data)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

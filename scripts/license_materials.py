@@ -22,6 +22,64 @@ DOCUMENT_NAME = re.compile(
 )
 
 
+def parse_about_report(data: bytes) -> dict:
+    """Handle cargo-about 0.9.2's repeated target doctest field only.
+
+    Retain pairs until their JSON path is known. License records and every other
+    field stay duplicate-free; the general archive JSON parser is unchanged.
+    """
+
+    class Pairs(list):
+        pass
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-JSON numeric constant: {value}")
+
+    def normalize(value: object, path: tuple = ()) -> object:
+        if isinstance(value, Pairs):
+            target = (
+                len(path) == 5
+                and path[0] == "crates"
+                and type(path[1]) is int
+                and path[2:4] == ("package", "targets")
+                and type(path[4]) is int
+            ) or (
+                len(path) == 7
+                and path[0] == "licenses"
+                and type(path[1]) is int
+                and path[2] == "used_by"
+                and type(path[3]) is int
+                and path[4:6] == ("crate", "targets")
+                and type(path[6]) is int
+            )
+            result = {}
+            doctest_repeated = False
+            for key, item in value:
+                if key in result:
+                    if not (
+                        target
+                        and key == "doctest"
+                        and not doctest_repeated
+                        and type(item) is bool
+                        and item is result[key]
+                    ):
+                        raise ValueError(f"duplicate cargo-about JSON key: {key}")
+                    doctest_repeated = True
+                else:
+                    result[key] = normalize(item, (*path, key))
+            return result
+        if isinstance(value, list):
+            return [normalize(item, (*path, index)) for index, item in enumerate(value)]
+        return value
+
+    result = normalize(
+        json.loads(data, object_pairs_hook=Pairs, parse_constant=reject_constant)
+    )
+    if not isinstance(result, dict):
+        raise TypeError("cargo-about report must be an object")
+    return result
+
+
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 

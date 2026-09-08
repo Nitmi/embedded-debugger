@@ -68,6 +68,12 @@ path and verifies its version; it never installs it or modifies PATH. CI verifie
 the pinned Windows tool archive SHA-256 before running it. A tool version string
 alone is not publisher authentication.
 
+The adapter reads cargo-about's output-file API to avoid its Windows stdout
+redirection restriction. Version 0.9.2 also repeats `doctest` in Cargo target
+metadata: only a second identical boolean at either known target-record path is
+normalized. Conflicting values and all other duplicate keys remain errors; ZIP
+manifest parsing keeps its original strict duplicate-key behavior.
+
 Run `cargo fetch --locked` as a separate network-enabled preparation step when
 caches are incomplete. cargo-about 0.9.2 queries all-platform Cargo metadata before
 filtering its graph, so its offline cache needs can exceed this Windows build.
