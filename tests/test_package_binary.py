@@ -2,6 +2,7 @@ import copy
 import io
 import json
 import stat
+import struct
 import tempfile
 import unittest
 import zipfile
@@ -27,6 +28,7 @@ class BinaryPackageTests(unittest.TestCase):
             "rustc": f"rustc test\nhost: {release.TARGET}",
             "cargo": "cargo test",
             "build_profile": "release",
+            "windows_crt_linkage": "static",
         }
         self.data = release.archive_bytes(self.payload, self.build)
 
@@ -281,6 +283,28 @@ class BinaryPackageTests(unittest.TestCase):
         with self.assertRaises(release.ReleaseError):
             release.dependency_inventory(metadata, lockfile)
 
+    def test_pe_imports_and_dynamic_crt_rejection(self):
+        data = bytearray(0x600)
+        data[:2] = b"MZ"
+        struct.pack_into("<I", data, 0x3C, 0x80)
+        data[0x80:0x84] = b"PE\0\0"
+        struct.pack_into("<H", data, 0x86, 1)
+        struct.pack_into("<H", data, 0x94, 0xF0)
+        optional = 0x98
+        struct.pack_into("<H", data, optional, 0x20B)
+        struct.pack_into("<I", data, optional + 108, 16)
+        struct.pack_into("<II", data, optional + 120, 0x1100, 40)
+        section = optional + 0xF0
+        struct.pack_into("<IIII", data, section + 8, 0x400, 0x1000, 0x400, 0x200)
+        struct.pack_into("<IIIII", data, 0x300, 1, 0, 0, 0x1180, 1)
+        data[0x380:0x38D] = b"kernel32.dll\0"
+        self.assertEqual(
+            release.enforce_static_windows_crt(bytes(data)), ["kernel32.dll"]
+        )
+        data[0x380:0x38D] = b"ucrtbase.dll\0"
+        with self.assertRaisesRegex(release.ReleaseError, "dynamic Windows CRT"):
+            release.enforce_static_windows_crt(bytes(data))
+
     def test_dirty_source_stops_before_build(self):
         with (
             patch.object(release, "run", return_value=b" M src/main.rs\n") as runner,
@@ -323,6 +347,7 @@ class BinaryPackageTests(unittest.TestCase):
             "licenses/upstream-supplements.json": b"committed supplement fixture\n",
             "scripts/test_windows_candidate.ps1": b"smoke script\n",
             "docs/windows-runtime.md": b"runtime guide\n",
+            ".cargo/config.toml": release.CRT_CONFIG,
         }
 
         def fake_run(root, args, timeout=60):
@@ -379,6 +404,11 @@ class BinaryPackageTests(unittest.TestCase):
             ),
             patch.object(release, "run", side_effect=fake_run),
             patch.object(
+                release,
+                "enforce_static_windows_crt",
+                return_value=["kernel32.dll"],
+            ),
+            patch.object(
                 release.license_materials,
                 "collect",
                 return_value={
@@ -397,12 +427,30 @@ class BinaryPackageTests(unittest.TestCase):
         ):
             data = release.archive_bytes(
                 {name: self.payload[name] for name in release.LEGACY_PAYLOAD_NAMES},
-                self.build,
+                {
+                    key: value
+                    for key, value in self.build.items()
+                    if key != "windows_crt_linkage"
+                },
             )
         result = release.verify(*self.write_candidate(data))
         self.assertTrue(result["integrity_verified"])
         self.assertFalse(result["license_materials_present"])
         self.assertEqual(result["archive_schema_version"], release.LEGACY_SCHEMA)
+
+    def test_v2_archive_verification_is_preserved(self):
+        with patch.object(release, "SCHEMA", release.LICENSE_SCHEMA):
+            data = release.archive_bytes(
+                self.payload,
+                {
+                    key: value
+                    for key, value in self.build.items()
+                    if key != "windows_crt_linkage"
+                },
+            )
+        result = release.verify(*self.write_candidate(data))
+        self.assertTrue(result["license_materials_present"])
+        self.assertEqual(result["windows_crt_linkage"], "unspecified")
 
     def test_schema_and_license_payload_layout_must_agree(self):
         with self.assertRaises(release.ReleaseError):

@@ -1,26 +1,22 @@
 # Windows runtime qualification
 
-The Windows x64 candidate runs without Rust, Cargo or Python. It is not a
-fully static executable: the 2026-09-06 candidate with executable SHA-256
-`f1cd8c50b8a8e429d1e404c0e84c4c3ce87593815a63d92c7c352391c2f26275`
-imports `VCRUNTIME140.dll` and Windows Universal CRT API sets. Import inspection
-used Microsoft DUMPBIN 14.44.35226.0 with `/DEPENDENTS`; it did not run the binary.
-Recheck imports after compiler, linker, dependency or build-flag changes.
+The Windows x64 candidate runs without Rust, Cargo, Python or a separately
+installed Microsoft Visual C++ Redistributable. Windows builds request Rust's
+static CRT target feature, and the release builder parses the resulting PE import
+directory and rejects `VCRUNTIME*`, `MSVCP*`, `ucrtbase.dll` and
+`api-ms-win-crt-*` imports. The v3 release manifest records
+`windows_crt_linkage=static` only after that check passes.
 
 ## Runtime prerequisite
 
-Use Microsoft's supported x64 Visual C++ v14 Redistributable when the required
-runtime is absent. The runtime must be at least as recent as the build tools
-used for the binary. Download it only from the
-[official Microsoft page](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
-Do not download individual DLLs from third-party sites or copy DLLs from a
-development machine into the CLI package. This package does not install or bundle
-the redistributable. Driver installation and USB access are separate checks.
-
-The inspected build also imports Windows system libraries including `winusb.dll`,
+The executable is not fully static. It still imports Windows system libraries
+including `winusb.dll`,
 `setupapi.dll`, `cfgmgr32.dll`, `ws2_32.dll`, COM and cryptographic libraries.
 An import list is not a complete runtime behavior inventory: dynamically loaded
 libraries and backend-specific tools may still be needed for hardware workflows.
+Driver installation and USB access are separate checks. Static CRT code is updated
+only when the executable is rebuilt, so security and servicing releases must
+rebuild and repeat clean-environment qualification.
 
 ## Reusable host smoke
 
@@ -97,10 +93,7 @@ developer host with a reduced PATH is not equivalent to this acceptance.
 2. Copy the verified candidate into the guest. Do not install Rust, Python,
    drivers or the toolkit. Run the host smoke once and preserve its JSON,
    including a failure if the VC runtime is missing.
-3. If needed, install the authentic Microsoft x64 redistributable **inside the
-   guest only**, then run the smoke with a new report filename. Record installer
-   version/hash and exit code. Do not use a global PATH override to mask failure.
-4. Preserve the guest's provenance and both results. Only mark that exact
+3. Preserve the guest's provenance and results. Only mark that exact
    OS/runtime combination qualified after inspecting the evidence. Do not infer
    hardware functionality, signing or broad OS support from this smoke.
 
@@ -110,16 +103,15 @@ label describes a fresh VM. The Sandbox host verifier supplies that separate,
 bounded conclusion from its configuration and evidence. A manual VM requires
 equivalent operator provenance and cannot use that automated Sandbox conclusion.
 
-If the first clean run records Windows exit status `0xC0000135` and no system
-`VCRUNTIME140.dll`, obtain the latest supported x64 Visual C++ Redistributable
-from Microsoft's official permalink. Verify its Authenticode signature before
-preparing a new, non-overwriting run:
+The acceptance tool retains an optional runtime-installer mode for diagnosing and
+qualifying older v1/v2 candidates that dynamically import the Visual C++ runtime:
 
 ```console
 python scripts/windows_sandbox_acceptance.py prepare <archive.zip> --checksum <archive.zip.sha256> --runtime-installer <vc_redist.x64.exe> --output-dir target/clean-windows-with-runtime
 ```
 
-The host requires a valid Microsoft Corporation signature and records the exact
+For those legacy candidates, the host requires a valid Microsoft Corporation
+signature and records the exact
 installer SHA-256 and file version. The guest rechecks the file and signature,
 runs `/install /quiet /norestart`, preserves the installer log, records the exit
 code and runtime DLL version, then performs the same two-command smoke. The host

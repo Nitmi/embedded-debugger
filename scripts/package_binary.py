@@ -9,6 +9,7 @@ import io
 import json
 import re
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -24,7 +25,8 @@ else:
 
 NAME = "embedded-debugger"
 TARGET = "x86_64-pc-windows-msvc"
-SCHEMA = "embedded-debugger.binary-release.v2"
+SCHEMA = "embedded-debugger.binary-release.v3"
+LICENSE_SCHEMA = "embedded-debugger.binary-release.v2"
 LEGACY_SCHEMA = "embedded-debugger.binary-release.v1"
 LEGACY_PAYLOAD_NAMES = (
     "Cargo.lock",
@@ -47,6 +49,13 @@ MAX_METADATA = 4 * 1024 * 1024
 MAX_ARCHIVE = MAX_FILE + 8 * MAX_METADATA
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 HASH = re.compile(r"[0-9a-f]{64}")
+CRT_CONFIG = b'[target.x86_64-pc-windows-msvc]\nrustflags = ["-C", "target-feature=+crt-static"]\n'
+FORBIDDEN_CRT_IMPORTS = (
+    "vcruntime",
+    "msvcp",
+    "ucrtbase.dll",
+    "api-ms-win-crt-",
+)
 
 
 class ReleaseError(ValueError):
@@ -159,6 +168,92 @@ def dependency_inventory(metadata: dict, lockfile: bytes) -> bytes:
     )
 
 
+def pe_imports(data: bytes) -> list[str]:
+    """Return direct PE32+ imports without loading or executing the image."""
+
+    def unpack(offset: int, pattern: str) -> tuple:
+        size = struct.calcsize(pattern)
+        if offset < 0 or offset + size > len(data):
+            raise ReleaseError("truncated PE executable")
+        return struct.unpack_from(pattern, data, offset)
+
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise ReleaseError("executable is not a PE image")
+    pe_offset = unpack(0x3C, "<I")[0]
+    if pe_offset + 24 > len(data) or data[pe_offset : pe_offset + 4] != b"PE\0\0":
+        raise ReleaseError("invalid PE signature")
+    section_count = unpack(pe_offset + 6, "<H")[0]
+    optional_size = unpack(pe_offset + 20, "<H")[0]
+    optional = pe_offset + 24
+    if optional_size < 128 or optional + optional_size > len(data):
+        raise ReleaseError("invalid PE optional header")
+    if unpack(optional, "<H")[0] != 0x20B:
+        raise ReleaseError("expected a PE32+ executable")
+    directory_count = unpack(optional + 108, "<I")[0]
+    if directory_count < 2:
+        raise ReleaseError("PE image has no import directory")
+    import_rva, import_size = unpack(optional + 120, "<II")
+    if not import_rva or import_size < 20:
+        raise ReleaseError("PE image has an empty import directory")
+
+    sections = []
+    section_table = optional + optional_size
+    for index in range(section_count):
+        offset = section_table + index * 40
+        virtual_size, virtual_address, raw_size, raw_offset = unpack(
+            offset + 8, "<IIII"
+        )
+        sections.append(
+            (virtual_address, max(virtual_size, raw_size), raw_offset, raw_size)
+        )
+
+    def rva_offset(rva: int) -> int:
+        for virtual_address, span, raw_offset, raw_size in sections:
+            relative = rva - virtual_address
+            if 0 <= relative < span and relative < raw_size:
+                offset = raw_offset + relative
+                if offset < len(data):
+                    return offset
+        raise ReleaseError("PE import RVA is outside file-backed sections")
+
+    imports = []
+    descriptor = rva_offset(import_rva)
+    descriptor_limit = min(len(data), descriptor + import_size)
+    while descriptor + 20 <= descriptor_limit:
+        fields = unpack(descriptor, "<IIIII")
+        if fields == (0, 0, 0, 0, 0):
+            if not imports:
+                raise ReleaseError("PE image has no imported libraries")
+            return imports
+        name_offset = rva_offset(fields[3])
+        end = data.find(b"\0", name_offset, min(len(data), name_offset + 260))
+        if end < 0:
+            raise ReleaseError("unterminated PE import name")
+        try:
+            name = data[name_offset:end].decode("ascii").lower()
+        except UnicodeDecodeError as error:
+            raise ReleaseError("non-ASCII PE import name") from error
+        if not name or name in imports:
+            raise ReleaseError("empty or duplicate PE import name")
+        imports.append(name)
+        descriptor += 20
+    raise ReleaseError("unterminated PE import directory")
+
+
+def enforce_static_windows_crt(data: bytes) -> list[str]:
+    imports = pe_imports(data)
+    forbidden = [
+        name
+        for name in imports
+        if any(token in name for token in FORBIDDEN_CRT_IMPORTS)
+    ]
+    if forbidden:
+        raise ReleaseError(
+            "dynamic Windows CRT imports are forbidden: " + ", ".join(forbidden)
+        )
+    return imports
+
+
 def archive_bytes(payload: dict[str, bytes], build: dict) -> bytes:
     if set(payload) != set(PAYLOAD_NAMES):
         raise ReleaseError("unexpected payload inventory")
@@ -221,7 +316,7 @@ def inspect_archive(data: bytes) -> dict:
         payload_names = (
             LEGACY_PAYLOAD_NAMES if schema == LEGACY_SCHEMA else PAYLOAD_NAMES
         )
-        if set(manifest) != {
+        expected_fields = {
             "schema_version",
             "product",
             "publication",
@@ -232,7 +327,10 @@ def inspect_archive(data: bytes) -> dict:
             "rustc",
             "cargo",
             "build_profile",
-        }:
+        }
+        if schema == SCHEMA:
+            expected_fields.add("windows_crt_linkage")
+        if set(manifest) != expected_fields:
             raise ReleaseError("unexpected release manifest fields")
         if manifest["build_profile"] != "release" or any(
             not isinstance(manifest[key], str) or not 0 < len(manifest[key]) <= 4096
@@ -242,7 +340,7 @@ def inspect_archive(data: bytes) -> dict:
         version = manifest.get("version")
         if (
             not isinstance(schema, str)
-            or schema not in {SCHEMA, LEGACY_SCHEMA}
+            or schema not in {SCHEMA, LICENSE_SCHEMA, LEGACY_SCHEMA}
             or manifest.get("product") != NAME
             or manifest.get("target") != TARGET
             or manifest.get("publication") != "unsigned_local_candidate"
@@ -254,6 +352,8 @@ def inspect_archive(data: bytes) -> dict:
             )
         ):
             raise ReleaseError("unsupported release identity")
+        if schema == SCHEMA and manifest["windows_crt_linkage"] != "static":
+            raise ReleaseError("unsupported Windows CRT linkage")
         folder = f"{NAME}-{version}-{TARGET}"
         expected = {f"{folder}/{name}" for name in (*payload_names, MANIFEST_NAME)}
         if set(names) != expected:
@@ -299,12 +399,15 @@ def verify(archive: Path, checksum: Path) -> dict:
         "publisher_authenticity_verified": False,
         "executable_started": False,
         "archive_schema_version": manifest["schema_version"],
-        "license_materials_present": manifest["schema_version"] == SCHEMA,
+        "license_materials_present": manifest["schema_version"] != LEGACY_SCHEMA,
+        "windows_crt_linkage": manifest.get("windows_crt_linkage", "unspecified"),
     }
 
 
 def build(root: Path, output_dir: Path, offline: bool, cargo_about: Path) -> dict:
     revision = clean_revision(root)
+    if git_file(root, revision, ".cargo/config.toml") != CRT_CONFIG:
+        raise ReleaseError("committed Windows static CRT configuration differs")
     package = tomllib.loads(git_file(root, revision, "Cargo.toml").decode("utf-8"))[
         "package"
     ]
@@ -409,6 +512,7 @@ def build(root: Path, output_dir: Path, offline: bool, cargo_about: Path) -> dic
         raise ReleaseError("Cargo did not report one exact executable artifact")
     binary = binaries[0]
     binary_data = bounded_read(binary, MAX_FILE)
+    enforce_static_windows_crt(binary_data)
     if (
         run(root, [str(binary), "--version"]).decode("utf-8").strip()
         != f"{NAME} {version}"
@@ -461,6 +565,7 @@ def build(root: Path, output_dir: Path, offline: bool, cargo_about: Path) -> dic
             "rustc": rustc,
             "cargo": cargo_version,
             "build_profile": "release",
+            "windows_crt_linkage": "static",
         },
     )
     inspect_archive(data)
@@ -480,6 +585,7 @@ def build(root: Path, output_dir: Path, offline: bool, cargo_about: Path) -> dic
         "target": TARGET,
         "size": len(data),
         "file_count": len(payload) + 1,
+        "windows_crt_linkage": "static",
     }
 
 

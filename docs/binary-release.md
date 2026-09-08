@@ -4,10 +4,10 @@ This is an unsigned precompiled `embedded-debugger` candidate for Windows x64
 (`x86_64-pc-windows-msvc`). Running the CLI does not require Rust or Python.
 It does not bundle the toolkit plugin, baud, BLEA, OpenOCD, GDB, probe drivers,
 firmware, or target configuration. Install the components your workflow needs
-separately. Host runtime prerequisites and driver requirements still apply;
+separately. Windows system-library and driver requirements still apply;
 this archive is not a claim of clean-machine or new-board qualification. See the
-bundled `WINDOWS_RUNTIME.md` and `Test-WindowsCandidate.ps1` for runtime prerequisites
-and the bounded host smoke. The inspected build imports `VCRUNTIME140.dll`.
+bundled `WINDOWS_RUNTIME.md` and `Test-WindowsCandidate.ps1` for runtime boundaries
+and the bounded host smoke. v3 candidates statically link the Rust MSVC CRT.
 
 ## Verify before running
 
@@ -82,7 +82,9 @@ fall back to online license lookups. Omit the builder's `--offline` only when Ca
 build/metadata dependency downloads are intended. The builder uses
 `cargo build --locked --release --bin embedded-debugger --target
 x86_64-pc-windows-msvc`, selects Cargo's reported executable, and checks its
-version. It records the source commit, Rust/Cargo versions, binary hash,
+version. It requires the committed Windows static-CRT configuration, parses the
+final PE imports to reject dynamic VC/UCRT dependencies, and records the linkage
+policy in the v3 manifest. It also records the source commit, Rust/Cargo versions, binary hash,
 cargo-about executable hash, and locked dependency inventory. Builds execute trusted source build scripts on
 the host, but the builder never invokes hardware operations or installs tools.
 Existing archive/checksum outputs are refused; choose a new output directory.
@@ -94,7 +96,7 @@ reproducibility, not a promise of reproducible compiler output across machines.
 
 `DEPENDENCIES.json` lists target-filtered Cargo metadata, including build and
 development dependencies. It is not a precise runtime SBOM. `LICENSE` covers this
-project only. New v2 archives additionally include:
+project only. v2 and v3 archives additionally include:
 
 - `THIRD_PARTY_LICENSES.json`: normalized cargo-about selections, original
   license/notice/copyright/author documents from Cargo.lock-checksummed crates.io
@@ -139,8 +141,8 @@ copyright lines are retained for review. See each package's `supplement` and
 Signing, full license review (including vendored code and toolchain/runtime
 materials), precise runtime SBOM generation, and clean-machine testing remain
 public-release work. Neither this script nor the CI artifact step publishes a
-public release. The verifier continues to accept original v1 candidates, while
-reporting that those archives do not contain these license materials.
+public release. The verifier continues to accept original v1 and v2 candidates;
+v1 lacks the license payloads, and v1/v2 do not declare CRT linkage.
 
 For a disposable Windows Sandbox smoke, use the source repository's
 `scripts/windows_sandbox_acceptance.py`. It prepares a candidate-bound `.wsb`
