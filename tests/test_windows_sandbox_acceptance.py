@@ -171,6 +171,7 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
         (self.output / "evidence" / sandbox.INSTALL_LOG_NAME).write_bytes(log_data)
         result_path = self.output / "evidence" / sandbox.RESULT_NAME
         result = json.loads(result_path.read_bytes())
+        result["environment"]["system_vcruntime140_before_execution"] = None
         result["runtime_installation"] = {
             "attempted": True,
             "installer_sha256": request["runtime_installer"]["sha256"],
@@ -191,6 +192,23 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
         self.prepare()
         with self.assertRaisesRegex(ValueError, "already exists"):
             self.prepare()
+
+    def test_invalid_installer_signature_leaves_no_partial_output(self):
+        installer = self.root / "invalid.exe"
+        installer.write_bytes(b"not signed")
+        with (
+            patch.object(sandbox.package_binary, "verify", return_value=self.candidate),
+            patch.object(
+                sandbox,
+                "authenticode_identity",
+                side_effect=ValueError("invalid signature"),
+            ),
+            self.assertRaisesRegex(ValueError, "invalid signature"),
+        ):
+            sandbox.prepare(
+                self.root, self.archive, self.checksum, self.output, installer
+            )
+        self.assertFalse(self.output.exists())
 
     def test_valid_sandbox_evidence_is_qualified(self):
         self.prepare()

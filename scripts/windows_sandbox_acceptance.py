@@ -217,27 +217,21 @@ def prepare(
     )
     archive_data = package_binary.bounded_read(archive, package_binary.MAX_ARCHIVE)
     checksum_data = package_binary.bounded_read(checksum, 1024)
-    output_dir.mkdir(parents=True)
     input_dir = output_dir / "input"
     evidence_dir = output_dir / "evidence"
-    input_dir.mkdir()
-    evidence_dir.mkdir()
-    write_new(input_dir / archive.name, archive_data)
-    write_new(input_dir / checksum.name, checksum_data)
-    write_new(input_dir / SCRIPT_NAME, script)
     immutable_inputs = {
         archive.name: sha256(archive_data),
         checksum.name: sha256(checksum_data),
         SCRIPT_NAME: sha256(script),
     }
     installer_record = None
+    installer_data = None
     if runtime_installer is not None:
         installer_data = package_binary.bounded_read(
             runtime_installer, package_binary.MAX_FILE
         )
         installer_identity = authenticode_identity(runtime_installer.resolve())
         installer_name = "vc_redist.x64.exe"
-        write_new(input_dir / installer_name, installer_data)
         immutable_inputs[installer_name] = sha256(installer_data)
         installer_record = {
             "name": installer_name,
@@ -285,9 +279,17 @@ def prepare(
         if item["path"] == "embedded-debugger.exe"
     )
     request_data = json_bytes(request)
-    write_new(input_dir / REQUEST_NAME, request_data)
     config = sandbox_configuration(input_dir.resolve(), evidence_dir.resolve())
     validate_configuration(config, input_dir.resolve(), evidence_dir.resolve())
+    output_dir.mkdir(parents=True)
+    input_dir.mkdir()
+    evidence_dir.mkdir()
+    write_new(input_dir / archive.name, archive_data)
+    write_new(input_dir / checksum.name, checksum_data)
+    write_new(input_dir / SCRIPT_NAME, script)
+    if installer_data is not None:
+        write_new(input_dir / "vc_redist.x64.exe", installer_data)
+    write_new(input_dir / REQUEST_NAME, request_data)
     launcher = output_dir / "Run-Clean-Windows-Acceptance.wsb"
     write_new(launcher, config)
     return {
@@ -504,6 +506,11 @@ def verify(root_dir: Path) -> dict:
             and isinstance(installation["vcruntime140_after_installation"], str)
             and installation["log_sha256"] == sha256(log_data)
         )
+    expected_smoke_runtime = (
+        installation["vcruntime140_after_installation"]
+        if installer is not None
+        else environment["system_vcruntime140_before_execution"]
+    )
     checks = smoke["checks"]
     if not isinstance(checks, list) or len(checks) != 2:
         raise ValueError("Windows Sandbox smoke checks differ")
@@ -548,8 +555,7 @@ def verify(root_dir: Path) -> dict:
         or smoke["expected_version"] != request["version"]
         or smoke["os_version"] != environment["os_version"]
         or smoke["is_64_bit_os"] != environment["is_64_bit_os"]
-        or smoke["system_vcruntime140"]
-        != environment["system_vcruntime140_before_execution"]
+        or smoke["system_vcruntime140"] != expected_smoke_runtime
         or not smoke_checks_ok
     ):
         raise ValueError("Windows Sandbox evidence does not meet acceptance policy")
