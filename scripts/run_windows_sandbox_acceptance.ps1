@@ -79,7 +79,10 @@ try {
     $work = Join-Path $env:TEMP ('eat-clean-acceptance-' + $request.nonce)
     if (Test-Path -LiteralPath $work) { throw 'Guest work directory already exists' }
     New-Item -ItemType Directory -Path $work | Out-Null
-    Expand-Archive -LiteralPath $archivePath -DestinationPath $work
+    # Windows 11 24H2 Sandbox can omit inbox Store-backed modules, including
+    # Microsoft.PowerShell.Archive. Use the framework ZIP API instead.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $work)
     $candidateRoot = Join-Path $work "embedded-debugger-$($request.version)-$($request.target)"
     $manifest = Get-Content -Raw -LiteralPath (Join-Path $candidateRoot 'release-manifest.json') | ConvertFrom-Json
     if ($manifest.source_revision -cne $request.source_revision -or $manifest.target -cne $request.target -or $manifest.version -cne $request.version) {

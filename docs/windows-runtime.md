@@ -66,6 +66,8 @@ The guest verifies all immutable inputs and release payload hashes, proves that
 the input mapping rejects a write, requires zero operational non-loopback network
 interfaces, records its Windows/VC runtime environment, and runs only `--version`
 and `runtime --help`. It never invokes device discovery or a hardware backend.
+It extracts with the Windows .NET ZIP API rather than `Expand-Archive`, because
+Windows 11 24H2 Sandbox images can omit the Store-backed PowerShell Archive module.
 Wait for the result, close Sandbox, then run on the host:
 
 ```console

@@ -226,6 +226,14 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sandbox.parse_json(b'{"value":NaN}')
 
+    def test_guest_uses_framework_zip_api_not_optional_archive_module(self):
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "scripts/run_windows_sandbox_acceptance.ps1"
+        ).read_text()
+        self.assertIn("[IO.Compression.ZipFile]::ExtractToDirectory", script)
+        self.assertNotIn("\n    Expand-Archive ", script)
+
 
 if __name__ == "__main__":
     unittest.main()
