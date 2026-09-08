@@ -20,6 +20,7 @@ $result = [ordered]@{
     hardware_access = $false
     environment = $null
     smoke_report_sha256 = $null
+    runtime_installation = $null
     error = $null
 }
 
@@ -70,6 +71,33 @@ try {
     foreach ($entry in $request.immutable_inputs.psobject.Properties) {
         $path = Join-Path $InputDirectory $entry.Name
         if ((Get-Sha256 $path) -cne $entry.Value) { throw "Immutable input differs: $($entry.Name)" }
+    }
+    if ($null -ne $request.runtime_installer) {
+        $installerPath = Join-Path $InputDirectory $request.runtime_installer.name
+        $signature = Get-AuthenticodeSignature -LiteralPath $installerPath
+        $fileVersion = (Get-Item -LiteralPath $installerPath).VersionInfo.FileVersion
+        if ((Get-Sha256 $installerPath) -cne $request.runtime_installer.sha256 -or
+            [string]$signature.Status -cne $request.runtime_installer.signature_status -or
+            $signature.SignerCertificate.Subject -cne $request.runtime_installer.signer_subject -or
+            $fileVersion -cne $request.runtime_installer.file_version) {
+            throw 'Runtime installer identity differs'
+        }
+        $installLog = Join-Path $EvidenceDirectory 'vc-redist-install.log'
+        $install = Start-Process -FilePath $installerPath -ArgumentList @('/install', '/quiet', '/norestart', '/log', $installLog) -Wait -PassThru
+        if ($install.ExitCode -notin @(0, 1638, 3010)) { throw "Runtime installer failed: $($install.ExitCode)" }
+        $runtimeAfter = Get-Item -LiteralPath "$env:SystemRoot\System32\VCRUNTIME140.dll" -ErrorAction SilentlyContinue
+        if (-not $runtimeAfter -or -not (Test-Path -LiteralPath $installLog)) { throw 'Runtime installation evidence incomplete' }
+        $result.runtime_installation = [ordered]@{
+            attempted = $true
+            installer_sha256 = $request.runtime_installer.sha256
+            signature_status = [string]$signature.Status
+            signer_subject = $signature.SignerCertificate.Subject
+            file_version = $fileVersion
+            exit_code = $install.ExitCode
+            restart_required = ($install.ExitCode -eq 3010)
+            vcruntime140_after_installation = $runtimeAfter.VersionInfo.FileVersion
+            log_sha256 = Get-Sha256 $installLog
+        }
     }
     $archivePath = Join-Path $InputDirectory $request.archive_name
     if ((Get-Sha256 $archivePath) -cne $request.archive_sha256) { throw 'Candidate archive checksum mismatch' }

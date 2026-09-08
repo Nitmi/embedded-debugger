@@ -7,8 +7,10 @@ import argparse
 import datetime
 import hashlib
 import json
+import os
 import re
 import secrets
+import subprocess
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -25,6 +27,7 @@ SCRIPT_NAME = "Run-WindowsSandboxAcceptance.ps1"
 REQUEST_NAME = "request.json"
 RESULT_NAME = "sandbox-result.json"
 SMOKE_NAME = "windows-host-smoke.json"
+INSTALL_LOG_NAME = "vc-redist-install.log"
 MAX_EVIDENCE = 4 * 1024 * 1024
 HASH = re.compile(r"[0-9a-f]{64}")
 
@@ -62,6 +65,61 @@ def exact_fields(value: object, expected: set[str], description: str) -> dict:
 def write_new(path: Path, data: bytes) -> None:
     with path.open("xb") as stream:
         stream.write(data)
+
+
+def authenticode_identity(path: Path) -> dict:
+    if os.name != "nt":
+        raise ValueError("runtime installer verification requires Windows")
+    literal_path = str(path).replace("'", "''")
+    command = (
+        f"$p='{literal_path}';$s=Get-AuthenticodeSignature -LiteralPath $p;"
+        "$f=Get-Item -LiteralPath $p;"
+        "[pscustomobject]@{status=[string]$s.Status;"
+        "subject=$s.SignerCertificate.Subject;"
+        "file_version=$f.VersionInfo.FileVersion}|ConvertTo-Json -Compress"
+    )
+    environment = os.environ.copy()
+    windows = Path(environment.get("SystemRoot", r"C:\Windows"))
+    program_files = Path(
+        environment.get("ProgramFiles", windows.drive + r"\Program Files")
+    )
+    # Codex can prepend PowerShell 7 modules to PSModulePath. Windows PowerShell
+    # then fails to import its own Security module due to duplicate type data.
+    environment["PSModulePath"] = ";".join(
+        (
+            str(program_files / "WindowsPowerShell/Modules"),
+            str(windows / "system32/WindowsPowerShell/v1.0/Modules"),
+        )
+    )
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ],
+        capture_output=True,
+        check=False,
+        env=environment,
+        timeout=30,
+    )
+    if result.returncode or result.stderr:
+        raise ValueError("cannot verify runtime installer Authenticode signature")
+    identity = exact_fields(
+        parse_json(result.stdout),
+        {"status", "subject", "file_version"},
+        "runtime installer identity",
+    )
+    if (
+        identity["status"] != "Valid"
+        or identity["subject"]
+        != "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+        or not isinstance(identity["file_version"], str)
+        or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", identity["file_version"])
+    ):
+        raise ValueError("runtime installer is not the expected valid Microsoft signer")
+    return identity
 
 
 def sandbox_configuration(input_dir: Path, evidence_dir: Path) -> bytes:
@@ -148,6 +206,7 @@ def prepare(
     archive: Path,
     checksum: Path,
     output_dir: Path,
+    runtime_installer: Path | None = None,
 ) -> dict:
     verification = package_binary.verify(archive, checksum)
     if output_dir.exists() or output_dir.is_symlink():
@@ -171,6 +230,23 @@ def prepare(
         checksum.name: sha256(checksum_data),
         SCRIPT_NAME: sha256(script),
     }
+    installer_record = None
+    if runtime_installer is not None:
+        installer_data = package_binary.bounded_read(
+            runtime_installer, package_binary.MAX_FILE
+        )
+        installer_identity = authenticode_identity(runtime_installer.resolve())
+        installer_name = "vc_redist.x64.exe"
+        write_new(input_dir / installer_name, installer_data)
+        immutable_inputs[installer_name] = sha256(installer_data)
+        installer_record = {
+            "name": installer_name,
+            "sha256": sha256(installer_data),
+            "signature_status": installer_identity["status"],
+            "signer_subject": installer_identity["subject"],
+            "file_version": installer_identity["file_version"],
+            "source_url": "https://aka.ms/vc14/vc_redist.x64.exe",
+        }
     request = {
         "schema_version": REQUEST_SCHEMA,
         "nonce": secrets.token_hex(32),
@@ -183,6 +259,7 @@ def prepare(
         "target": verification["target"],
         "source_revision": verification["source_revision"],
         "immutable_inputs": immutable_inputs,
+        "runtime_installer": installer_record,
         "controls": {
             "networking": "disabled",
             "clipboard": "disabled",
@@ -247,6 +324,7 @@ def verify(root_dir: Path) -> dict:
             "target",
             "source_revision",
             "immutable_inputs",
+            "runtime_installer",
             "controls",
         },
         "sandbox request",
@@ -277,9 +355,36 @@ def verify(root_dir: Path) -> dict:
     }
     if request["controls"] != expected_controls:
         raise ValueError("Windows Sandbox request controls differ")
-    if not isinstance(request["immutable_inputs"], dict) or set(
-        request["immutable_inputs"]
-    ) != {request["archive_name"], request["checksum_name"], SCRIPT_NAME}:
+    expected_inputs = {request["archive_name"], request["checksum_name"], SCRIPT_NAME}
+    installer = request["runtime_installer"]
+    if installer is not None:
+        exact_fields(
+            installer,
+            {
+                "name",
+                "sha256",
+                "signature_status",
+                "signer_subject",
+                "file_version",
+                "source_url",
+            },
+            "runtime installer",
+        )
+        if (
+            installer["name"] != "vc_redist.x64.exe"
+            or not HASH.fullmatch(installer["sha256"])
+            or installer["signature_status"] != "Valid"
+            or installer["signer_subject"]
+            != "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+            or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", installer["file_version"])
+            or installer["source_url"] != "https://aka.ms/vc14/vc_redist.x64.exe"
+        ):
+            raise ValueError("invalid pinned runtime installer")
+        expected_inputs.add(installer["name"])
+    if (
+        not isinstance(request["immutable_inputs"], dict)
+        or set(request["immutable_inputs"]) != expected_inputs
+    ):
         raise ValueError("unexpected immutable input inventory")
     for name, expected in request["immutable_inputs"].items():
         if not isinstance(expected, str) or not HASH.fullmatch(expected):
@@ -326,6 +431,7 @@ def verify(root_dir: Path) -> dict:
             "hardware_access",
             "environment",
             "smoke_report_sha256",
+            "runtime_installation",
             "error",
         },
         "sandbox result",
@@ -366,6 +472,38 @@ def verify(root_dir: Path) -> dict:
         },
         "sandbox environment",
     )
+    installation = result["runtime_installation"]
+    installation_ok = installer is None and installation is None
+    if installer is not None:
+        exact_fields(
+            installation,
+            {
+                "attempted",
+                "installer_sha256",
+                "signature_status",
+                "signer_subject",
+                "file_version",
+                "exit_code",
+                "restart_required",
+                "vcruntime140_after_installation",
+                "log_sha256",
+            },
+            "runtime installation",
+        )
+        log_data = package_binary.bounded_read(
+            evidence_dir / INSTALL_LOG_NAME, MAX_EVIDENCE
+        )
+        installation_ok = (
+            installation["attempted"] is True
+            and installation["installer_sha256"] == installer["sha256"]
+            and installation["signature_status"] == installer["signature_status"]
+            and installation["signer_subject"] == installer["signer_subject"]
+            and installation["file_version"] == installer["file_version"]
+            and installation["exit_code"] in {0, 1638, 3010}
+            and installation["restart_required"] is (installation["exit_code"] == 3010)
+            and isinstance(installation["vcruntime140_after_installation"], str)
+            and installation["log_sha256"] == sha256(log_data)
+        )
     checks = smoke["checks"]
     if not isinstance(checks, list) or len(checks) != 2:
         raise ValueError("Windows Sandbox smoke checks differ")
@@ -395,6 +533,7 @@ def verify(root_dir: Path) -> dict:
         or result["network_interfaces_up_non_loopback"] != 0
         or result["hardware_access"] is not False
         or result["error"] is not None
+        or not installation_ok
         or environment["user_name"] != "WDAGUtilityAccount"
         or environment["is_64_bit_os"] is not True
         or result["smoke_report_sha256"] != sha256(smoke_data)
@@ -423,6 +562,7 @@ def verify(root_dir: Path) -> dict:
         "request_sha256": sha256(request_data),
         "configuration_sha256": sha256(config_data),
         "smoke_report_sha256": sha256(smoke_data),
+        "runtime_installation": installation,
         "environment": environment,
         "clean_environment_verified": True,
         "hardware_access": False,
@@ -437,6 +577,7 @@ def main() -> int:
     prepare_parser.add_argument("archive", type=Path)
     prepare_parser.add_argument("--checksum", type=Path, required=True)
     prepare_parser.add_argument("--output-dir", type=Path, required=True)
+    prepare_parser.add_argument("--runtime-installer", type=Path)
     prepare_parser.add_argument("--json", action="store_true")
     verify_parser = commands.add_parser("verify")
     verify_parser.add_argument("directory", type=Path)
@@ -445,7 +586,13 @@ def main() -> int:
     try:
         root = Path(__file__).resolve().parent.parent
         result = (
-            prepare(root, args.archive, args.checksum, args.output_dir)
+            prepare(
+                root,
+                args.archive,
+                args.checksum,
+                args.output_dir,
+                args.runtime_installer,
+            )
             if args.operation == "prepare"
             else verify(args.directory)
         )

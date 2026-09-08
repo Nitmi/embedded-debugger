@@ -47,6 +47,25 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
         ):
             return sandbox.prepare(self.root, self.archive, self.checksum, self.output)
 
+    def prepare_with_installer(self):
+        installer = self.root / "download.exe"
+        installer.write_bytes(b"signed installer fixture")
+        with (
+            patch.object(sandbox.package_binary, "verify", return_value=self.candidate),
+            patch.object(
+                sandbox,
+                "authenticode_identity",
+                return_value={
+                    "status": "Valid",
+                    "subject": "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+                    "file_version": "14.51.36247.0",
+                },
+            ),
+        ):
+            sandbox.prepare(
+                self.root, self.archive, self.checksum, self.output, installer
+            )
+
     def write_evidence(self):
         request_data = (self.output / "input/request.json").read_bytes()
         request = json.loads(request_data)
@@ -103,6 +122,7 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
                 "system_vcruntime140_before_execution": "14.51.36247.0",
             },
             "smoke_report_sha256": sandbox.sha256(smoke_data),
+            "runtime_installation": None,
             "error": None,
         }
         (self.output / "evidence" / sandbox.RESULT_NAME).write_bytes(
@@ -129,6 +149,43 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
         self.assertEqual(request["controls"]["networking"], "disabled")
         self.assertEqual(request["controls"]["input_mapping"], "read_only")
         self.assertFalse(result["clean_environment_verified"])
+
+    def test_prepare_pins_valid_microsoft_runtime_installer(self):
+        self.prepare_with_installer()
+        request = json.loads((self.output / "input/request.json").read_bytes())
+        self.assertEqual(request["runtime_installer"]["name"], "vc_redist.x64.exe")
+        self.assertEqual(
+            request["runtime_installer"]["sha256"],
+            sandbox.sha256(b"signed installer fixture"),
+        )
+        self.assertEqual(
+            (self.output / "input/vc_redist.x64.exe").read_bytes(),
+            b"signed installer fixture",
+        )
+
+    def test_valid_runtime_installation_evidence_is_qualified(self):
+        self.prepare_with_installer()
+        self.write_evidence()
+        request = json.loads((self.output / "input/request.json").read_bytes())
+        log_data = b"Microsoft VC runtime installation log\n"
+        (self.output / "evidence" / sandbox.INSTALL_LOG_NAME).write_bytes(log_data)
+        result_path = self.output / "evidence" / sandbox.RESULT_NAME
+        result = json.loads(result_path.read_bytes())
+        result["runtime_installation"] = {
+            "attempted": True,
+            "installer_sha256": request["runtime_installer"]["sha256"],
+            "signature_status": "Valid",
+            "signer_subject": request["runtime_installer"]["signer_subject"],
+            "file_version": "14.51.36247.0",
+            "exit_code": 0,
+            "restart_required": False,
+            "vcruntime140_after_installation": "14.51.36247.0",
+            "log_sha256": sandbox.sha256(log_data),
+        }
+        result_path.write_bytes(sandbox.json_bytes(result))
+        verified = self.verify()
+        self.assertTrue(verified["clean_environment_verified"])
+        self.assertEqual(verified["runtime_installation"]["exit_code"], 0)
 
     def test_prepare_never_overwrites_an_acceptance_directory(self):
         self.prepare()

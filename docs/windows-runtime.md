@@ -110,5 +110,22 @@ label describes a fresh VM. The Sandbox host verifier supplies that separate,
 bounded conclusion from its configuration and evidence. A manual VM requires
 equivalent operator provenance and cannot use that automated Sandbox conclusion.
 
+If the first clean run records Windows exit status `0xC0000135` and no system
+`VCRUNTIME140.dll`, obtain the latest supported x64 Visual C++ Redistributable
+from Microsoft's official permalink. Verify its Authenticode signature before
+preparing a new, non-overwriting run:
+
+```console
+python scripts/windows_sandbox_acceptance.py prepare <archive.zip> --checksum <archive.zip.sha256> --runtime-installer <vc_redist.x64.exe> --output-dir target/clean-windows-with-runtime
+```
+
+The host requires a valid Microsoft Corporation signature and records the exact
+installer SHA-256 and file version. The guest rechecks the file and signature,
+runs `/install /quiet /norestart`, preserves the installer log, records the exit
+code and runtime DLL version, then performs the same two-command smoke. The host
+accepts only documented success/already-installed/restart-required exit codes
+with matching installation evidence and a successful smoke. The installer is a
+test prerequisite inside the disposable guest; it is not added to the CLI ZIP.
+
 References: [DUMPBIN /DEPENDENTS](https://learn.microsoft.com/en-us/cpp/build/reference/dependents),
 [Windows Sandbox](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/).
