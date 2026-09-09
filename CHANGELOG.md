@@ -21,6 +21,12 @@ All notable changes to this project will be documented in this file.
   metadata, SHA-256 sidecar, and host-only archive verification. No hardware,
   installation, plugin activation, or public-release action is performed.
 
+### Fixed
+
+- OpenOCD and GDB process-group cleanup now treats Unix `ESRCH` as proof that
+  the managed process tree has already exited, while preserving every other
+  termination failure as structured cleanup evidence.
+
 ## 0.2.0 - 2026-09-06
 
 ### Added

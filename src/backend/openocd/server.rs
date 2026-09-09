@@ -18,7 +18,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::{OpenOcdConfigurationInspection, OpenOcdExecutableInspection, OpenOcdInspectOptions};
+use super::{
+    OpenOcdConfigurationInspection, OpenOcdExecutableInspection, OpenOcdInspectOptions,
+    process_tree_is_absent,
+};
 use crate::{
     SCHEMA_VERSION,
     error::{DebugError, ErrorCode, Result, SuggestedAction},
@@ -986,7 +989,7 @@ impl ManagedOpenOcd {
         let mut final_status = self.observed_status;
         if let Some(mut child) = self.child.take() {
             if let Err(error) = child.start_kill()
-                && error.kind() != std::io::ErrorKind::NotFound
+                && !process_tree_is_absent(&error)
             {
                 termination_error = Some(error.to_string());
             }

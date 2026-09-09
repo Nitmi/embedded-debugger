@@ -31,6 +31,25 @@ mod target;
 mod watchpoint;
 mod watchpoint_hit;
 
+fn process_tree_is_absent(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        // process-wrap forwards killpg(2) ESRCH as a raw OS error. Rust does not
+        // classify ESRCH as NotFound, although it means the process group is gone.
+        const ESRCH: i32 = 3;
+        error.raw_os_error() == Some(ESRCH)
+    }
+
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 pub use breakpoint::{
     OpenOcdHardwareBreakpointCapabilities, OpenOcdHardwareBreakpointConfirmationBoundary,
     OpenOcdHardwareBreakpointEffects, OpenOcdHardwareBreakpointExchange,
@@ -883,6 +902,26 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn absent_process_tree_errors_are_not_cleanup_failures() {
+        assert!(process_tree_is_absent(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(!process_tree_is_absent(&std::io::Error::other(
+            "permission denied"
+        )));
+
+        #[cfg(unix)]
+        {
+            assert!(process_tree_is_absent(&std::io::Error::from_raw_os_error(
+                3
+            )));
+            assert!(!process_tree_is_absent(&std::io::Error::from_raw_os_error(
+                1
+            )));
+        }
+    }
 
     fn captured(bytes: &[u8]) -> CapturedStream {
         CapturedStream {

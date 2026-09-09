@@ -29,6 +29,8 @@ use crate::{
     model::{Address, MAX_INLINE_MEMORY_READ_BYTES},
 };
 
+use super::process_tree_is_absent;
+
 pub const DEFAULT_GDB_VERSION_TIMEOUT_MS: u64 = 10_000;
 pub const MIN_GDB_VERSION_TIMEOUT_MS: u64 = 100;
 pub const MAX_GDB_VERSION_TIMEOUT_MS: u64 = 30_000;
@@ -4613,7 +4615,7 @@ impl ManagedGdb {
         let mut final_status = self.observed_status;
         if let Some(mut child) = self.child.take() {
             if let Err(source) = child.start_kill()
-                && source.kind() != std::io::ErrorKind::NotFound
+                && !process_tree_is_absent(&source)
             {
                 termination_error = Some(source.to_string());
             }
