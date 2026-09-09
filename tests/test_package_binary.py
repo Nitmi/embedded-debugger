@@ -369,7 +369,7 @@ class BinaryPackageTests(unittest.TestCase):
     ):
         binary = self.root / "artifact.exe"
         binary.write_bytes(b"not executable; controlled fixture")
-        about = self.root / "cargo-about.exe"
+        about = (self.root / "cargo-about.exe").resolve()
         about.write_bytes(b"fixture cargo-about")
         root_id = "fixture-root"
         package = {

@@ -430,10 +430,10 @@ pub fn validate_core_inventory(
                     core.index
                 ));
             }
-            if !core
+            if core
                 .unavailable_reason
                 .as_deref()
-                .is_some_and(|reason| !reason.trim().is_empty())
+                .is_none_or(|reason| reason.trim().is_empty())
             {
                 return Err(format!("unavailable core {} has no reason", core.index));
             }
@@ -511,10 +511,10 @@ pub fn validate_post_flash_core_inventory(
                     core.index
                 ));
             }
-            if !core
+            if core
                 .unavailable_reason
                 .as_deref()
-                .is_some_and(|reason| !reason.trim().is_empty())
+                .is_none_or(|reason| reason.trim().is_empty())
             {
                 return Err(format!(
                     "unavailable post-flash core {} has no reason",
@@ -694,10 +694,10 @@ pub fn validate_core_execution_observation(
         }
         CoreExecutionAction::Continue
             if core.state == CoreState::Halted
-                && !core
+                && core
                     .halt_reason
                     .as_deref()
-                    .is_some_and(|reason| !reason.trim().is_empty()) =>
+                    .is_none_or(|reason| reason.trim().is_empty()) =>
         {
             return Err(format!(
                 "core {} halted continue result requires a halt reason",
@@ -795,10 +795,10 @@ pub fn validate_continue_until_halt_observation(
                     observation.continuation.index
                 ));
             }
-            if !observation
+            if observation
                 .halt_reason
                 .as_deref()
-                .is_some_and(|reason| !reason.trim().is_empty())
+                .is_none_or(|reason| reason.trim().is_empty())
             {
                 return Err(format!(
                     "core {} halted wait outcome requires a halt reason",

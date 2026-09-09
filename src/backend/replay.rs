@@ -381,10 +381,10 @@ impl ReplayFixture {
             for result in &core.continue_until_halt_results {
                 match result.halt_after_ms {
                     Some(_)
-                        if !result
+                        if result
                             .halt_reason
                             .as_deref()
-                            .is_some_and(|reason| !reason.trim().is_empty()) =>
+                            .is_none_or(|reason| reason.trim().is_empty()) =>
                     {
                         return Err(DebugError::fixture(
                             "replay continue-until-halt event requires a halt reason",
