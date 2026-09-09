@@ -1,11 +1,13 @@
-# Windows x64 CLI candidate
+# Windows x64 CLI release
 
-This is an unsigned precompiled `embedded-debugger` candidate for Windows x64
+This is a precompiled `embedded-debugger` release for Windows x64
 (`x86_64-pc-windows-msvc`). Running the CLI does not require Rust or Python.
 It does not bundle the toolkit plugin, baud, BLEA, OpenOCD, GDB, probe drivers,
 firmware, or target configuration. Install the components your workflow needs
 separately. Windows system-library and driver requirements still apply;
-this archive is not a claim of clean-machine or new-board qualification. See the
+this archive is not a claim of clean-machine or new-board qualification. The
+executable is not Authenticode-signed; the release ZIP instead has a GitHub artifact
+attestation bound to the version tag and GitHub-hosted build workflow. See the
 bundled `WINDOWS_RUNTIME.md` and `Test-WindowsCandidate.ps1` for runtime boundaries
 and the bounded host smoke. v3 candidates statically link the Rust MSVC CRT.
 
@@ -15,8 +17,11 @@ Obtain the archive and its SHA-256 from a trusted channel. In PowerShell, compar
 the hash with the supplied `.zip.sha256` file before extracting or running:
 
 ```powershell
-Get-FileHash .\embedded-debugger-0.2.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
-Get-Content .\embedded-debugger-0.2.0-x86_64-pc-windows-msvc.zip.sha256
+Get-FileHash .\embedded-debugger-0.2.1-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-Content .\embedded-debugger-0.2.1-x86_64-pc-windows-msvc.zip.sha256
+gh attestation verify .\embedded-debugger-0.2.1-x86_64-pc-windows-msvc.zip `
+  --repo Nitmi/embedded-debugger `
+  --source-ref refs/tags/v0.2.1
 ```
 
 The source repository also provides a full, host-only verifier (Python 3.11+):
@@ -28,7 +33,8 @@ python scripts/package_binary.py verify <archive.zip> --checksum <archive.zip.sh
 That verifier checks the exact member layout, per-file sizes and hashes, version,
 target, and source revision. It neither extracts files nor executes any program.
 A checksum detects changed content relative to the expected value; it is not a
-signature and does not establish who published the package.
+signature and does not establish who published the package. Verify the GitHub
+attestation as a separate publisher and source check.
 
 The same source-side tool offers a versioned, non-activating installation after
 verification. It never changes `PATH` or overwrites an existing version:
@@ -149,10 +155,12 @@ manifests are reported separately; upstream attribution differences and missing
 copyright lines are retained for review. See each package's `supplement` and
 `review_items` in `THIRD_PARTY_LICENSES.json` and the source `licenses/README.md`.
 
-Signing, full license review (including vendored code and toolchain/runtime
-materials), precise runtime SBOM generation, and clean-machine testing remain
-public-release work. Neither this script nor the CI artifact step publishes a
-public release. The verifier continues to accept original v1 and v2 candidates;
+Authenticode signing, full license review (including vendored code and
+toolchain/runtime materials), precise runtime SBOM generation, and broader
+clean-machine testing remain future work. The tag workflow builds the package twice,
+compares exact ZIP hashes, runs the bounded host smoke, and creates a GitHub artifact
+attestation. Publishing a GitHub Release remains a separate repository-owner action.
+The verifier continues to accept original v1 and v2 candidates;
 v1 lacks the license payloads, and v1/v2 do not declare CRT linkage.
 
 For a disposable Windows Sandbox smoke, use the source repository's

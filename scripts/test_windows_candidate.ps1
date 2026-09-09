@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$ExpectedSha256,
     [Parameter(Mandatory = $true)][string]$ReportPath,
     [string]$EnvironmentLabel = 'unspecified host',
-    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$ExpectedVersion = '0.2.0'
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$ExpectedVersion = '0.2.1'
 )
 
 $ErrorActionPreference = 'Stop'

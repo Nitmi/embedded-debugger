@@ -4,8 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.2.1 - 2026-09-09
+
 ### Added
 
+- Tag-bound Windows x64 release automation with pinned GitHub Actions, independent
+  archive builds, exact hash comparison, bounded host-only smoke checks, artifact
+  attestation, and release-ready ZIP/checksum artifacts.
 - Windows candidate v2 license materials using pinned cargo-about, coverage of
   Cargo-reported compiled packages, checksum-bound original crate notices and
   MPL source archives. Review gaps remain explicit; original v1 ZIP verification

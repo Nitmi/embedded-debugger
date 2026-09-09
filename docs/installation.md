@@ -58,7 +58,7 @@ embedded-debugger runtime --help
 cargo install --list
 ```
 
-For the `0.2.0` release, the version must be `embedded-debugger 0.2.0` and runtime
+For the `0.2.1` release, the version must be `embedded-debugger 0.2.1` and runtime
 help must include `init` and `inspect`. On PowerShell, check command resolution
 and record the actual installed binary hash:
 

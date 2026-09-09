@@ -1,0 +1,121 @@
+name: Windows binary provenance
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_ABOUT_ARCHIVE_SHA256: "1c03e5890238562497c2d89a3b75b02560af349c1fc3e713d3284f532a5cd748"
+
+jobs:
+  windows-x86-64:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.89.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Bind tag, version, and commit
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $package = @($metadata.packages | Where-Object name -eq 'embedded-debugger')
+          if ($package.Count -ne 1) { throw 'Expected one embedded-debugger package' }
+          if ($env:GITHUB_REF_NAME -cne "v$($package[0].version)") { throw 'Tag does not match package version' }
+          $tagCommit = (git rev-list -n 1 $env:GITHUB_REF_NAME).Trim()
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $env:GITHUB_SHA) { throw 'Tag does not resolve to the workflow commit' }
+
+      - name: Install pinned cargo-about
+        shell: pwsh
+        run: |
+          $toolDir = Join-Path $env:RUNNER_TEMP 'cargo-about'
+          New-Item -ItemType Directory -Path $toolDir -ErrorAction Stop | Out-Null
+          $toolArchive = Join-Path $toolDir 'cargo-about.tar.gz'
+          Invoke-WebRequest -Uri 'https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.2/cargo-about-0.9.2-x86_64-pc-windows-msvc.tar.gz' -OutFile $toolArchive
+          $actual = (Get-FileHash -LiteralPath $toolArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -cne $env:CARGO_ABOUT_ARCHIVE_SHA256) { throw 'cargo-about checksum mismatch' }
+          tar -xf $toolArchive -C $toolDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $cargoAbout = Join-Path $toolDir 'cargo-about-0.9.2-x86_64-pc-windows-msvc/cargo-about.exe'
+          if (-not (Test-Path -LiteralPath $cargoAbout -PathType Leaf)) { throw 'cargo-about executable is missing' }
+          "cargo_about=$cargoAbout" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+
+      - name: Build twice and compare archives
+        shell: pwsh
+        run: |
+          $a = Join-Path $env:RUNNER_TEMP 'embedded-debugger-release-a'
+          $b = Join-Path $env:RUNNER_TEMP 'embedded-debugger-release-b'
+          python scripts/package_binary.py build --offline --cargo-about $env:cargo_about --output-dir $a --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/package_binary.py build --offline --cargo-about $env:cargo_about --output-dir $b --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $zipA = @(Get-ChildItem -LiteralPath $a -Filter '*.zip' -File -ErrorAction Stop)
+          $zipB = @(Get-ChildItem -LiteralPath $b -Filter '*.zip' -File -ErrorAction Stop)
+          if ($zipA.Count -ne 1 -or $zipB.Count -ne 1) { throw 'Expected one ZIP per build' }
+          $hashA = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipA[0].FullName).Hash
+          $hashB = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipB[0].FullName).Hash
+          if ($hashA -cne $hashB) { throw 'Independent archive hashes differ' }
+          python scripts/package_binary.py verify $zipA[0].FullName --checksum "$($zipA[0].FullName).sha256" --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $assetDir = Join-Path $env:GITHUB_WORKSPACE 'binary-dist'
+          New-Item -ItemType Directory -Path $assetDir -ErrorAction Stop | Out-Null
+          Copy-Item -LiteralPath $zipA[0].FullName -Destination $assetDir -ErrorAction Stop
+          Copy-Item -LiteralPath "$($zipA[0].FullName).sha256" -Destination $assetDir -ErrorAction Stop
+          "archive=$assetDir\$($zipA[0].Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Verify standalone CLI without hardware discovery
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $extract = Join-Path $env:RUNNER_TEMP 'embedded-debugger-smoke'
+          [IO.Compression.ZipFile]::ExtractToDirectory($env:archive, $extract)
+          $exe = @(Get-ChildItem -LiteralPath $extract -Filter 'embedded-debugger.exe' -File -Recurse -ErrorAction Stop)
+          if ($exe.Count -ne 1) { throw 'Expected one embedded-debugger.exe' }
+          $manifest = Get-Content -Raw -LiteralPath (Join-Path $exe[0].DirectoryName 'release-manifest.json') | ConvertFrom-Json
+          $binary = @($manifest.files | Where-Object path -eq 'embedded-debugger.exe')
+          if ($binary.Count -ne 1) { throw 'Expected one executable manifest entry' }
+          $report = Join-Path $env:RUNNER_TEMP 'windows-host-smoke.json'
+          powershell -NoProfile -File (Join-Path $exe[0].DirectoryName 'Test-WindowsCandidate.ps1') `
+            -Executable $exe[0].FullName `
+            -ExpectedSha256 $binary[0].sha256 `
+            -ExpectedVersion $manifest.version `
+            -ReportPath $report `
+            -EnvironmentLabel 'GitHub-hosted Windows runner'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath $report -Destination binary-dist/windows-host-smoke.json -ErrorAction Stop
+
+      - name: Attest archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ env.archive }}
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: embedded-debugger-windows-x86_64
+          path: binary-dist/*
+          if-no-files-found: error
+          retention-days: 14
