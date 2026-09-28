@@ -512,13 +512,13 @@ def verify(root_dir: Path) -> dict:
         else environment["system_vcruntime140_before_execution"]
     )
     checks = smoke["checks"]
-    if not isinstance(checks, list) or len(checks) != 2:
+    if not isinstance(checks, list) or len(checks) != 3:
         raise ValueError("Windows Sandbox smoke checks differ")
     for check in checks:
         exact_fields(
             check, {"arguments", "exit_code", "stdout", "stderr"}, "smoke check"
         )
-    version_check, help_check = checks
+    version_check, help_check, session_help_check = checks
     smoke_checks_ok = (
         version_check["arguments"] == "--version"
         and version_check["exit_code"] == 0
@@ -528,6 +528,13 @@ def verify(root_dir: Path) -> dict:
         and help_check["exit_code"] == 0
         and "inspect" in help_check["stdout"]
         and not help_check["stderr"].strip()
+        and session_help_check["arguments"] == "flash session --help"
+        and session_help_check["exit_code"] == 0
+        and all(
+            command in session_help_check["stdout"]
+            for command in ("plan", "inspect", "serve")
+        )
+        and not session_help_check["stderr"].strip()
     )
     if (
         result["schema_version"] != RESULT_SCHEMA

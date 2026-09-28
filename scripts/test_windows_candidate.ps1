@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$ExpectedSha256,
     [Parameter(Mandatory = $true)][string]$ReportPath,
     [string]$EnvironmentLabel = 'unspecified host',
-    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$ExpectedVersion = '0.2.1'
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$ExpectedVersion = '0.2.2'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -87,6 +87,14 @@ try {
     $help = Invoke-HostCheck $candidate.FullName 'runtime --help'
     $report.checks += $help
     if ($help.exit_code -ne 0 -or $help.stdout -notmatch 'inspect' -or $help.stderr.Trim()) { throw 'Runtime help smoke failed' }
+    $sessionHelp = Invoke-HostCheck $candidate.FullName 'flash session --help'
+    $report.checks += $sessionHelp
+    if ($sessionHelp.exit_code -ne 0 -or $sessionHelp.stderr.Trim() -or
+        $sessionHelp.stdout -notmatch '\bplan\b' -or
+        $sessionHelp.stdout -notmatch '\binspect\b' -or
+        $sessionHelp.stdout -notmatch '\bserve\b') {
+        throw 'Flash session help smoke failed'
+    }
     if ((Get-CandidateHash $candidate.FullName) -ne $ExpectedSha256) { throw 'Executable changed during smoke' }
     $report.ok = $true
 } catch {

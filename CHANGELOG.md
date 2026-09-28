@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.2.2 - 2026-09-28
+
+### Added
+
+- Bounded executor-owned flash sessions for iterative development: approve one
+  exact probe, target, build directory, image format, write/erase window, flash
+  count, duration, and executable hash; then replan and verify each build in the
+  same process without another user prompt. A failed, expired, exhausted, or
+  exited session cannot be restarted from the same plan. This path has Replay
+  coverage only and does not yet claim physical-board acceptance.
+
 ## 0.2.1 - 2026-09-09
 
 ### Added

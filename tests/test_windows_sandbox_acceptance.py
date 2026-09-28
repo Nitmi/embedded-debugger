@@ -95,6 +95,12 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
                     "stdout": "inspect\n",
                     "stderr": "",
                 },
+                {
+                    "arguments": "flash session --help",
+                    "exit_code": 0,
+                    "stdout": "plan\ninspect\nserve\n",
+                    "stderr": "",
+                },
             ],
             "error": None,
             "actual_sha256": self.executable_hash,
@@ -279,6 +285,16 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
         changed_data = sandbox.json_bytes(changed)
         path.write_bytes(changed_data)
         result_path = self.output / "evidence" / sandbox.RESULT_NAME
+        result = json.loads(result_path.read_bytes())
+        result["smoke_report_sha256"] = sandbox.sha256(changed_data)
+        result_path.write_bytes(sandbox.json_bytes(result))
+        with self.assertRaisesRegex(ValueError, "acceptance policy"):
+            self.verify()
+        self.write_evidence()
+        changed = copy.deepcopy(original)
+        changed["checks"][2]["stdout"] = "plan\ninspect\n"
+        changed_data = sandbox.json_bytes(changed)
+        path.write_bytes(changed_data)
         result = json.loads(result_path.read_bytes())
         result["smoke_report_sha256"] = sandbox.sha256(changed_data)
         result_path.write_bytes(sandbox.json_bytes(result))

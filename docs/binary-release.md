@@ -17,11 +17,11 @@ Obtain the archive and its SHA-256 from a trusted channel. In PowerShell, compar
 the hash with the supplied `.zip.sha256` file before extracting or running:
 
 ```powershell
-Get-FileHash .\embedded-debugger-0.2.1-x86_64-pc-windows-msvc.zip -Algorithm SHA256
-Get-Content .\embedded-debugger-0.2.1-x86_64-pc-windows-msvc.zip.sha256
-gh attestation verify .\embedded-debugger-0.2.1-x86_64-pc-windows-msvc.zip `
+Get-FileHash .\embedded-debugger-0.2.2-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-Content .\embedded-debugger-0.2.2-x86_64-pc-windows-msvc.zip.sha256
+gh attestation verify .\embedded-debugger-0.2.2-x86_64-pc-windows-msvc.zip `
   --repo Nitmi/embedded-debugger `
-  --source-ref refs/tags/v0.2.1
+  --source-ref refs/tags/v0.2.2
 ```
 
 The source repository also provides a full, host-only verifier (Python 3.11+):

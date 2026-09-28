@@ -1,6 +1,6 @@
 # Bounded development flash sessions
 
-This source-tree feature is not part of the published 0.2.1 binary. It has
+This 0.2.2 candidate feature is not part of the published 0.2.1 binary. It has
 Replay tests only; no physical board acceptance has been performed. Check
 `embedded-debugger flash session --help` on the exact installed executable
 before relying on it.
