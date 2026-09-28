@@ -4,6 +4,7 @@ pub mod doctor;
 pub mod envelope;
 pub mod error;
 pub mod firmware;
+pub mod flash_session;
 pub mod model;
 pub mod runtime;
 pub mod service;

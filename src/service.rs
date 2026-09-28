@@ -63,6 +63,9 @@ pub struct ConfirmedFlashOptions<'a> {
 }
 
 impl<B: DebugBackend> DebugService<B> {
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.name()
+    }
     pub fn new(backend: B) -> Self {
         Self { backend }
     }

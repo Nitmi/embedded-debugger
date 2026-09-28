@@ -2,13 +2,29 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use embedded_debugger::{
-    cli::{Cli, execute, serve_mcp_stdio, serve_session_stdio, serve_supervisor_mcp},
+    cli::{
+        Cli, execute, serve_flash_session_stdio, serve_mcp_stdio, serve_session_stdio,
+        serve_supervisor_mcp,
+    },
     envelope::{ErrorEnvelope, SuccessEnvelope},
 };
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let operation = cli.operation_name();
+    if cli.is_flash_session_server() {
+        return match serve_flash_session_stdio(&cli) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&ErrorEnvelope::new(operation, &error))
+                        .expect("flash session error envelope serializes")
+                );
+                ExitCode::from(u8::try_from(error.exit_code).unwrap_or(10))
+            }
+        };
+    }
     if cli.is_session_server() {
         return match serve_session_stdio(&cli) {
             Ok(()) => ExitCode::SUCCESS,

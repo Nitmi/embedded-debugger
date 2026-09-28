@@ -21,6 +21,7 @@ use crate::{
     doctor,
     error::{DebugError, Result},
     firmware::{FirmwareFormat, FirmwareInputOptions, parse_esp_flash_size},
+    flash_session::{self, ScopeInput},
     model::{
         Address, ContinueUntilHaltOptions, CoreExecutionAction,
         DEFAULT_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS, DEFAULT_CONTINUE_UNTIL_HALT_TIMEOUT_MS,
@@ -916,6 +917,55 @@ pub struct ProbeTestSelection {
 pub enum FlashCommand {
     Plan(FlashSelection),
     Execute(FlashExecute),
+    Session {
+        #[command(subcommand)]
+        command: FlashSessionCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FlashSessionCommand {
+    Plan(FlashSessionPlanArgs),
+    Inspect {
+        scope: PathBuf,
+    },
+    Serve {
+        scope: PathBuf,
+        #[arg(long)]
+        confirm: String,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct FlashSessionPlanArgs {
+    #[arg(long)]
+    pub probe: String,
+    #[arg(long)]
+    pub target: String,
+    #[arg(long)]
+    pub firmware_directory: PathBuf,
+    #[arg(long, value_enum)]
+    pub format: FirmwareFormatArg,
+    #[arg(long, value_parser = parse_address)]
+    pub base_address: Option<Address>,
+    #[arg(long, value_parser = parse_esp_flash_size)]
+    pub flash_size: Option<u64>,
+    #[arg(long)]
+    pub chip_revision: Option<u16>,
+    #[arg(long, value_parser = parse_address)]
+    pub write_start: Address,
+    #[arg(long, value_parser = parse_length)]
+    pub write_length: u64,
+    #[arg(long, value_parser = parse_address)]
+    pub erase_start: Address,
+    #[arg(long, value_parser = parse_length)]
+    pub erase_length: u64,
+    #[arg(long)]
+    pub max_flashes: u32,
+    #[arg(long)]
+    pub duration_seconds: u64,
+    #[arg(long)]
+    pub output: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -1260,6 +1310,13 @@ impl Cli {
             Command::Flash {
                 command: FlashCommand::Execute(_),
             } => "flash.execute",
+            Command::Flash {
+                command: FlashCommand::Session { command },
+            } => match command {
+                FlashSessionCommand::Plan(_) => "flash.session.plan",
+                FlashSessionCommand::Inspect { .. } => "flash.session.inspect",
+                FlashSessionCommand::Serve { .. } => "flash.session.serve",
+            },
             Command::Replay { .. } => "replay.validate",
             Command::Snapshot {
                 command: SnapshotCommand::Capture(_),
@@ -1490,6 +1547,17 @@ impl Cli {
         matches!(self.command, Command::Session { .. })
     }
 
+    pub fn is_flash_session_server(&self) -> bool {
+        matches!(
+            self.command,
+            Command::Flash {
+                command: FlashCommand::Session {
+                    command: FlashSessionCommand::Serve { .. }
+                }
+            }
+        )
+    }
+
     pub fn is_mcp_server(&self) -> bool {
         matches!(self.command, Command::Mcp { .. })
     }
@@ -1522,6 +1590,33 @@ pub fn serve_session_stdio(cli: &Cli) -> Result<()> {
             serve_session_backend(ProbeRsBackend::new(&selection.target)?, options)
         }
         BackendArg::Openocd => Err(unsupported_openocd("persistent_session")),
+    }
+}
+
+pub fn serve_flash_session_stdio(cli: &Cli) -> Result<()> {
+    let Command::Flash {
+        command:
+            FlashCommand::Session {
+                command: FlashSessionCommand::Serve { scope, confirm },
+            },
+    } = &cli.command
+    else {
+        return Err(DebugError::config(
+            "expected flash session serve",
+            json!({}),
+        ));
+    };
+    let plan = flash_session::inspect(scope)?;
+    match cli.backend {
+        BackendArg::Replay => {
+            let backend = ReplayBackend::from_path(replay_fixture_path(cli)?)?;
+            flash_session::serve_stdio(DebugService::new(backend), plan, confirm)
+        }
+        BackendArg::ProbeRs => {
+            let backend = ProbeRsBackend::new(&plan.scope.target)?;
+            flash_session::serve_stdio(DebugService::new(backend), plan, confirm)
+        }
+        BackendArg::Openocd => Err(unsupported_openocd("flash")),
     }
 }
 
@@ -2525,6 +2620,62 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
                 run_flash_execute(&mut DebugService::new(backend), arguments)
             }
             BackendArg::Openocd => Err(unsupported_openocd("flash")),
+        },
+        Command::Flash {
+            command: FlashCommand::Session { command },
+        } => match command {
+            FlashSessionCommand::Plan(args) => {
+                let result = flash_session::plan(
+                    &args.output,
+                    ScopeInput {
+                        backend: match cli.backend {
+                            BackendArg::Replay => "replay",
+                            BackendArg::ProbeRs => "probe-rs",
+                            BackendArg::Openocd => "openocd",
+                        },
+                        probe: &args.probe,
+                        target: &args.target,
+                        firmware_directory: &args.firmware_directory,
+                        firmware_format: match args.format {
+                            FirmwareFormatArg::Bin => "bin",
+                            FirmwareFormatArg::Hex => "hex",
+                            FirmwareFormatArg::Idf => "idf",
+                        },
+                        base_address: args.base_address,
+                        flash_size: args.flash_size,
+                        chip_revision: args.chip_revision,
+                        write_window: FlashRange {
+                            start: args.write_start,
+                            length: args.write_length,
+                        },
+                        erase_window: FlashRange {
+                            start: args.erase_start,
+                            length: args.erase_length,
+                        },
+                        max_flashes: args.max_flashes,
+                        duration_seconds: args.duration_seconds,
+                    },
+                )?;
+                Ok(CommandResult::serializable(
+                    "flash.session.plan",
+                    &result,
+                    format!("Review bounded flash session: {}", result.confirm_digest),
+                ))
+            }
+            FlashSessionCommand::Inspect { scope } => {
+                let result = flash_session::inspect(scope)?;
+                Ok(CommandResult::serializable(
+                    "flash.session.inspect",
+                    &result,
+                    format!("Bounded flash session: {}", result.confirm_digest),
+                ))
+            }
+            FlashSessionCommand::Serve { .. } => Err(DebugError::new(
+                crate::error::ErrorCode::ProtocolError,
+                "flash session serve is a streaming command and must own stdin/stdout",
+                6,
+                json!({"operation": "flash.session.serve"}),
+            )),
         },
     }
 }

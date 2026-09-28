@@ -1039,6 +1039,11 @@ cargo run -- --fixture examples/replay/stm32g4.json flash execute examples/firmw
 Changing the firmware, target, or probe changes the digest. Execution rejects a
 stale or incorrect confirmation before a backend write is attempted.
 
+For repeated development flashes, the source CLI also supports an executor-owned
+[bounded flash session](docs/flash-sessions.md). It asks for one reviewed scope
+digest, recomputes a fresh native plan for every build, and expires when the
+process exits. This does not change the one-shot `flash execute --confirm` path.
+
 ## Native probe-rs flash
 
 List probes and create a plan for a raw BIN image:

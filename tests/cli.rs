@@ -5066,6 +5066,122 @@ fn plan_then_execute_completes_replay_journey() {
 }
 
 #[test]
+fn flash_session_cli_runs_two_builds_and_cannot_reuse_scope() {
+    let directory = tempdir().unwrap();
+    let build = directory.path().join("build");
+    fs::create_dir(&build).unwrap();
+    let firmware_a = build.join("a.bin");
+    let firmware_b = build.join("b.bin");
+    fs::write(&firmware_a, b"first CLI build").unwrap();
+    fs::write(&firmware_b, b"second CLI build").unwrap();
+    let scope = directory.path().join("scope.json");
+    let first_evidence = directory.path().join("first.evidence.json");
+    let second_evidence = directory.path().join("second.evidence.json");
+    let planned = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "flash",
+            "session",
+            "plan",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--firmware-directory",
+            build.to_str().unwrap(),
+            "--format",
+            "bin",
+            "--base-address",
+            "0x08000000",
+            "--write-start",
+            "0x08000000",
+            "--write-length",
+            "64",
+            "--erase-start",
+            "0x08000000",
+            "--erase-length",
+            "2048",
+            "--max-flashes",
+            "2",
+            "--duration-seconds",
+            "120",
+            "--output",
+            scope.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned).unwrap();
+    assert_eq!(planned["data"]["hardware_access"], false);
+    let digest = planned["data"]["confirm_digest"].as_str().unwrap();
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
+        .args([
+            "--fixture",
+            fixture(),
+            "flash",
+            "session",
+            "serve",
+            scope.to_str().unwrap(),
+            "--confirm",
+            digest,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"operation":"flash","firmware":firmware_a,"evidence":first_evidence})
+        )
+        .unwrap();
+        writeln!(stdin, "{}", serde_json::json!({"operation":"flash","firmware":firmware_b,"evidence":second_evidence})).unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let messages: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["operation"], "flash.session.ready");
+    assert_eq!(messages[1]["operation"], "flash.session.flash");
+    assert_eq!(messages[2]["data"]["remaining"], 0);
+    assert!(first_evidence.exists());
+    assert!(second_evidence.exists());
+
+    let restarted = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "flash",
+            "session",
+            "serve",
+            scope.to_str().unwrap(),
+            "--confirm",
+            digest,
+        ])
+        .assert()
+        .code(8)
+        .get_output()
+        .clone();
+    assert!(restarted.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&restarted.stderr).contains("PERMISSION_DENIED"));
+}
+
+#[test]
 fn native_raw_bin_requires_base_address_before_probe_discovery() {
     let output = Command::cargo_bin("embedded-debugger")
         .unwrap()
