@@ -26,8 +26,19 @@ with stdin/stdout pipes:
 
 ```powershell
 embedded-debugger --backend probe-rs flash session serve `
-  C:\session\nrf-development.json --confirm <approved-scope-digest>
+  C:\session\nrf-development.json --confirm <approved-scope-digest> `
+  --transcript-dir C:\session\transcript
 ```
+
+Create a new, empty transcript directory before starting `serve`. The optional
+`--transcript-dir` stores the bounded request bytes consumed in `requests.jsonl` and
+stdout response lines in `responses.jsonl`, without a host-side pipe adapter.
+Files are created exclusively, so a prior transcript cannot be overwritten.
+Keep stderr separately when capturing process diagnostics. Transcript I/O
+failure ends the executor without retry; a failed response after target
+mutation is indeterminate and requires evidence review.
+The native executor closes on count exhaustion or failure even if its caller
+still holds stdin open.
 
 The process emits one `flash.session.ready` JSON line. Send one JSON line
 per build, with a new evidence path each time:

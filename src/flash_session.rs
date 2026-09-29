@@ -200,11 +200,22 @@ pub fn inspect(path: &Path) -> Result<FlashSessionPlan> {
 }
 
 pub fn serve<B: DebugBackend>(
+    service: DebugService<B>,
+    plan: FlashSessionPlan,
+    confirmation: &str,
+    input: impl BufRead,
+    output: impl Write,
+) -> Result<()> {
+    serve_with_request_log(service, plan, confirmation, input, output, None)
+}
+
+fn serve_with_request_log<B: DebugBackend>(
     mut service: DebugService<B>,
     plan: FlashSessionPlan,
     confirmation: &str,
     mut input: impl BufRead,
     mut output: impl Write,
+    mut request_log: Option<&mut fs::File>,
 ) -> Result<()> {
     validate(&plan.scope)?;
     if plan.confirm_digest != digest(&plan.scope) || plan.confirm_digest != confirmation {
@@ -259,6 +270,11 @@ pub fn serve<B: DebugBackend>(
             .map_err(|error| DebugError::io("read flash session request", None, &error))?;
         if count == 0 {
             return Ok(());
+        }
+        if let Some(log) = request_log.as_deref_mut() {
+            log.write_all(&line)
+                .and_then(|()| log.sync_data())
+                .map_err(|error| DebugError::io("write flash session request log", None, &error))?;
         }
         if started.elapsed() >= Duration::from_secs(plan.scope.duration_seconds)
             || Utc::now() >= plan.scope.expires_at
@@ -556,10 +572,89 @@ pub fn serve_stdio<B: DebugBackend>(
     service: DebugService<B>,
     plan: FlashSessionPlan,
     confirmation: &str,
+    transcript_dir: Option<&Path>,
 ) -> Result<()> {
+    if plan.confirm_digest != confirmation {
+        return Err(DebugError::confirmation(&plan.confirm_digest, confirmation));
+    }
+    let (mut request_log, response_log) = if let Some(directory) = transcript_dir {
+        let directory = directory.canonicalize().map_err(|error| {
+            DebugError::io(
+                "resolve flash session transcript directory",
+                directory.to_str(),
+                &error,
+            )
+        })?;
+        if !directory.is_dir() {
+            return Err(DebugError::config(
+                "flash session transcript path is not a directory",
+                json!({"path": directory}),
+            ));
+        }
+        let request_path = directory.join("requests.jsonl");
+        let response_path = directory.join("responses.jsonl");
+        let request_log = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&request_path)
+            .map_err(|error| {
+                DebugError::io(
+                    "create flash session request log",
+                    request_path.to_str(),
+                    &error,
+                )
+            })?;
+        let response_log = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&response_path)
+            .map_err(|error| {
+                DebugError::io(
+                    "create flash session response log",
+                    response_path.to_str(),
+                    &error,
+                )
+            })?;
+        (Some(request_log), Some(response_log))
+    } else {
+        (None, None)
+    };
     let stdin = io::stdin();
     let stdout = io::stdout();
-    serve(service, plan, confirmation, stdin.lock(), stdout.lock())
+    let output = TranscriptWriter {
+        output: stdout.lock(),
+        log: response_log,
+    };
+    serve_with_request_log(
+        service,
+        plan,
+        confirmation,
+        stdin.lock(),
+        output,
+        request_log.as_mut(),
+    )
+}
+
+struct TranscriptWriter<W> {
+    output: W,
+    log: Option<fs::File>,
+}
+
+impl<W: Write> Write for TranscriptWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if let Some(log) = self.log.as_mut() {
+            log.write_all(bytes)?;
+        }
+        self.output.write_all(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(log) = self.log.as_mut() {
+            log.sync_data()?;
+        }
+        self.output.flush()
+    }
 }
 
 struct SessionLease {

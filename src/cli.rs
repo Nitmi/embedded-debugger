@@ -933,6 +933,11 @@ pub enum FlashSessionCommand {
         scope: PathBuf,
         #[arg(long)]
         confirm: String,
+        #[arg(
+            long,
+            help = "existing directory for native request and response JSONL transcripts"
+        )]
+        transcript_dir: Option<PathBuf>,
     },
 }
 
@@ -1597,7 +1602,12 @@ pub fn serve_flash_session_stdio(cli: &Cli) -> Result<()> {
     let Command::Flash {
         command:
             FlashCommand::Session {
-                command: FlashSessionCommand::Serve { scope, confirm },
+                command:
+                    FlashSessionCommand::Serve {
+                        scope,
+                        confirm,
+                        transcript_dir,
+                    },
             },
     } = &cli.command
     else {
@@ -1610,11 +1620,21 @@ pub fn serve_flash_session_stdio(cli: &Cli) -> Result<()> {
     match cli.backend {
         BackendArg::Replay => {
             let backend = ReplayBackend::from_path(replay_fixture_path(cli)?)?;
-            flash_session::serve_stdio(DebugService::new(backend), plan, confirm)
+            flash_session::serve_stdio(
+                DebugService::new(backend),
+                plan,
+                confirm,
+                transcript_dir.as_deref(),
+            )
         }
         BackendArg::ProbeRs => {
             let backend = ProbeRsBackend::new(&plan.scope.target)?;
-            flash_session::serve_stdio(DebugService::new(backend), plan, confirm)
+            flash_session::serve_stdio(
+                DebugService::new(backend),
+                plan,
+                confirm,
+                transcript_dir.as_deref(),
+            )
         }
         BackendArg::Openocd => Err(unsupported_openocd("flash")),
     }

@@ -5070,6 +5070,8 @@ fn flash_session_cli_runs_two_builds_and_cannot_reuse_scope() {
     let directory = tempdir().unwrap();
     let build = directory.path().join("build");
     fs::create_dir(&build).unwrap();
+    let transcript = directory.path().join("transcript");
+    fs::create_dir(&transcript).unwrap();
     let firmware_a = build.join("a.bin");
     let firmware_b = build.join("b.bin");
     fs::write(&firmware_a, b"first CLI build").unwrap();
@@ -5127,28 +5129,46 @@ fn flash_session_cli_runs_two_builds_and_cannot_reuse_scope() {
             scope.to_str().unwrap(),
             "--confirm",
             digest,
+            "--transcript-dir",
+            transcript.to_str().unwrap(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        writeln!(
-            stdin,
-            "{}",
-            serde_json::json!({"operation":"flash","firmware":firmware_a,"evidence":first_evidence})
-        )
-        .unwrap();
-        writeln!(stdin, "{}", serde_json::json!({"operation":"flash","firmware":firmware_b,"evidence":second_evidence})).unwrap();
-    }
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"operation":"flash","firmware":firmware_a,"evidence":first_evidence})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"operation":"flash","firmware":firmware_b,"evidence":second_evidence})
+    )
+    .unwrap();
     let output = child.wait_with_output().unwrap();
+    drop(stdin);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(
+        fs::read(transcript.join("responses.jsonl")).unwrap(),
+        output.stdout
+    );
+    let requests: Vec<Value> = fs::read_to_string(transcript.join("requests.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["firmware"], firmware_a.to_str().unwrap());
+    assert_eq!(requests[1]["firmware"], firmware_b.to_str().unwrap());
     let messages: Vec<Value> = String::from_utf8(output.stdout)
         .unwrap()
         .lines()
@@ -5179,6 +5199,113 @@ fn flash_session_cli_runs_two_builds_and_cannot_reuse_scope() {
         .clone();
     assert!(restarted.stdout.is_empty());
     assert!(String::from_utf8_lossy(&restarted.stderr).contains("PERMISSION_DENIED"));
+}
+
+#[test]
+fn flash_session_cli_transcribes_failure_without_flashing() {
+    let directory = tempdir().unwrap();
+    let build = directory.path().join("build");
+    let transcript = directory.path().join("transcript");
+    fs::create_dir(&build).unwrap();
+    fs::create_dir(&transcript).unwrap();
+    let scope = directory.path().join("scope.json");
+    let planned = Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "flash",
+            "session",
+            "plan",
+            "--probe",
+            "replay:stlink-v3:0039002A3432510433343034",
+            "--target",
+            "STM32G431CBTx",
+            "--firmware-directory",
+            build.to_str().unwrap(),
+            "--format",
+            "bin",
+            "--base-address",
+            "0x08000000",
+            "--write-start",
+            "0x08000000",
+            "--write-length",
+            "64",
+            "--erase-start",
+            "0x08000000",
+            "--erase-length",
+            "2048",
+            "--max-flashes",
+            "2",
+            "--duration-seconds",
+            "120",
+            "--output",
+            scope.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned).unwrap();
+    let digest = planned["data"]["confirm_digest"].as_str().unwrap();
+    Command::cargo_bin("embedded-debugger")
+        .unwrap()
+        .args([
+            "--fixture",
+            fixture(),
+            "flash",
+            "session",
+            "serve",
+            scope.to_str().unwrap(),
+            "--confirm",
+            &"0".repeat(64),
+            "--transcript-dir",
+            transcript.to_str().unwrap(),
+        ])
+        .assert()
+        .code(2);
+    assert!(fs::read_dir(&transcript).unwrap().next().is_none());
+    assert!(!scope.with_file_name("scope.json.active").exists());
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("embedded-debugger"))
+        .args([
+            "--fixture",
+            fixture(),
+            "flash",
+            "session",
+            "serve",
+            scope.to_str().unwrap(),
+            "--confirm",
+            digest,
+            "--transcript-dir",
+            transcript.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"not-json\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    drop(stdin);
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read(transcript.join("requests.jsonl")).unwrap(),
+        b"not-json\n"
+    );
+    assert_eq!(
+        fs::read(transcript.join("responses.jsonl")).unwrap(),
+        output.stdout
+    );
+    let messages: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["operation"], "flash.session.ready");
+    assert_eq!(messages[1]["error"]["code"], "CONFIG_INVALID");
+    assert!(fs::read_dir(&build).unwrap().next().is_none());
 }
 
 #[test]
