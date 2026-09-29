@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.2.3 - 2026-09-29
+
+### Added
+
+- Optional native `flash session serve --transcript-dir` recording of consumed
+  requests and emitted responses as exclusive, synced JSONL files. This removes
+  the need for a host-side pipe-copy helper during bounded flash sessions.
+  Transcript failure terminates the session without an automatic retry.
+
+### Validation
+
+- The published 0.2.2 bounded executor completed one physical nRF52840 DK A/B
+  session with verified writes and matching serial READY, BUILD_ID, and
+  sequenced HEARTBEAT evidence. A separate Python transcript helper then
+  exited abnormally; the native recording in 0.2.3 addresses that host-side
+  failure mode but has not yet had physical-board acceptance.
+
 ## 0.2.2 - 2026-09-28
 
 ### Added

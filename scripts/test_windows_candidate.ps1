@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$ExpectedSha256,
     [Parameter(Mandatory = $true)][string]$ReportPath,
     [string]$EnvironmentLabel = 'unspecified host',
-    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$ExpectedVersion = '0.2.2'
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$ExpectedVersion = '0.2.3'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -94,6 +94,12 @@ try {
         $sessionHelp.stdout -notmatch '\binspect\b' -or
         $sessionHelp.stdout -notmatch '\bserve\b') {
         throw 'Flash session help smoke failed'
+    }
+    $serveHelp = Invoke-HostCheck $candidate.FullName 'flash session serve --help'
+    $report.checks += $serveHelp
+    if ($serveHelp.exit_code -ne 0 -or $serveHelp.stderr.Trim() -or
+        $serveHelp.stdout -notmatch '--transcript-dir') {
+        throw 'Flash session transcript help smoke failed'
     }
     if ((Get-CandidateHash $candidate.FullName) -ne $ExpectedSha256) { throw 'Executable changed during smoke' }
     $report.ok = $true

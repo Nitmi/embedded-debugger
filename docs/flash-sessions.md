@@ -1,9 +1,9 @@
 # Bounded development flash sessions
 
-This 0.2.2 candidate feature is not part of the published 0.2.1 binary. It has
-Replay tests only; no physical board acceptance has been performed. Check
-`embedded-debugger flash session --help` on the exact installed executable
-before relying on it.
+The bounded executor in 0.2.2 passed one physical nRF52840 DK A/B session.
+The optional native transcript recording is new in the 0.2.3 candidate and
+has host-side tests only. Check `embedded-debugger flash session serve --help`
+on the exact installed executable before relying on `--transcript-dir`.
 
 The one-time plan is host-only. It records the exact executable SHA-256,
 probe selector, target, canonical build directory, image format/options,
