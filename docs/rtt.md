@@ -101,3 +101,8 @@ wraparound, foreign cursor movement, reset/corrupt metadata, non-RAM pointers,
 read failure and a cursor-write failure without retry. Replay checks lossless
 byte reconstruction, hashes, bounds, deadline, partial evidence and cleanup.
 These tests do not constitute physical probe-rs/nRF52840 RTT acceptance.
+
+For the separately prepared Code-Flash-only DK firmware, extracted symbol
+addresses and the offline evidence evaluator, see the
+[DK RTT acceptance fixture](../examples/nrf52840-dk-rtt/README.md). Preparing this
+fixture does not qualify native RTT hardware or replace installed components.
