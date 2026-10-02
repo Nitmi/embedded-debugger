@@ -37,6 +37,17 @@ discover -> select exact probe/target -> flash plan -> confirm digest
          -> reset-and-halt -> snapshot -> resume -> evidence
 ```
 
+The local `0.2.4` candidate also provides bounded RTT up-channel capture through
+`rtt plan` and `rtt capture`. Plans are host-only; capture binds an exact probe,
+target, initialized control-block address, channel and time/byte budget. Raw
+bytes are flushed to JSONL evidence with sequence numbers, byte cursors and
+wall/monotonic timestamps; stdout remains a small structured summary. Reading
+RTT consumes data by advancing its RAM read cursor. The implementation never
+scans RAM, follows channel-name pointers, changes channel mode, writes a down
+channel or explicitly resets/halts/resumes the target. Replay is implemented;
+the native candidate is limited to nRF52840 and has not passed physical RTT
+acceptance. OpenOCD RTT is unavailable. See [RTT capture](docs/rtt.md).
+
 Replay is a product backend, not a throwaway mock: it powers CI, regression
 fixtures, issue reports, and offline Agent analysis. The OpenOCD target backend
 is being enabled in guarded checkpoints. Host inspection and a managed server

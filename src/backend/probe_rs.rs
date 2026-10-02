@@ -17,6 +17,8 @@ use probe_rs::{
 use serde_json::json;
 use uuid::Uuid;
 
+mod rtt;
+
 use crate::{
     backend::{
         DebugBackend, checked_memory_read_end, firmware_flash_report,
@@ -58,6 +60,7 @@ struct NativeSession {
     programmed: Option<ProgrammedImage>,
     reset_halted: bool,
     restore_before_disconnect: BTreeMap<usize, CoreState>,
+    rtt: Option<rtt::NativeRttChannel>,
 }
 
 struct StatePreservingCapture<T> {
@@ -132,7 +135,9 @@ impl ProbeRsBackend {
             memory_read: single_core || accepted_esp32s3_memory_read,
             memory_write: false,
             hardware_breakpoints: 0,
-            rtt: false,
+            // Initial RTT implementation is restricted to the nRF52840 ARM32 profile.
+            // Physical RTT acceptance is reported separately from software support.
+            rtt: nrf52840_code_hex_candidate,
             trace: false,
         };
 
@@ -247,6 +252,80 @@ impl DebugBackend for ProbeRsBackend {
 
     fn capabilities(&self) -> &Capabilities {
         &self.capabilities
+    }
+
+    fn plan_rtt_channel(
+        &self,
+        selection: &crate::rtt::RttSelection,
+    ) -> Result<crate::rtt::RttMemoryScope> {
+        selection.validate()?;
+        if !self.capabilities.rtt || selection.core != 0 {
+            return Err(crate::rtt::unsupported(self.name()));
+        }
+        let scope = self
+            .target
+            .memory_map
+            .iter()
+            .filter_map(|region| region.as_ram_region())
+            .map(|region| crate::rtt::RttMemoryScope {
+                start: Address(region.range.start),
+                length: region.range.end - region.range.start,
+            })
+            .find(|scope| scope.validate_selection(selection).is_ok())
+            .ok_or_else(|| {
+                DebugError::config(
+                    "RTT control block is outside the target's built-in RAM map",
+                    json!({"target": self.target_info, "selection": selection}),
+                )
+            })?;
+        Ok(scope)
+    }
+
+    fn start_rtt(
+        &mut self,
+        session: &SessionInfo,
+        selection: &crate::rtt::RttSelection,
+    ) -> Result<crate::rtt::RttChannelInfo> {
+        let scope = self.plan_rtt_channel(selection)?;
+        let active = self.ensure_session_mut(session)?;
+        if active.rtt.is_some()
+            || active.reset_halted
+            || !active.restore_before_disconnect.is_empty()
+        {
+            return Err(crate::rtt::protocol_error(
+                "RTT cannot start with an active channel or pending core restoration",
+                json!({"session_id": session.session_id}),
+            ));
+        }
+        let mut core = active
+            .session
+            .core(selection.core as usize)
+            .map_err(|error| map_core_error("open RTT core memory access", error))?;
+        let channel = rtt::NativeRttChannel::open(&mut core, selection, &scope)?;
+        let info = channel.info.clone();
+        drop(core);
+        active.rtt = Some(channel);
+        Ok(info)
+    }
+
+    fn read_rtt(&mut self, session: &SessionInfo, maximum_bytes: usize) -> Result<Vec<u8>> {
+        let active = self.ensure_session_mut(session)?;
+        let channel = active.rtt.as_mut().ok_or_else(|| {
+            crate::rtt::protocol_error(
+                "RTT channel is not active",
+                json!({"session_id": session.session_id}),
+            )
+        })?;
+        let mut core = active
+            .session
+            .core(channel.info.selection.core as usize)
+            .map_err(|error| map_core_error("open RTT core memory access", error))?;
+        channel.read(&mut core, maximum_bytes)
+    }
+
+    fn stop_rtt(&mut self, session: &SessionInfo) -> Result<()> {
+        self.ensure_session_mut(session)?.rtt = None;
+        Ok(())
     }
 
     fn plan_flash_ranges(
@@ -485,6 +564,7 @@ impl DebugBackend for ProbeRsBackend {
             programmed: None,
             reset_halted: false,
             restore_before_disconnect: BTreeMap::new(),
+            rtt: None,
         });
         Ok(info)
     }

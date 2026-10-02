@@ -141,6 +141,15 @@
       ]
     }
   ],
+  "rtt_channels": [
+    {
+      "selection": {"core": 0, "control_block": "0x20000100", "channel": 0},
+      "memory_scope": {"start": "0x20000000", "length": 32768},
+      "buffer_start": "0x20000200",
+      "buffer_size": 64,
+      "chunks": ["4541545f5254545f52454144592076310a", "4541545f5254545f48454152544245415420303030310a", "4541545f5254545f48454152544245415420303030320a"]
+    }
+  ],
   "flash": {
     "base_address": "0x08000000",
     "erase_ranges": [

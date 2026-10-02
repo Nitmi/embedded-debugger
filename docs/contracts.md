@@ -44,6 +44,18 @@ do not require the standalone `probe-rs` CLI to be installed.
 bounded host inspection described below; it does not mean an OpenOCD executable
 or target backend is available.
 
+## Bounded RTT capture
+
+The local `0.2.4` candidate adds `rtt.plan` and `rtt.capture` inside the existing
+`1.0` outer envelope, with `embedded-debugger.rtt-plan.v1`,
+`embedded-debugger.rtt-capture.v1` and `embedded-debugger.rtt-evidence.v1` domain
+schemas. The capture emits a bounded JSON summary and a hash-bound JSONL
+artifact, not an inline log stream. Plans bind exact identity, RAM scope and
+limits and disclose the read-cursor write. OpenOCD and unsupported native target
+profiles fail explicitly; physical RTT acceptance remains unverified.
+See [RTT capture](rtt.md) for effects, bounds, cleanup and the runnable offline
+Replay example. This checkpoint does not add persistent-session/MCP RTT requests.
+
 ## OpenOCD host inspection
 
 `openocd inspect [--executable <PATH>] [--config <FILE>...] [--search <DIR>...]

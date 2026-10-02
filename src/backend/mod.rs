@@ -29,6 +29,25 @@ pub trait DebugBackend {
     }
     fn volatile_target_state_notes(&self) -> Vec<String>;
     fn capabilities(&self) -> &Capabilities;
+    fn plan_rtt_channel(
+        &self,
+        _selection: &crate::rtt::RttSelection,
+    ) -> Result<crate::rtt::RttMemoryScope> {
+        Err(crate::rtt::unsupported(self.name()))
+    }
+    fn start_rtt(
+        &mut self,
+        _session: &SessionInfo,
+        _selection: &crate::rtt::RttSelection,
+    ) -> Result<crate::rtt::RttChannelInfo> {
+        Err(crate::rtt::unsupported(self.name()))
+    }
+    fn read_rtt(&mut self, _session: &SessionInfo, _maximum_bytes: usize) -> Result<Vec<u8>> {
+        Err(crate::rtt::unsupported(self.name()))
+    }
+    fn stop_rtt(&mut self, _session: &SessionInfo) -> Result<()> {
+        Err(crate::rtt::unsupported(self.name()))
+    }
     fn plan_flash_ranges(
         &self,
         firmware_size: u64,

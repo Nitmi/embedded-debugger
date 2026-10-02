@@ -6,6 +6,7 @@ pub mod error;
 pub mod firmware;
 pub mod flash_session;
 pub mod model;
+pub mod rtt;
 pub mod runtime;
 pub mod service;
 pub mod session;

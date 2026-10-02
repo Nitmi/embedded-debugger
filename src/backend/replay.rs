@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::rtt::{self, RttChannelInfo, RttMemoryScope, RttSelection};
+
 use crate::{
     SCHEMA_VERSION,
     backend::{
@@ -78,6 +80,37 @@ pub struct ReplayContinueUntilHaltResult {
     pub halt_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayRttChannel {
+    pub selection: RttSelection,
+    pub memory_scope: RttMemoryScope,
+    pub buffer_start: Address,
+    pub buffer_size: u32,
+    pub chunks: Vec<String>,
+    #[serde(default)]
+    pub fail_read_at: Option<usize>,
+    #[serde(default)]
+    pub fail_stop: bool,
+}
+
+impl ReplayRttChannel {
+    fn info(&self) -> RttChannelInfo {
+        RttChannelInfo {
+            selection: self.selection.clone(),
+            memory_scope: self.memory_scope.clone(),
+            buffer_start: self.buffer_start,
+            buffer_size: self.buffer_size,
+            read_cursor_address: Address(self.selection.descriptor_address().0 + 16),
+            flags: 0,
+            name_pointer: Address(0),
+            control_block_bytes: (rtt::HEADER_BYTES
+                + (u64::from(self.selection.channel) + 1) * rtt::DESCRIPTOR_BYTES)
+                as u32,
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -102,6 +135,8 @@ pub struct ReplayFixture {
     pub memory_blocks: Vec<ReplayMemoryBlock>,
     #[serde(default)]
     pub control_cores: Vec<ReplayCoreState>,
+    #[serde(default)]
+    pub rtt_channels: Vec<ReplayRttChannel>,
     pub flash: ReplayFlashBehavior,
 }
 
@@ -131,6 +166,56 @@ impl ReplayFixture {
     }
 
     pub fn validate(&self) -> Result<()> {
+        let mut channel_ids = std::collections::BTreeSet::new();
+        for channel in &self.rtt_channels {
+            rtt::validate_channel(&channel.info(), &channel.selection, &channel.memory_scope)
+                .map_err(|error| {
+                    DebugError::fixture(
+                        "invalid replay RTT channel",
+                        json!({"message": error.message, "details": error.details}),
+                    )
+                })?;
+            if channel.selection.core >= self.target.core_count
+                || !channel_ids.insert((
+                    channel.selection.core,
+                    channel.selection.control_block,
+                    channel.selection.channel,
+                ))
+            {
+                return Err(DebugError::fixture(
+                    "invalid or duplicate replay RTT selection",
+                    json!({"selection": channel.selection}),
+                ));
+            }
+            let mut bytes = 0_u64;
+            for chunk in &channel.chunks {
+                if chunk.len() > rtt::MAX_CHUNK_BYTES * 2 {
+                    return Err(DebugError::fixture(
+                        "replay RTT chunk exceeds limit",
+                        json!({"encoded_bytes": chunk.len()}),
+                    ));
+                }
+                let data = hex::decode(chunk).map_err(|error| {
+                    DebugError::fixture(
+                        "replay RTT chunk is not hexadecimal",
+                        json!({"error": error.to_string()}),
+                    )
+                })?;
+                if data.len() > rtt::MAX_CHUNK_BYTES {
+                    return Err(DebugError::fixture(
+                        "replay RTT chunk exceeds limit",
+                        json!({"bytes": data.len()}),
+                    ));
+                }
+                bytes += data.len() as u64;
+            }
+            if bytes > rtt::MAX_CAPTURE_BYTES {
+                return Err(DebugError::fixture(
+                    "replay RTT payload exceeds limit",
+                    json!({"bytes": bytes}),
+                ));
+            }
+        }
         if self.schema_version != SCHEMA_VERSION {
             return Err(DebugError::fixture(
                 "unsupported replay fixture schema version",
@@ -525,6 +610,16 @@ pub struct ReplayBackend {
     active_session_id: Option<String>,
     programmed: Option<(String, Vec<FirmwareSegmentInfo>)>,
     reset_performed: bool,
+    rtt: Option<ReplayRttState>,
+}
+
+struct ReplayRttState {
+    chunks: Vec<Vec<u8>>,
+    chunk: usize,
+    offset: usize,
+    reads: usize,
+    fail_read_at: Option<usize>,
+    fail_stop: bool,
 }
 
 impl ReplayBackend {
@@ -551,6 +646,7 @@ impl ReplayBackend {
             active_session_id: None,
             programmed: None,
             reset_performed: false,
+            rtt: None,
         }
     }
 
@@ -586,6 +682,108 @@ impl DebugBackend for ReplayBackend {
 
     fn capabilities(&self) -> &Capabilities {
         &self.fixture.capabilities
+    }
+
+    fn plan_rtt_channel(&self, selection: &RttSelection) -> Result<RttMemoryScope> {
+        if !self.capabilities().rtt {
+            return Err(rtt::unsupported(self.name()));
+        }
+        self.fixture
+            .rtt_channels
+            .iter()
+            .find(|channel| &channel.selection == selection)
+            .map(|channel| channel.memory_scope.clone())
+            .ok_or_else(|| {
+                DebugError::fixture(
+                    "replay fixture has no evidence for the selected RTT channel",
+                    json!({"selection": selection}),
+                )
+            })
+    }
+
+    fn start_rtt(
+        &mut self,
+        session: &SessionInfo,
+        selection: &RttSelection,
+    ) -> Result<RttChannelInfo> {
+        self.ensure_session(session)?;
+        self.plan_rtt_channel(selection)?;
+        if self.rtt.is_some() {
+            return Err(rtt::protocol_error(
+                "replay RTT channel already active",
+                json!({}),
+            ));
+        }
+        let channel = self
+            .fixture
+            .rtt_channels
+            .iter()
+            .find(|channel| &channel.selection == selection)
+            .expect("channel selected above");
+        let info = channel.info();
+        let chunks = channel
+            .chunks
+            .iter()
+            .map(|chunk| {
+                hex::decode(chunk).map_err(|error| {
+                    DebugError::fixture("invalid RTT bytes", json!({"error": error.to_string()}))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.rtt = Some(ReplayRttState {
+            chunks,
+            chunk: 0,
+            offset: 0,
+            reads: 0,
+            fail_read_at: channel.fail_read_at,
+            fail_stop: channel.fail_stop,
+        });
+        Ok(info)
+    }
+
+    fn read_rtt(&mut self, session: &SessionInfo, maximum_bytes: usize) -> Result<Vec<u8>> {
+        self.ensure_session(session)?;
+        if maximum_bytes == 0 || maximum_bytes > rtt::MAX_CHUNK_BYTES {
+            return Err(DebugError::config(
+                "invalid RTT read bound",
+                json!({"maximum_bytes": maximum_bytes}),
+            ));
+        }
+        let state = self
+            .rtt
+            .as_mut()
+            .ok_or_else(|| rtt::protocol_error("replay RTT channel is not active", json!({})))?;
+        let read_index = state.reads;
+        state.reads += 1;
+        if state.fail_read_at == Some(read_index) {
+            return Err(rtt::protocol_error(
+                "injected replay RTT read failure",
+                json!({"read_index": read_index}),
+            ));
+        }
+        if let Some(chunk) = state.chunks.get(state.chunk) {
+            let end = (state.offset + maximum_bytes).min(chunk.len());
+            let data = chunk[state.offset..end].to_vec();
+            state.offset = end;
+            if end == chunk.len() {
+                state.chunk += 1;
+                state.offset = 0;
+            }
+            Ok(data)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn stop_rtt(&mut self, session: &SessionInfo) -> Result<()> {
+        self.ensure_session(session)?;
+        if self.rtt.take().is_some_and(|state| state.fail_stop) {
+            return Err(rtt::protocol_error(
+                "injected replay RTT stop failure",
+                json!({}),
+            ));
+        }
+        Ok(())
     }
 
     fn plan_flash_ranges(
@@ -716,6 +914,7 @@ impl DebugBackend for ReplayBackend {
         self.active_session_id = Some(session_id.clone());
         self.programmed = None;
         self.reset_performed = false;
+        self.rtt = None;
         Ok(SessionInfo {
             session_id,
             backend: self.name().to_string(),
@@ -1581,6 +1780,7 @@ impl DebugBackend for ReplayBackend {
         self.active_session_id = None;
         self.programmed = None;
         self.reset_performed = false;
+        self.rtt = None;
         for slots in self.hardware_breakpoints.values_mut() {
             slots.fill(None);
         }

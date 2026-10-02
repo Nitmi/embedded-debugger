@@ -27,6 +27,7 @@ use crate::{
         DEFAULT_CONTINUE_UNTIL_HALT_POLL_INTERVAL_MS, DEFAULT_CONTINUE_UNTIL_HALT_TIMEOUT_MS,
         FlashRange, MemoryRegionKind,
     },
+    rtt::{RttCaptureLimits, RttSelection, RttService},
     runtime::{
         self, BaudCliDriver, DEFAULT_MINIMUM_HEARTBEATS, DEFAULT_RUNTIME_DURATION_SECONDS,
         DEFAULT_RUNTIME_MONITOR_STARTUP_DELAY_MS, RuntimeAcceptanceOptions,
@@ -88,6 +89,10 @@ pub enum Command {
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
+    },
+    Rtt {
+        #[command(subcommand)]
+        command: RttCommand,
     },
     Core {
         #[command(subcommand)]
@@ -1278,6 +1283,55 @@ pub struct CoreSelection {
     pub core: u32,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum RttCommand {
+    /// Plan bounded up-channel consumption without discovery or attach.
+    Plan(RttCaptureSelection),
+    /// Consume one up channel and save bounded raw JSONL evidence.
+    Capture(RttCaptureArguments),
+}
+
+#[derive(Debug, Args)]
+pub struct RttCaptureSelection {
+    #[command(flatten)]
+    pub selection: CoreSelection,
+    #[arg(long, value_parser = parse_address, help = "exact initialized ARM32 RTT control block in target RAM; no automatic scan")]
+    pub control_block: Address,
+    #[arg(long, default_value_t = 0, help = "target-to-host up channel (0..15)")]
+    pub channel: u32,
+    #[arg(
+        long,
+        default_value_t = 5000,
+        help = "bounded sampling window in milliseconds (10..60000)"
+    )]
+    pub duration_ms: u64,
+    #[arg(
+        long,
+        default_value_t = 65536,
+        help = "maximum consumed payload bytes (1..1048576)"
+    )]
+    pub max_bytes: u64,
+    #[arg(
+        long,
+        default_value_t = 50,
+        help = "poll interval in milliseconds (1..1000, no greater than duration)"
+    )]
+    pub poll_interval_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct RttCaptureArguments {
+    #[command(flatten)]
+    pub capture: RttCaptureSelection,
+    #[arg(long, help = "exact digest from the current RTT plan")]
+    pub confirm: String,
+    #[arg(
+        long,
+        help = "new JSONL evidence file; never overwrites an existing file"
+    )]
+    pub evidence: PathBuf,
+}
+
 #[derive(Debug)]
 pub struct CommandResult {
     pub operation: &'static str,
@@ -1347,6 +1401,12 @@ impl Cli {
             Command::Memory {
                 command: MemoryCommand::Read(_),
             } => "memory.read",
+            Command::Rtt {
+                command: RttCommand::Plan(_),
+            } => "rtt.plan",
+            Command::Rtt {
+                command: RttCommand::Capture(_),
+            } => "rtt.capture",
             Command::Core {
                 command: CoreCommand::Status(_),
             } => "core.status",
@@ -2567,6 +2627,23 @@ pub fn execute(cli: &Cli) -> Result<CommandResult> {
         Command::Memory {
             command: MemoryCommand::Read(selection),
         } => read_memory(cli, selection),
+        Command::Rtt { command } => match cli.backend {
+            BackendArg::Replay => run_rtt(
+                RttService::new(ReplayBackend::from_path(replay_fixture_path(cli)?)?),
+                command,
+            ),
+            BackendArg::ProbeRs => {
+                let selection = match command {
+                    RttCommand::Plan(selection) => selection,
+                    RttCommand::Capture(args) => &args.capture,
+                };
+                run_rtt(
+                    RttService::new(ProbeRsBackend::new(&selection.selection.target)?),
+                    command,
+                )
+            }
+            BackendArg::Openocd => Err(crate::rtt::unsupported("openocd")),
+        },
         Command::Core { command } => control_core(cli, command),
         Command::Session { .. } => Err(DebugError::new(
             crate::error::ErrorCode::ProtocolError,
@@ -3317,6 +3394,57 @@ fn describe_debug_control_effects(effects: &crate::model::DebugControlEffects) -
         return "no backend-managed volatile target changes declared".to_string();
     }
     effects.volatile_target_state_notes.join("; ")
+}
+
+fn run_rtt<B: DebugBackend>(
+    mut service: RttService<B>,
+    command: &RttCommand,
+) -> Result<CommandResult> {
+    let args = match command {
+        RttCommand::Plan(args) => args,
+        RttCommand::Capture(args) => &args.capture,
+    };
+    let plan = service.plan(
+        &args.selection.probe,
+        &args.selection.target,
+        &RttSelection {
+            core: args.selection.core,
+            control_block: args.control_block,
+            channel: args.channel,
+        },
+        RttCaptureLimits {
+            duration_ms: args.duration_ms,
+            maximum_bytes: args.max_bytes,
+            poll_interval_ms: args.poll_interval_ms,
+        },
+    )?;
+    match command {
+        RttCommand::Plan(_) => {
+            let human = format!(
+                "RTT plan: {} / {}\nControl block: {} / up channel {}\nSampling: {} ms / {} bytes\nRTT consumption updates the RAM read cursor; no down-channel or mode writes.\nConfirm digest: {}",
+                plan.probe_id,
+                plan.target.name,
+                plan.selection.control_block,
+                plan.selection.channel,
+                plan.limits.duration_ms,
+                plan.limits.maximum_bytes,
+                plan.confirm_digest
+            );
+            Ok(CommandResult::serializable("rtt.plan", &plan, human))
+        }
+        RttCommand::Capture(args) => {
+            let report = service.capture(&plan, &args.confirm, &args.evidence)?;
+            let human = format!(
+                "RTT captured: {} bytes in {} chunks ({})\nChannel stopped and probe disconnected\nEvidence: {}\nSHA-256: {}",
+                report.bytes_captured,
+                report.chunk_count,
+                report.stop_reason,
+                report.evidence.path,
+                report.evidence.sha256
+            );
+            Ok(CommandResult::serializable("rtt.capture", &report, human))
+        }
+    }
 }
 
 fn replay_fixture_path(cli: &Cli) -> Result<&std::path::Path> {
