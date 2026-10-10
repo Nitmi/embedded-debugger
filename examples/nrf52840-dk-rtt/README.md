@@ -1,8 +1,12 @@
 # nRF52840 DK RTT acceptance fixture
 
 Development-only, dependency-free Rust firmware for the DK's **onboard** target.
-No physical RTT acceptance is claimed by building this fixture. The firmware has
-not been flashed at this checkpoint.
+Building this fixture alone does not prove physical RTT support. A separate
+single-flash/single-capture DK run passed on 2026-10-10 after an explicitly
+authorized access-protection recovery: 7,528 bytes and 40 ordered heartbeats,
+with complete native stop/disconnect evidence. See the
+[hardware acceptance record](../../docs/hardware-acceptance.md#nrf52840-dk-bounded-rtt-acceptance-2026-10-10)
+for executor identities, evidence hashes and limits.
 
 It creates one ARM32 SEGGER-compatible RTT up channel, no down channels, a
 1024-byte nonblocking/skip ring, and an ELF `_SEGGER_RTT` symbol. It publishes

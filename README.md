@@ -45,8 +45,10 @@ wall/monotonic timestamps; stdout remains a small structured summary. Reading
 RTT consumes data by advancing its RAM read cursor. The implementation never
 scans RAM, follows channel-name pointers, changes channel mode, writes a down
 channel or explicitly resets/halts/resumes the target. Replay is implemented;
-the native candidate is limited to nRF52840 and has not passed physical RTT
-acceptance. OpenOCD RTT is unavailable. See [RTT capture](docs/rtt.md).
+the native candidate is limited to nRF52840. Its bounded DK fixture passed one
+physical capture on 2026-10-10: 7,528 bytes, 40 ordered heartbeats and successful
+stop/disconnect. This is a local candidate, not a published release or acceptance
+of other targets. OpenOCD RTT is unavailable. See [RTT capture](docs/rtt.md).
 
 Replay is a product backend, not a throwaway mock: it powers CI, regression
 fixtures, issue reports, and offline Agent analysis. The OpenOCD target backend

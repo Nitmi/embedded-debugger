@@ -1,8 +1,9 @@
 # Bounded RTT capture
 
 The `0.2.4` source candidate adds a CLI-first capture workflow. It is not a
-published release or a physical hardware acceptance result. It supports Replay
-and the probe-rs nRF52840 ARM32 profile; other native targets and OpenOCD RTT
+published release. One bounded nRF52840 DK fixture passed physical acceptance on
+2026-10-10; see the evidence and limits below. It supports Replay and the
+probe-rs nRF52840 ARM32 profile; other native targets and OpenOCD RTT
 return `CAPABILITY_UNAVAILABLE`. General trace, SWO, down-channel input and
 persistent-session/MCP RTT requests are not enabled by this checkpoint.
 
@@ -105,4 +106,28 @@ These tests do not constitute physical probe-rs/nRF52840 RTT acceptance.
 For the separately prepared Code-Flash-only DK firmware, extracted symbol
 addresses and the offline evidence evaluator, see the
 [DK RTT acceptance fixture](../examples/nrf52840-dk-rtt/README.md). Preparing this
-fixture does not qualify native RTT hardware or replace installed components.
+fixture alone does not qualify native RTT hardware or replace installed components.
+
+## nRF52840 DK physical acceptance (2026-10-10)
+
+One fresh run followed a separately authorized access-protection recovery on
+J-Link `1366:1061:001050275757`, routed to the DK onboard `nRF52840_xxAA`.
+The locked official 0.2.3 flashed and verified the 2,277-byte Code Flash fixture,
+then completed reset/halt/snapshot/resume/disconnect. A hash-bound local 0.2.4
+performed exactly one capture at the extracted `0x20000000` control block,
+core 0/up channel 0, with a 10,000 ms sampling budget, 65,536-byte ceiling and
+50 ms polling. No additional reset or flash was requested by RTT.
+
+The capture returned 7,528 bytes in 41 chunks, correct READY/source BUILD_ID,
+and 40 complete heartbeats numbered 1..40 with `SKIPPED=0`. The payload exceeds
+seven ring capacities; native evidence and independent reconstruction agree.
+The prepared offline evaluator verified identity, channel metadata, hashes,
+byte/chunk sequence, complete lines, `duration_limit`, stop and disconnect.
+Native elapsed time was 10,424 ms; the budget is a sampling deadline, not a
+hard wall-time limit on probe I/O. Both hardware operations had zero retries.
+
+This accepts the prepared single-board up-channel profile after recovery. It
+does not establish power-cycle debug availability, arbitrary RTT firmware,
+cryptographic runtime attestation, global losslessness, post-disconnect core
+state, other targets, MCP/session RTT or OpenOCD RTT. See the full
+[hardware acceptance record](hardware-acceptance.md#nrf52840-dk-bounded-rtt-acceptance-2026-10-10).

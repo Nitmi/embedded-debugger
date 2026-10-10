@@ -2137,3 +2137,65 @@ This closes the native flash, subsequent debug reattach, reset, and serial
 runtime acceptance path on this exact fixture. It does not establish power-cycle
 debug availability, indefinite runtime continuity, independently preserved
 out-of-image bytes, LED behavior, or cryptographic firmware attestation.
+
+## nRF52840 DK bounded RTT acceptance (2026-10-10)
+
+- Physical routing was user-confirmed as the DK onboard chip with all external
+  SWD disconnected. The first attempted flash stopped at attach, and a later
+  one-shot Nordic diagnostic reported APPROTECT ALL. A separately authorized,
+  non-retried recover erased user code/UICR, installed the vendor unlock image,
+  identified `NRF52840_xxAA_REV3` and reported protection NONE. That recovery is
+  separate from this fresh Code Flash/RTT acceptance and retained DLL -256
+  warnings; the overall history is not a first-attempt success.
+- The official workstation-locked 0.2.3 executable SHA-256 was
+  `1f54d8acfbaf6d3aec8624813a8d00904acf85cbad05bbcc43a509cd6ef93f45`.
+  The local 0.2.4 RTT executable SHA-256 was
+  `7de129f5bdf7ee66f21ef4ff015a51e48d31991558ee4e5adc2da37e363d5a0a`.
+  Its temporary component lock differed only in debugger path/version/hash;
+  both doctors passed and no persistent workstation selection was changed.
+- The unchanged HEX SHA-256 was
+  `774e31802bdc1c3243d996234412c87ed78ddedb7a3f880b46eec7453dbcda5e`;
+  ELF SHA-256 was
+  `3b95e6d8a5ffca67a447978e491aba824748cb2b59041f286a7afdc914a223a4`.
+  One fresh Flash Plan selected J-Link `1366:1061:001050275757` and
+  `nRF52840_xxAA`, writing 2,277 bytes at zero and erasing only the first
+  4,096-byte Code Flash page, with verification and unwritten-byte preservation.
+  It included no UICR policy. Digest was
+  `52786bd92696ff0c7f7c392924ea4dcca2c85e0630cc609985ad1b97d8f585b9`.
+- One flash execution succeeded. Native evidence independently verified the
+  single payload segment SHA-256
+  `2ec858802e287a06b01c9c4713af280cff640349bb1c225d1ee3ec2f0bf59636`,
+  and recorded all eight attach/erase/program/verify/reset-halt/snapshot/resume/
+  disconnect operations successful. The halted snapshot had PC=0x00000100,
+  SP=0x20040000, LR=0xFFFFFFFF and resumed state running before disconnect.
+  Its 3,300-byte evidence SHA-256 was
+  `852c5bb629fc15b6289ff4d482b3352c6919a4f0e7315174fd430f1758dde861`.
+- One 0.2.4 capture selected core 0/up channel 0, control block 0x20000000,
+  ring 0x20000030/1,024 bytes, read cursor 0x20000028 and flags=0. The plan
+  bound 10,000 ms, maximum 65,536 bytes and 50 ms polling, digest
+  `d2f5897051ef963f0eb5f7b50be61615468291ba30a6cc3826ba5183ac80bd43`.
+  It requested no extra reset/halt/resume, scan, name-pointer read, down-channel
+  or mode write. It returned 7,528 bytes in 41 chunks, elapsed 10,424 ms,
+  `duration_limit`, channel_stopped=true and disconnected=true.
+- The 28,325-byte JSONL SHA-256 was
+  `bdf3adf1b7bbfcb103aa6f586cc3b71caa68766e03f828c6fcaf7e36fd6a9e74`;
+  reconstructed payload SHA-256 was
+  `81fe3cb0947b7b2f4efc296d5b27821f33d2323ee45bd352439509600f7f3584`.
+  The unchanged offline evaluator checked the exact READY and source BUILD_ID
+  `e40bd50dae8fc40ec7b67f63086d0f2d78f5d4a0a34b21341da9b0a77acfdc7b`,
+  41 complete identities, 40 complete heartbeats 1..40, `SKIPPED=0`, no partial
+  tail, ring metadata, chunk/byte order, hashes, bounds and cleanup. A separate
+  PowerShell byte reconstruction agreed without further hardware access.
+- Flash, capture and evaluation each ran once; all returned exit code 0 and
+  empty stderr. No additional recover, UICR, target operation, serial or BLE
+  access occurred in this fresh acceptance. No debug/helper process remained.
+  The evidence bundle and report were saved at
+  `D:\Code\tools\embedded-debugger\acceptance\rtt-dk-post-recover-20261010-8c142477.*`.
+
+This qualifies one bounded up-channel profile on the prepared DK fixture after
+recovery. The native 10,000 ms budget bounds sampling, not interruptible probe
+I/O or attach. Observed source identity is telemetry, not cryptographic firmware
+attestation. There was no independent out-of-image preservation check, no
+post-disconnect core-state read, power-cycle acceptance, arbitrary RTT firmware,
+other-target, down-channel, OpenOCD, or MCP/session RTT acceptance. The 0.2.4
+candidate is local and has not been published by this checkpoint.
