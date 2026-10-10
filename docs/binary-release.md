@@ -17,11 +17,11 @@ Obtain the archive and its SHA-256 from a trusted channel. In PowerShell, compar
 the hash with the supplied `.zip.sha256` file before extracting or running:
 
 ```powershell
-Get-FileHash .\embedded-debugger-0.2.3-x86_64-pc-windows-msvc.zip -Algorithm SHA256
-Get-Content .\embedded-debugger-0.2.3-x86_64-pc-windows-msvc.zip.sha256
-gh attestation verify .\embedded-debugger-0.2.3-x86_64-pc-windows-msvc.zip `
+Get-FileHash .\embedded-debugger-0.2.4-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-Content .\embedded-debugger-0.2.4-x86_64-pc-windows-msvc.zip.sha256
+gh attestation verify .\embedded-debugger-0.2.4-x86_64-pc-windows-msvc.zip `
   --repo Nitmi/embedded-debugger `
-  --source-ref refs/tags/v0.2.3
+  --source-ref refs/tags/v0.2.4
 ```
 
 The source repository also provides a full, host-only verifier (Python 3.11+):
@@ -56,6 +56,7 @@ that extracted root, run only these host checks first:
 ```powershell
 .\embedded-debugger.exe --version
 .\embedded-debugger.exe runtime --help
+.\embedded-debugger.exe rtt --help
 ```
 
 Use the full executable path for project integrations, or deliberately place
@@ -71,6 +72,20 @@ and target commands are not equivalent to version/help checks. Offline readiness
 does not authorize flashing or prove board or firmware identity.
 
 ## Build and provenance
+
+The source-side RTT release smoke additionally runs a native plan with an
+intentionally nonexistent probe identity and a lossless Replay capture:
+
+```console
+python scripts/test_rtt_candidate.py --executable <installed-executable> --sha256 <verified-executable-sha256> --fixture examples/replay/stm32g4.json --output-dir <new-evidence-directory>
+```
+
+It checks the selected RAM/cursor effects, rejects a wrong confirmation before
+creating evidence, verifies Replay payload and evidence hashes, and requires
+an explicit unsupported-capability result for OpenOCD. Every child has a
+20-second deadline. The output directory must be new; this check does not
+enumerate probes, attach, change firmware or establish physical-board readiness.
+Both Windows package CI and tag release CI run it on the packaged executable.
 
 From a clean committed source checkout on Windows x64, using Python 3.11+, Cargo,
 Rust, the native build prerequisites, and a trusted `cargo-about 0.9.2` executable:

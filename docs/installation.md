@@ -58,10 +58,13 @@ embedded-debugger runtime --help
 cargo install --list
 ```
 
-For the `0.2.3` candidate, the version must be `embedded-debugger 0.2.3`, runtime
+For the `0.2.4` candidate, the version must be `embedded-debugger 0.2.4`, runtime
 help must include `init` and `inspect`, `flash session --help` must include
 `plan`, `inspect`, and `serve`, and `flash session serve --help` must include
-`--transcript-dir`. On PowerShell, check command resolution
+`--transcript-dir`. `rtt --help` must include `plan` and `capture`; RTT planning
+uses built-in target information without enumerating or attaching a probe.
+See [bounded RTT capture](rtt.md) for supported profiles and cursor effects.
+On PowerShell, check command resolution
 and record the actual installed binary hash:
 
 ```powershell

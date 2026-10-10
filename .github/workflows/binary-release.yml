@@ -106,6 +106,8 @@ jobs:
             -EnvironmentLabel 'GitHub-hosted Windows runner'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item -LiteralPath $report -Destination binary-dist/windows-host-smoke.json -ErrorAction Stop
+          python scripts/test_rtt_candidate.py --executable $exe[0].FullName --sha256 $binary[0].sha256 --fixture examples/replay/stm32g4.json --output-dir binary-dist/rtt-offline-smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Attest archive
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4

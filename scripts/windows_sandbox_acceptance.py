@@ -512,13 +512,17 @@ def verify(root_dir: Path) -> dict:
         else environment["system_vcruntime140_before_execution"]
     )
     checks = smoke["checks"]
-    if not isinstance(checks, list) or len(checks) != 3:
+    requires_serve_help = tuple(
+        int(part) for part in request["version"].split(".")
+    ) >= (0, 2, 3)
+    expected_check_count = 4 if requires_serve_help else 3
+    if not isinstance(checks, list) or len(checks) != expected_check_count:
         raise ValueError("Windows Sandbox smoke checks differ")
     for check in checks:
         exact_fields(
             check, {"arguments", "exit_code", "stdout", "stderr"}, "smoke check"
         )
-    version_check, help_check, session_help_check = checks
+    version_check, help_check, session_help_check = checks[:3]
     smoke_checks_ok = (
         version_check["arguments"] == "--version"
         and version_check["exit_code"] == 0
@@ -536,6 +540,15 @@ def verify(root_dir: Path) -> dict:
         )
         and not session_help_check["stderr"].strip()
     )
+    if requires_serve_help:
+        serve_help_check = checks[3]
+        smoke_checks_ok = (
+            smoke_checks_ok
+            and serve_help_check["arguments"] == "flash session serve --help"
+            and serve_help_check["exit_code"] == 0
+            and "--transcript-dir" in serve_help_check["stdout"]
+            and not serve_help_check["stderr"].strip()
+        )
     if (
         result["schema_version"] != RESULT_SCHEMA
         or result["ok"] is not True

@@ -41,6 +41,18 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
         }
         self.output = self.root / "acceptance"
 
+    def use_candidate_version(self, version):
+        with zipfile.ZipFile(self.archive, "r") as archive:
+            manifest = archive.read(archive.namelist()[0])
+        with zipfile.ZipFile(self.archive, "w") as archive:
+            archive.writestr(
+                f"embedded-debugger-{version}-x86_64-pc-windows-msvc/release-manifest.json",
+                manifest,
+            )
+        self.archive_hash = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        self.checksum.write_text(f"{self.archive_hash}  {self.archive.name}\n")
+        self.candidate.update(version=version, sha256=self.archive_hash)
+
     def prepare(self):
         with patch.object(
             sandbox.package_binary, "verify", return_value=self.candidate
@@ -78,7 +90,7 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
             "executable_started": True,
             "executable": r"C:\temp\embedded-debugger.exe",
             "expected_sha256": self.executable_hash,
-            "expected_version": "0.2.0",
+            "expected_version": request["version"],
             "timestamp_utc": "2026-09-08T00:00:00Z",
             "os_version": "10.0.26200.0",
             "is_64_bit_os": True,
@@ -86,7 +98,7 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
                 {
                     "arguments": "--version",
                     "exit_code": 0,
-                    "stdout": "embedded-debugger 0.2.0\n",
+                    "stdout": f"embedded-debugger {request['version']}\n",
                     "stderr": "",
                 },
                 {
@@ -106,6 +118,15 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
             "actual_sha256": self.executable_hash,
             "system_vcruntime140": "14.51.36247.0",
         }
+        if tuple(int(part) for part in request["version"].split(".")) >= (0, 2, 3):
+            smoke["checks"].append(
+                {
+                    "arguments": "flash session serve --help",
+                    "exit_code": 0,
+                    "stdout": "--transcript-dir\n",
+                    "stderr": "",
+                }
+            )
         smoke_data = sandbox.json_bytes(smoke)
         (self.output / "evidence" / sandbox.SMOKE_NAME).write_bytes(smoke_data)
         result = {
@@ -316,6 +337,46 @@ class WindowsSandboxAcceptanceTests(unittest.TestCase):
             sandbox.parse_json(b'{"a":1,"a":1}')
         with self.assertRaises(ValueError):
             sandbox.parse_json(b'{"value":NaN}')
+
+    def test_current_candidate_requires_all_four_smoke_checks(self):
+        self.use_candidate_version("0.2.4")
+        self.prepare()
+        self.write_evidence()
+        self.assertTrue(self.verify()["clean_environment_verified"])
+        path = self.output / "evidence" / sandbox.SMOKE_NAME
+        smoke = json.loads(path.read_bytes())
+        smoke["checks"].pop()
+        changed_data = sandbox.json_bytes(smoke)
+        path.write_bytes(changed_data)
+        result_path = self.output / "evidence" / sandbox.RESULT_NAME
+        result = json.loads(result_path.read_bytes())
+        result["smoke_report_sha256"] = sandbox.sha256(changed_data)
+        result_path.write_bytes(sandbox.json_bytes(result))
+        with self.assertRaisesRegex(ValueError, "smoke checks differ"):
+            self.verify()
+
+    def test_transcript_help_check_cannot_be_replaced_or_omitted(self):
+        self.use_candidate_version("0.2.3")
+        self.prepare()
+        for field, value in (
+            ("arguments", "probes list"),
+            ("stdout", "serve\n"),
+            ("exit_code", 1),
+            ("stderr", "failed"),
+        ):
+            with self.subTest(field=field):
+                self.write_evidence()
+                path = self.output / "evidence" / sandbox.SMOKE_NAME
+                smoke = json.loads(path.read_bytes())
+                smoke["checks"][3][field] = value
+                changed_data = sandbox.json_bytes(smoke)
+                path.write_bytes(changed_data)
+                result_path = self.output / "evidence" / sandbox.RESULT_NAME
+                result = json.loads(result_path.read_bytes())
+                result["smoke_report_sha256"] = sandbox.sha256(changed_data)
+                result_path.write_bytes(sandbox.json_bytes(result))
+                with self.assertRaisesRegex(ValueError, "acceptance policy"):
+                    self.verify()
 
     def test_guest_uses_framework_zip_api_not_optional_archive_module(self):
         script = (

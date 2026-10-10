@@ -34,7 +34,8 @@ powershell -NoProfile -File .\Test-WindowsCandidate.ps1 `
 ```
 
 It reserves a new report before execution, checks executable identity, and only
-runs `--version` and `runtime --help` with ten-second deadlines and a system-only
+runs `--version`, `runtime --help`, `flash session --help`, and
+`flash session serve --help` with ten-second deadlines and a system-only
 child PATH. It does not run doctor, enumerate devices, install software or change
 persistent environment variables. An existing report is refused. An execution
 policy restriction is reported by PowerShell; this workflow does not change that
@@ -60,8 +61,10 @@ directory, USB device, development tool or credential is mapped.
 
 The guest verifies all immutable inputs and release payload hashes, proves that
 the input mapping rejects a write, requires zero operational non-loopback network
-interfaces, records its Windows/VC runtime environment, and runs only `--version`
-and `runtime --help`. It never invokes device discovery or a hardware backend.
+interfaces, records its Windows/VC runtime environment, and runs the bundled
+host smoke. For 0.2.3 and later this includes all four version/help checks above;
+legacy archives use their three-check smoke. It never invokes device discovery
+or a hardware backend.
 It extracts with the Windows .NET ZIP API rather than `Expand-Archive`, because
 Windows 11 24H2 Sandbox images can omit the Store-backed PowerShell Archive module.
 Wait for the result, close Sandbox, then run on the host:
@@ -114,7 +117,7 @@ For those legacy candidates, the host requires a valid Microsoft Corporation
 signature and records the exact
 installer SHA-256 and file version. The guest rechecks the file and signature,
 runs `/install /quiet /norestart`, preserves the installer log, records the exit
-code and runtime DLL version, then performs the same two-command smoke. The host
+code and runtime DLL version, then performs the bundled version/help smoke. The host
 accepts only documented success/already-installed/restart-required exit codes
 with matching installation evidence and a successful smoke. The installer is a
 test prerequisite inside the disposable guest; it is not added to the CLI ZIP.

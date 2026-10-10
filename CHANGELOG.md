@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.2.4 - 2026-10-10
+
+### Added
+
+- Bounded RTT `plan` and `capture` commands for probe-rs and Replay. Plans bind
+  the exact probe, target, core, control-block address, channel and capture limits;
+  capture preserves lossless bytes in external JSONL evidence with cleanup and
+  SHA-256 summaries. RTT reads advance the selected target ring's read cursor.
+  Native capture currently supports one selected up-channel at a time on the
+  single-core nRF52840;
+  unsupported profiles and OpenOCD return explicit capability errors.
+- Code-only nRF52840 DK RTT acceptance firmware with a source-derived BUILD_ID,
+  READY lines, sequenced heartbeats and an offline evidence evaluator.
+
+### Fixed
+
+- Windows Sandbox evidence verification now requires the fourth host smoke
+  check, `flash session serve --help`, for 0.2.3 and later archives. Older
+  three-check reports remain supported.
+
+### Validation
+
+- One nRF52840 DK onboard-target run after an explicitly approved recover
+  verified a 2,277-byte firmware write, then captured 7,528 RTT bytes containing
+  matching READY/BUILD_ID lines and 40 strictly increasing heartbeats. Both
+  operations disconnected successfully. The tested local debug build does not
+  establish hardware qualification for every release build or target profile.
+
 ## 0.2.3 - 2026-09-29
 
 ### Added

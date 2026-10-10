@@ -91,7 +91,9 @@ jobs:
           $candidateRoot = $executables[0].DirectoryName
           $manifest = Get-Content -Raw -LiteralPath (Join-Path $candidateRoot 'release-manifest.json') | ConvertFrom-Json
           $binaryHash = ($manifest.files | Where-Object path -eq 'embedded-debugger.exe').sha256
-          powershell -NoProfile -File (Join-Path $candidateRoot 'Test-WindowsCandidate.ps1') -Executable $executables[0].FullName -ExpectedSha256 $binaryHash -ReportPath target/binary-dist/windows-host-smoke.json -EnvironmentLabel 'GitHub Windows runner (not a clean machine)'
+          powershell -NoProfile -File (Join-Path $candidateRoot 'Test-WindowsCandidate.ps1') -Executable $executables[0].FullName -ExpectedSha256 $binaryHash -ExpectedVersion $manifest.version -ReportPath target/binary-dist/windows-host-smoke.json -EnvironmentLabel 'GitHub Windows runner (not a clean machine)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/test_rtt_candidate.py --executable $executables[0].FullName --sha256 $binaryHash --fixture examples/replay/stm32g4.json --output-dir target/binary-dist/rtt-offline-smoke
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
