@@ -37,7 +37,7 @@ discover -> select exact probe/target -> flash plan -> confirm digest
          -> reset-and-halt -> snapshot -> resume -> evidence
 ```
 
-The local `0.2.4` candidate also provides bounded RTT up-channel capture through
+The `0.2.4` CLI also provides bounded RTT up-channel capture through
 `rtt plan` and `rtt capture`. Plans are host-only; capture binds an exact probe,
 target, initialized control-block address, channel and time/byte budget. Raw
 bytes are flushed to JSONL evidence with sequence numbers, byte cursors and

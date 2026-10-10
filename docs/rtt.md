@@ -1,7 +1,7 @@
 # Bounded RTT capture
 
-The `0.2.4` source candidate adds a CLI-first capture workflow. It is not a
-published release. One bounded nRF52840 DK fixture passed physical acceptance on
+The `0.2.4` CLI adds a bounded capture workflow.
+One bounded nRF52840 DK fixture passed physical acceptance on
 2026-10-10; see the evidence and limits below. It supports Replay and the
 probe-rs nRF52840 ARM32 profile; other native targets and OpenOCD RTT
 return `CAPABILITY_UNAVAILABLE`. General trace, SWO, down-channel input and
