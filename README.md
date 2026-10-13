@@ -28,6 +28,15 @@ for host verification, existing installations, and rollback considerations.
 
 ## Backend milestones
 
+The local 0.2.5 CLI candidate fixes Windows runtime monitor shutdown. Monitor
+children start suspended, enter a kill-on-close Job, and resume after assignment;
+completion checks both root exit and the Job's active process count. Repeated
+waits do not depend on an exit notification already consumed by polling, and
+termination waits have a deadline. This change is qualified with host-only
+Replay and a fake baud executable; it is not a new physical-board acceptance or
+a published release. OpenOCD process wrappers and Unix monitor behavior are
+outside this repair.
+
 The current milestone implements the contract, a deterministic Replay backend,
 and a native probe-rs guarded flash workflow:
 

@@ -8,10 +8,9 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
-#[cfg(windows)]
-use process_wrap::std::JobObject;
 #[cfg(unix)]
 use process_wrap::std::ProcessGroup;
+#[cfg(unix)]
 use process_wrap::std::{ChildWrapper, CommandWrap};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -469,7 +468,10 @@ impl SerialMonitorDriver for BaudCliDriver {
 }
 
 struct ManagedBaudMonitor {
+    #[cfg(unix)]
     child: Option<Box<dyn ChildWrapper>>,
+    #[cfg(windows)]
+    child: Option<crate::windows_monitor::MonitorChild>,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     artifact_directory: PathBuf,
@@ -503,12 +505,13 @@ impl ManagedBaudMonitor {
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
-        let mut wrapped = CommandWrap::from(command);
-        #[cfg(windows)]
-        wrapped.wrap(JobObject);
         #[cfg(unix)]
-        wrapped.wrap(ProcessGroup::leader());
-        let child = wrapped.spawn().map_err(|error| {
+        let child = CommandWrap::from(command)
+            .wrap(ProcessGroup::leader())
+            .spawn();
+        #[cfg(windows)]
+        let child = crate::windows_monitor::MonitorChild::spawn(command);
+        let child = child.map_err(|error| {
             let _ = fs::remove_file(&stdout_path);
             let _ = fs::remove_file(&stderr_path);
             DebugError::unavailable(

@@ -11,5 +11,7 @@ pub mod runtime;
 pub mod service;
 pub mod session;
 pub mod supervisor;
+#[cfg(windows)]
+mod windows_monitor;
 
 pub const SCHEMA_VERSION: &str = "1.0";
