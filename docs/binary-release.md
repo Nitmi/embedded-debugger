@@ -178,6 +178,22 @@ attestation. Publishing a GitHub Release remains a separate repository-owner act
 The verifier continues to accept original v1 and v2 candidates;
 v1 lacks the license payloads, and v1/v2 do not declare CRT linkage.
 
+## Upload a verified asset from a GitHub runner
+
+When a local large-file upload cannot complete, the repository owner can
+manually dispatch `upload-release-asset.yml` on `main`. Supply the existing
+version tag, its exact source commit, successful tag-provenance run ID, existing
+draft release ID and expected ZIP SHA-256. This workflow uploads only the ZIP;
+it neither creates a tag/release nor publishes the draft.
+
+The helper verifies the local fetched tag, completed push run and attempt,
+archive integrity and source/version/hash, and GitHub attestation including the
+exact signer/source/run identity and GitHub-hosted runner. It never executes the
+packaged CLI. A matching existing asset is idempotent; a differing or incomplete
+asset fails without deletion or replacement. Recheck all assets and publish
+separately after the upload succeeds. The uploader's `main` commit is separate
+from the release's attested tag source and must not replace that source identity.
+
 For a disposable Windows Sandbox smoke, use the source repository's
 `scripts/windows_sandbox_acceptance.py`. It prepares a candidate-bound `.wsb`
 launcher with networking and host redirection disabled, read-only input and a
