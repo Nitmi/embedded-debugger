@@ -35,7 +35,13 @@ waits do not depend on an exit notification already consumed by polling, and
 termination waits have a deadline. This change is qualified with host-only
 Replay and a fake baud executable; it is not a new physical-board acceptance or
 a published release. OpenOCD process wrappers and Unix monitor behavior are
-outside this repair.
+outside this repair. Runtime acceptance also counts BUILD and heartbeats only
+after the last complete READY, and reports excluded startup/earlier-boot lines.
+The saved DK A/B receive bytes each yield 29 qualifying heartbeats, excluding
+two startup heartbeats. This predicate check uses Replay and saved bytes;
+it is not a new hardware run with the revised executable. See the
+[runtime contract](docs/contracts.md#joint-runtime-acceptance) and
+[saved-byte provenance](tests/fixtures/runtime/README.md).
 
 The current milestone implements the contract, a deterministic Replay backend,
 and a native probe-rs guarded flash workflow:

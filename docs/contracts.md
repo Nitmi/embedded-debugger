@@ -1123,6 +1123,8 @@ serial port, four-digit hexadecimal USB VID/PID, USB serial number, ready line,
 heartbeat line, and new evidence path. An exact build-identity line is optional;
 when supplied it becomes mandatory. Duration is 1..=120 seconds, monitor startup
 delay is 0..=5000 ms, and at least one heartbeat is always required.
+READY, BUILD (when configured), and heartbeat lines must be distinct; an
+ambiguous configuration is rejected before hardware access.
 
 Before target control, the command verifies one accessible exact probe and asks
 `baud list --json` for one port matching all four serial identity fields. It
@@ -1144,7 +1146,24 @@ counts.
 
 Success requires monitor completion, reset-capture completion, at least one
 exact ready line, the exact build line when configured, and the requested number
-of exact heartbeats. The result contains the complete reset report, selected
+of exact heartbeats **after the last complete READY line**. A later READY starts
+a fresh window: neither BUILD nor heartbeats from an earlier window can satisfy
+acceptance. With no complete READY, both qualifying counts are zero. BUILD may
+appear anywhere in this window; ordering relative to individual heartbeats is
+not required. Forbidden lines are still checked across the entire capture.
+
+`assertions.ready.observed` counts all exact READY lines;
+`assertions.build_identity.observed` and `assertions.heartbeat.observed` count
+only the selected window. The additive `assertions.readiness_window` reports
+`policy=after_last_complete_ready`, `ready_line_index` (zero-based complete-line
+index, or null), the window's complete-line count (excluding READY), and total
+and excluded BUILD/heartbeat counts. Excluded counts include every complete
+match when READY is absent. A partial tail never opens or contributes to a
+window. This stricter counting replaces whole-capture heartbeat/BUILD counts in
+the 0.2.5 candidate; saved 0.2.4/earlier-candidate results retain their original
+semantics.
+
+The result contains the complete reset report, selected
 probe and serial records, assertion counts, fixed effects, ordered operations,
 the retained artifact directory, and SHA-256 references for baud stdout, stderr,
 JSONL, log, and the final evidence file. `serial_transmit_requested`, `flash_operation_requested`,

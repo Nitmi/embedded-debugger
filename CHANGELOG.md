@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Runtime acceptance counts BUILD identity and heartbeats only after the last
+  complete READY line. Startup lines and earlier boot windows cannot satisfy a
+  later boot; forbidden-line checks still cover the full capture. Additive
+  readiness-window diagnostics show totals and exclusions. Ambiguous identical
+  READY/BUILD/heartbeat expectations are rejected before hardware access.
+- Windows serial monitors start suspended inside a kill-on-close Job and finish
+  only after the root and descendants exit. Bounded waits avoid hanging on an
+  exit notification already consumed by polling.
+
 ## 0.2.4 - 2026-10-10
 
 ### Added

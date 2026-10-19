@@ -217,12 +217,24 @@ pub struct ForbiddenLineAssertion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimeReadinessWindow {
+    pub policy: &'static str,
+    pub ready_line_index: Option<u32>,
+    pub complete_line_count: u32,
+    pub heartbeat_total: u32,
+    pub heartbeat_excluded: u32,
+    pub build_identity_total: u32,
+    pub build_identity_excluded: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RuntimeAssertions {
     pub monitor_completed: bool,
     pub reset_capture_completed: bool,
     pub ready: ExactLineAssertion,
     pub build_identity: OptionalLineAssertion,
     pub heartbeat: ExactLineAssertion,
+    pub readiness_window: RuntimeReadinessWindow,
     pub forbidden_lines: Vec<ForbiddenLineAssertion>,
     pub complete_line_count: u32,
     pub partial_tail_present: bool,
@@ -1147,6 +1159,21 @@ fn validate_options(options: &RuntimeAcceptanceOptions) -> Result<()> {
     if let Some(line) = &options.build_id_line {
         validate_expected_line("build_id_line", line)?;
     }
+    if options.ready_line == options.heartbeat_line
+        || options
+            .build_id_line
+            .as_ref()
+            .is_some_and(|line| line == &options.ready_line || line == &options.heartbeat_line)
+    {
+        return Err(DebugError::config(
+            "runtime ready, build identity and heartbeat lines must be distinct",
+            json!({
+                "ready_line": options.ready_line,
+                "build_id_line": options.build_id_line,
+                "heartbeat_line": options.heartbeat_line,
+            }),
+        ));
+    }
     if options.forbidden_lines.len() > MAX_FORBIDDEN_LINES {
         return Err(DebugError::config(
             "runtime acceptance has too many forbidden complete lines",
@@ -1263,18 +1290,38 @@ fn evaluate_assertions(
     text: &str,
 ) -> RuntimeAssertions {
     let (lines, partial_tail_present) = complete_lines(text);
-    let count = |expected: &str| -> u32 {
+    let count = |selected: &[String], expected: &str| -> u32 {
         u32::try_from(
-            lines
+            selected
                 .iter()
                 .filter(|line| line.as_str() == expected)
                 .count(),
         )
         .unwrap_or(u32::MAX)
     };
-    let ready_count = count(&options.ready_line);
-    let build_count = options.build_id_line.as_deref().map_or(0, count);
-    let heartbeat_count = count(&options.heartbeat_line);
+    // A later READY starts another boot: never pool identity or liveness across boots.
+    let ready_line_index = lines.iter().rposition(|line| line == &options.ready_line);
+    let window = ready_line_index.map_or(&[][..], |index| &lines[index + 1..]);
+    let ready_count = count(&lines, &options.ready_line);
+    let build_count = options
+        .build_id_line
+        .as_deref()
+        .map_or(0, |line| count(window, line));
+    let heartbeat_count = count(window, &options.heartbeat_line);
+    let heartbeat_total = count(&lines, &options.heartbeat_line);
+    let build_identity_total = options
+        .build_id_line
+        .as_deref()
+        .map_or(0, |line| count(&lines, line));
+    let readiness_window = RuntimeReadinessWindow {
+        policy: "after_last_complete_ready",
+        ready_line_index: ready_line_index.map(|index| u32::try_from(index).unwrap_or(u32::MAX)),
+        complete_line_count: u32::try_from(window.len()).unwrap_or(u32::MAX),
+        heartbeat_total,
+        heartbeat_excluded: heartbeat_total.saturating_sub(heartbeat_count),
+        build_identity_total,
+        build_identity_excluded: build_identity_total.saturating_sub(build_count),
+    };
     let monitor_completed = serial.is_some_and(|observation| {
         observation.process_exit_code == Some(0)
             && observation.result_ok
@@ -1303,7 +1350,7 @@ fn evaluate_assertions(
         .forbidden_lines
         .iter()
         .map(|line| {
-            let observed = count(line);
+            let observed = count(&lines, line);
             ForbiddenLineAssertion {
                 line: line.clone(),
                 observed,
@@ -1323,6 +1370,7 @@ fn evaluate_assertions(
         ready,
         build_identity,
         heartbeat,
+        readiness_window,
         forbidden_lines,
         complete_line_count: u32::try_from(lines.len()).unwrap_or(u32::MAX),
         partial_tail_present,
@@ -1891,6 +1939,216 @@ mod tests {
     }
 
     #[test]
+    fn pre_ready_heartbeats_do_not_satisfy_runtime_acceptance() {
+        let directory = tempdir().unwrap();
+        let execution = run_runtime_acceptance(
+            ReplayBackend::new(fixture()),
+            &driver("HEARTBEAT\r\nHEARTBEAT\r\nREADY v1\r\nBUILD v1 abc123\r\nHEARTBEAT\r\n"),
+            &options(directory.path().join("runtime.json")),
+        )
+        .unwrap();
+
+        assert!(execution.report.complete);
+        assert!(!execution.report.accepted);
+        assert_eq!(execution.report.assertions.heartbeat.observed, 1);
+        assert_eq!(
+            execution.report.assertions.readiness_window.heartbeat_total,
+            3
+        );
+        assert_eq!(
+            execution
+                .report
+                .assertions
+                .readiness_window
+                .heartbeat_excluded,
+            2
+        );
+    }
+
+    #[test]
+    fn build_identity_before_ready_cannot_satisfy_runtime_acceptance() {
+        let directory = tempdir().unwrap();
+        let execution = run_runtime_acceptance(
+            ReplayBackend::new(fixture()),
+            &driver("BUILD v1 abc123\nREADY v1\nHEARTBEAT\nHEARTBEAT\nHEARTBEAT\n"),
+            &options(directory.path().join("runtime.json")),
+        )
+        .unwrap();
+
+        assert!(execution.report.complete);
+        assert!(!execution.report.accepted);
+        assert_eq!(execution.report.assertions.build_identity.observed, 0);
+        assert_eq!(execution.report.assertions.heartbeat.observed, 3);
+    }
+
+    #[test]
+    fn latest_ready_restarts_heartbeat_and_build_identity_window() {
+        for (index, (tail, heartbeats, builds, accepted)) in [
+            ("READY v1\nBUILD v1 abc123\nHEARTBEAT\n", 1, 1, false),
+            ("READY v1\nHEARTBEAT\nHEARTBEAT\nHEARTBEAT\n", 3, 0, false),
+            (
+                "READY v1\nHEARTBEAT\nBUILD v1 abc123\nHEARTBEAT\nHEARTBEAT\n",
+                3,
+                1,
+                true,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = tempdir().unwrap();
+            let text =
+                format!("READY v1\nBUILD v1 abc123\nHEARTBEAT\nHEARTBEAT\nHEARTBEAT\n{tail}");
+            let execution = run_runtime_acceptance(
+                ReplayBackend::new(fixture()),
+                &driver(&text),
+                &options(directory.path().join("runtime.json")),
+            )
+            .unwrap();
+            assert!(execution.report.complete, "case {index}");
+            assert_eq!(execution.report.accepted, accepted, "case {index}");
+            assert_eq!(
+                execution.report.assertions.ready.observed, 2,
+                "case {index}"
+            );
+            assert_eq!(
+                execution.report.assertions.heartbeat.observed, heartbeats,
+                "case {index}"
+            );
+            assert_eq!(
+                execution.report.assertions.build_identity.observed, builds,
+                "case {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_partial_ready_cannot_open_a_runtime_window() {
+        for tail in ["", "READY v1"] {
+            let directory = tempdir().unwrap();
+            let text = format!("BUILD v1 abc123\nHEARTBEAT\nHEARTBEAT\nHEARTBEAT\n{tail}");
+            let execution = run_runtime_acceptance(
+                ReplayBackend::new(fixture()),
+                &driver(&text),
+                &options(directory.path().join("runtime.json")),
+            )
+            .unwrap();
+            assert!(!execution.report.accepted);
+            assert_eq!(execution.report.assertions.ready.observed, 0);
+            assert_eq!(execution.report.assertions.heartbeat.observed, 0);
+            assert_eq!(execution.report.assertions.build_identity.observed, 0);
+            assert_eq!(
+                execution
+                    .report
+                    .assertions
+                    .readiness_window
+                    .ready_line_index,
+                None
+            );
+            assert_eq!(
+                execution
+                    .report
+                    .assertions
+                    .readiness_window
+                    .heartbeat_excluded,
+                3
+            );
+            assert_eq!(
+                execution.report.assertions.partial_tail_present,
+                !tail.is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn optional_build_identity_still_requires_post_ready_heartbeats() {
+        let directory = tempdir().unwrap();
+        let mut options = options(directory.path().join("runtime.json"));
+        options.build_id_line = None;
+        let execution = run_runtime_acceptance(
+            ReplayBackend::new(fixture()),
+            &driver("HEARTBEAT\nREADY v1\nHEARTBEAT\nHEARTBEAT\nHEARTBEAT\nHEARTBEAT"),
+            &options,
+        )
+        .unwrap();
+        assert!(execution.report.accepted);
+        assert_eq!(execution.report.assertions.heartbeat.observed, 3);
+        assert!(execution.report.assertions.partial_tail_present);
+        assert!(!execution.report.assertions.build_identity.required);
+    }
+
+    #[test]
+    fn forbidden_line_before_ready_still_fails_runtime_acceptance() {
+        let directory = tempdir().unwrap();
+        let execution = run_runtime_acceptance(
+            ReplayBackend::new(fixture()),
+            &driver("FAULT\nREADY v1\nBUILD v1 abc123\nHEARTBEAT\nHEARTBEAT\nHEARTBEAT\n"),
+            &options(directory.path().join("runtime.json")),
+        )
+        .unwrap();
+        assert!(!execution.report.accepted);
+        assert_eq!(execution.report.assertions.forbidden_lines[0].observed, 1);
+        assert_eq!(execution.report.assertions.heartbeat.observed, 3);
+    }
+
+    #[test]
+    fn saved_dk_serial_bytes_exclude_startup_heartbeats_in_native_acceptance() {
+        for (raw, expected_sha256, build) in [
+            (
+                &include_bytes!("../tests/fixtures/runtime/nrf52840-dk-A.raw.bin")[..],
+                "c041e8b6598e77becf2ba08451b850679913a9d9410816ab3dfa58a685a51e5c",
+                "A 56f0594920f250721a63ee84b5082f9632d68b85b26c9f2ec05cec7b9863972d",
+            ),
+            (
+                &include_bytes!("../tests/fixtures/runtime/nrf52840-dk-B.raw.bin")[..],
+                "2270bc8650d98f09999c7a75d88119c38208ae6cca069dc7e9b5065d812dcd64",
+                "B 2391b03d1cca4cbc9b35727ba3f057889aa26d7c176730fbdd40749c0088d603",
+            ),
+        ] {
+            assert_eq!(hex::encode(Sha256::digest(raw)), expected_sha256);
+            assert_eq!(raw.len(), 956);
+            let directory = tempdir().unwrap();
+            let mut options = options(directory.path().join("runtime.json"));
+            options.ready_line = "HIL_NRF52840_DK_READY v1".to_string();
+            options.heartbeat_line = "HIL_NRF52840_DK_HEARTBEAT".to_string();
+            options.build_id_line = Some(format!("HIL_NRF52840_DK_BUILD v1 {build}"));
+            let execution = run_runtime_acceptance(
+                ReplayBackend::new(fixture()),
+                &driver(std::str::from_utf8(raw).unwrap()),
+                &options,
+            )
+            .unwrap();
+            assert!(execution.report.accepted);
+            assert!(execution.report.complete);
+            let assertions = &execution.report.assertions;
+            assert_eq!(assertions.ready.observed, 1);
+            assert_eq!(assertions.build_identity.observed, 1);
+            assert_eq!(assertions.heartbeat.observed, 29);
+            assert_eq!(assertions.complete_line_count, 33);
+            assert!(!assertions.partial_tail_present);
+            assert_eq!(
+                assertions.readiness_window,
+                RuntimeReadinessWindow {
+                    policy: "after_last_complete_ready",
+                    ready_line_index: Some(2),
+                    complete_line_count: 30,
+                    heartbeat_total: 31,
+                    heartbeat_excluded: 2,
+                    build_identity_total: 1,
+                    build_identity_excluded: 0,
+                }
+            );
+            let saved: Value =
+                serde_json::from_slice(&fs::read(&options.evidence).unwrap()).unwrap();
+            assert_eq!(saved["assertions"]["heartbeat"]["observed"], 29);
+            assert_eq!(
+                saved["assertions"]["readiness_window"]["heartbeat_excluded"],
+                2
+            );
+        }
+    }
+
+    #[test]
     fn replay_and_fake_serial_complete_joint_runtime_acceptance() {
         let directory = tempdir().unwrap();
         let evidence = directory.path().join("runtime.evidence.json");
@@ -2157,6 +2415,9 @@ mod tests {
             ),
             ("/serial/forbidden_complete_lines", json!(["HEARTBEAT"])),
             ("/serial/ready_line", json!("READY\nINJECTED")),
+            ("/serial/ready_line", json!("HEARTBEAT")),
+            ("/serial/build_id_line", json!("READY v1")),
+            ("/serial/build_id_line", json!("HEARTBEAT")),
             ("/cleanup/close_serial_session", json!(false)),
         ] {
             let mut changed = original.clone();
