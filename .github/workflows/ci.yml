@@ -71,11 +71,14 @@ jobs:
           $cargoAbout = Join-Path $toolDir 'cargo-about-0.9.2-x86_64-pc-windows-msvc/cargo-about.exe'
           cargo fetch --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/package_binary.py build --offline --cargo-about $cargoAbout --output-dir target/binary-dist --json
+          # Cargo target caches can contain old smoke evidence; reserve fresh outputs outside them.
+          $candidateOutput = Join-Path $env:RUNNER_TEMP ("embedded-debugger-ci-" + [guid]::NewGuid().ToString('N'))
+          "candidate_output=$candidateOutput" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          python scripts/package_binary.py build --offline --cargo-about $cargoAbout --output-dir $candidateOutput --json
       - name: Verify and smoke test extracted candidate
         shell: pwsh
         run: |
-          $archives = @(Get-ChildItem -LiteralPath target/binary-dist -Filter '*.zip')
+          $archives = @(Get-ChildItem -LiteralPath $env:candidate_output -Filter '*.zip')
           if ($archives.Count -ne 1) { throw 'Expected one CLI archive' }
           $archive = $archives[0].FullName
           python scripts/package_binary.py verify $archive --checksum "$archive.sha256" --json
@@ -91,11 +94,11 @@ jobs:
           $candidateRoot = $executables[0].DirectoryName
           $manifest = Get-Content -Raw -LiteralPath (Join-Path $candidateRoot 'release-manifest.json') | ConvertFrom-Json
           $binaryHash = ($manifest.files | Where-Object path -eq 'embedded-debugger.exe').sha256
-          powershell -NoProfile -File (Join-Path $candidateRoot 'Test-WindowsCandidate.ps1') -Executable $executables[0].FullName -ExpectedSha256 $binaryHash -ExpectedVersion $manifest.version -ReportPath target/binary-dist/windows-host-smoke.json -EnvironmentLabel 'GitHub Windows runner (not a clean machine)'
+          powershell -NoProfile -File (Join-Path $candidateRoot 'Test-WindowsCandidate.ps1') -Executable $executables[0].FullName -ExpectedSha256 $binaryHash -ExpectedVersion $manifest.version -ReportPath (Join-Path $env:candidate_output 'windows-host-smoke.json') -EnvironmentLabel 'GitHub Windows runner (not a clean machine)'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/test_rtt_candidate.py --executable $executables[0].FullName --sha256 $binaryHash --fixture examples/replay/stm32g4.json --output-dir target/binary-dist/rtt-offline-smoke
+          python scripts/test_rtt_candidate.py --executable $executables[0].FullName --sha256 $binaryHash --fixture examples/replay/stm32g4.json --output-dir (Join-Path $env:candidate_output 'rtt-offline-smoke')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: embedded-debugger-windows-x64-candidate
-          path: target/binary-dist/*
+          path: ${{ env.candidate_output }}/*
