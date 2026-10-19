@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.2.5 - 2026-10-19
+
 ### Fixed
 
 - Runtime acceptance counts BUILD identity and heartbeats only after the last

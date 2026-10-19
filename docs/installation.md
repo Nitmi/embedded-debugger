@@ -58,7 +58,7 @@ embedded-debugger runtime --help
 cargo install --list
 ```
 
-For the `0.2.4` candidate, the version must be `embedded-debugger 0.2.4`, runtime
+For version `0.2.5`, the version must be `embedded-debugger 0.2.5`, runtime
 help must include `init` and `inspect`, `flash session --help` must include
 `plan`, `inspect`, and `serve`, and `flash session serve --help` must include
 `--transcript-dir`. `rtt --help` must include `plan` and `capture`; RTT planning

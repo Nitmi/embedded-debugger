@@ -28,14 +28,14 @@ for host verification, existing installations, and rollback considerations.
 
 ## Backend milestones
 
-The local 0.2.5 CLI candidate fixes Windows runtime monitor shutdown. Monitor
+The 0.2.5 CLI fixes Windows runtime monitor shutdown. Monitor
 children start suspended, enter a kill-on-close Job, and resume after assignment;
 completion checks both root exit and the Job's active process count. Repeated
 waits do not depend on an exit notification already consumed by polling, and
-termination waits have a deadline. This change is qualified with host-only
-Replay and a fake baud executable; it is not a new physical-board acceptance or
-a published release. OpenOCD process wrappers and Unix monitor behavior are
-outside this repair. Runtime acceptance also counts BUILD and heartbeats only
+termination waits have a deadline. That process-lifecycle repair passed both
+host-only Replay/fake-baud checks and one local DK A/B managed run. OpenOCD
+process wrappers and Unix monitor behavior are outside this repair.
+Runtime acceptance also counts BUILD and heartbeats only
 after the last complete READY, and reports excluded startup/earlier-boot lines.
 The saved DK A/B receive bytes each yield 29 qualifying heartbeats, excluding
 two startup heartbeats. This predicate check uses Replay and saved bytes;
